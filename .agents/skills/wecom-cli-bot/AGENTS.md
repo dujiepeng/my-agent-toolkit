@@ -1,62 +1,56 @@
-# WeCom CLI Bot Skill
+# 企业微信 CLI 机器人技能
 
-This directory contains the project-local `wecom-cli-bot` skill. It is the only maintained copy of the skill in this repository.
+本目录包含 `wecom-cli-bot` 技能，是仓库中该技能的唯一维护副本。
 
-## Purpose
+## 用途
 
-Use this skill to create or extend `./wecom-cli-bots`, a Docker-first Enterprise WeChat/WeCom intelligent bot bridge. The generated project connects WeCom smart bot long-connection messages to local AI CLI tools such as Codex CLI, Claude Code, Kimi Code, Kiro CLI, or a custom CLI.
+创建或扩展 Docker 优先的企业微信智能机器人桥接项目。生成的项目将企业微信长连接消息桥接到本地 AI CLI 工具（Codex CLI、Claude Code、Kimi Code、Kiro CLI 或自定义 CLI）。
 
-The skill guides the agent through a productized bot creation wizard. It should not hand off normal bot creation to broad brainstorming or design-document workflows.
+## 生成内容
 
-## What This Skill Generates
-
-The bundled template creates a Node.js + TypeScript worker using `@wecom/aibot-node-sdk`. Each bot runs as a separate process and owns its own workspace:
+模板生成 Node.js + TypeScript 工作进程，使用 `@wecom/aibot-node-sdk`。每个 Bot 作为独立进程运行，拥有独立工作空间：
 
 ```text
 bots/<bot-name>/workspace/
-  private/       # worker-only: .env, config, soul, history, logs
-  cli-home/      # CLI-specific home/config/cache
-  instructions/  # secret-free CLI instructions
-  files/         # CLI working directory
+  private/       # 私有：.env、配置、soul、历史、日志
+  cli-home/      # CLI 专用主目录/配置/缓存
+  instructions/  # 无密钥的 CLI 指令
+  files/         # CLI 工作目录
 ```
 
-The generated runtime supports:
+运行时支持：
 
-- WeCom long connection and streamed replies.
-- One active task per bot/user.
-- `停止` cancellation.
-- 3-hour idle session TTL.
-- JSONL history per user/session.
-- Secret redaction before WeCom replies.
-- Docker Compose persistence with one service per bot.
+- 企业微信长连接和流式回复
+- 每个 Bot/用户一个活跃任务
+- `/stop` 取消任务
+- 3 小时空闲会话过期
+- 斜杠指令：`/history` `/new` `/open N` `/name`
+- 用户隔离的会话管理
+- JSONL 历史记录
+- 密钥脱敏和 ANSI 清理
+- Docker Compose 持久化部署
 
-## Maintenance Rules
+## 维护规则
 
-- Modify only this project-local skill path: `.agents/skills/wecom-cli-bot`.
-- Do not recreate or maintain an outer `wecom-cli-bot/` copy at the repository root.
-- Keep `SKILL.md` concise enough to guide the workflow; put details in `references/`.
-- Keep runtime scaffold files under `assets/wecom-cli-bots-template/`.
-- Do not put real WeCom Bot IDs, secrets, API keys, or user credentials anywhere in the skill.
-- Keep `.env.example` placeholder-only.
-- Prefer Docker-mode verification. Do not install Codex, Claude Code, Kimi Code, or Kiro CLI globally on the host unless the user explicitly asks.
-- For Docker-mode creation, run Docker preflight before writing `./wecom-cli-bots`.
-- If a bot or project already exists, reconcile missing pieces instead of overwriting user files.
+- 仅修改 `.agents/skills/wecom-cli-bot` 路径下的内容。
+- `SKILL.md` 保持简洁，详细内容放在 `references/`。
+- 模板文件放在 `assets/wecom-cli-bots-template/`。
+- 不存储真实凭证，`.env.example` 仅保留占位符。
+- 优先 Docker 模式验证。
 
-## Important Defaults
+## 默认配置
 
-- Default project path: `./wecom-cli-bots`.
-- Default Kimi Code install command: `curl -fsSL https://code.kimi.com/kimi-code/install.sh | bash`.
-- Default Kimi command: `kimi`.
-- Default stop keyword: `停止`.
-- Default session idle TTL: 3 hours.
-- Default deployment: Docker Compose with `restart: unless-stopped`.
+- 默认项目路径：`./wecom-cli-bots`
+- Kimi Code 安装：`curl -fsSL https://code.kimi.com/kimi-code/install.sh | bash`
+- Kiro CLI 安装：`curl -fsSL https://cli.kiro.dev/install | bash`
+- 停止指令：`/stop`
+- 会话空闲过期：3 小时
+- 部署方式：Docker Compose + `restart: unless-stopped`
 
-## Validation
+## 验证
 
-After editing the skill, run:
+修改技能后执行：
 
 ```bash
 python3 /Users/dujiepeng/.codex/skills/.system/skill-creator/scripts/quick_validate.py /Users/dujiepeng/Project/AI/my-agent-toolkit/.agents/skills/wecom-cli-bot
 ```
-
-For template validation, copy `assets/wecom-cli-bots-template/` to a temporary directory and build through Docker with provider CLI install args cleared unless testing a real provider image.
