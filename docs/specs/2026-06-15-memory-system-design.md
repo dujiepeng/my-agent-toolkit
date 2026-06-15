@@ -219,26 +219,80 @@ POST /api/v1/memories/scan
 - 归档 tier=reference 且 90 天未被检索命中的记忆（标记为 archived，不参与检索，不删除数据）
 - 清理无关联的 assets 文件
 
-## 5. Bot Memory Skill
+## 5. Bot 指令体系
 
-### 5.1 定位
+### 5.1 完整指令表
+
+| 分类 | 指令 | 功能 |
+|------|------|------|
+| 帮助 | `/help` | 显示所有可用指令 |
+| 会话 | `/stop` | 终止当前任务 |
+| | `/new` | 开始新会话 |
+| | `/history` | 历史会话列表 |
+| | `/open N` | 恢复第 N 个历史会话 |
+| | `/name <名称>` | 命名当前会话 |
+| 记忆 | `/remember <文本>` | 存入 core 层记忆 |
+| | `/remember --shared <文本>` | 存入 shared 命名空间 |
+| | `/remember #tag1 #tag2 <文本>` | 带标签存入 |
+| | `/fetch <url>` | 抓取 URL 内容存入 |
+| | `/scan [目录]` | 扫描 workspace 文件增量索引 |
+| | `/memory` | 查看记忆统计 |
+| | `/forget <关键词>` | 删除匹配的记忆 |
+| | 发送文件 | 自动解析存入 core 层 |
+| 技能 | `/skill_list` | 列出已安装的 Bot skill |
+| | `/skill_add <git_url>` | 从 git 仓库安装 skill 到 `workspace/files/.agents/skills/` |
+| | `/skill_remove <name>` | 卸载指定 skill |
+
+### 5.2 /help 输出格式
+
+```
+可用指令：
+
+会话管理
+  /stop        终止当前任务
+  /new         开始新会话
+  /history     历史会话列表
+  /open N      恢复第 N 个会话
+  /name <名称>  命名当前会话
+
+记忆管理
+  /remember <文本>   存入记忆
+  /fetch <url>      抓取 URL 存入
+  /scan [目录]       扫描文件存入
+  /memory           记忆统计
+  /forget <关键词>   删除记忆
+
+技能管理
+  /skill_list              已装技能列表
+  /skill_add <git_url>    安装技能
+  /skill_remove <name>    卸载技能
+```
+
+### 5.3 Skill 管理
+
+Bot 的 skill 目录：`workspace/files/.agents/skills/`
+
+**`/skill_list`：**
+- 扫描 `workspace/files/.agents/skills/` 下的子目录
+- 每个子目录读取 `SKILL.md` 的 name 和 description
+- 格式化返回列表
+
+**`/skill_add <git_url>`：**
+- `git clone <url>` 到 `workspace/files/.agents/skills/<repo-name>/`
+- 如果已存在则 `git pull` 更新
+- 返回安装成功信息和 skill 描述
+
+**`/skill_remove <name>`：**
+- 删除 `workspace/files/.agents/skills/<name>/` 目录
+- 返回确认
+
+## 6. Bot Memory Skill
+
+### 6.1 定位
 
 轻量 skill（仅 markdown），指导 Bot 如何与 Memory Service 交互。
 
-### 5.2 用户指令
-
-| 指令 | 功能 |
-|------|------|
-| `/remember <文本>` | 存入 core 层记忆 |
-| `/remember --shared <文本>` | 存入 shared 命名空间 |
-| `/remember #tag1 #tag2 <文本>` | 带标签存入 |
-| `/fetch <url>` | 抓取 URL 内容存入 |
-| `/scan [目录]` | 扫描 workspace 文件增量索引 |
-| `/memory` | 查看记忆统计 |
-| `/forget <关键词>` | 删除匹配的记忆 |
-| 发送文件 | 自动解析存入 core 层 |
-
-### 5.3 自动行为
+### 6.2 自动行为
 
 **检索注入（每次对话）：**
 1. 用户消息到达
@@ -250,7 +304,7 @@ POST /api/v1/memories/scan
 1. Bot 判断本次对话是否产生了新知识/决策
 2. 如果是，提取摘要存入 reference 层
 
-### 5.4 Prompt 结构
+### 6.3 Prompt 结构
 
 ```
 # Soul
@@ -272,21 +326,34 @@ POST /api/v1/memories/scan
 (用户的问题)
 ```
 
-### 5.5 Bot 配置
+### 6.4 Bot 配置
 
 Bot 的 `bot.config.yaml` 中增加 memory 配置：
 
 ```yaml
 memory:
   enabled: true
-  api_url_env: MEMORY_API_URL    # 环境变量名
+  api_url_env: MEMORY_API_URL
   namespace_env: MEMORY_NAMESPACE
-  auto_retrieve: true             # 是否自动检索注入
-  auto_store: true                # 是否自动存入对话摘要
-  retrieve_limit: 5               # 检索结果数量
+  auto_retrieve: true
+  auto_store: true
+  retrieve_limit: 5
 ```
 
-## 6. 部署
+## 7. Bot 创建引导流程
+
+使用 `wecom-cli-bot` skill 创建新 Bot 时，引导以下配置步骤：
+
+1. **基本信息** — Bot 名称、角色描述（soul）
+2. **CLI Provider** — 选择 Kimi Code / Kiro CLI / Codex / Claude Code
+3. **WeCom 凭证** — Bot ID 和 Secret
+4. **命名空间** — 为 Bot 分配 memory 命名空间（新建 or 复用已有）
+5. **Memory 配置** — 是否启用记忆、自动检索、自动存入
+6. **初始 Skill** — 是否需要预装 skill（提供 git URL 列表）
+7. **环境变量** — 其他业务相关的环境变量（如 Jira 凭证）
+8. **部署** — 生成 docker-compose 配置并构建
+
+## 8. 部署
 
 ### Memory Service 容器
 
@@ -319,7 +386,7 @@ environment:
 - 同一宿主机不同 compose：使用 `http://host.docker.internal:8100`
 - 不同机器：使用 `http://<ip>:8100`
 
-## 7. 项目文件结构
+## 9. 项目文件结构
 
 ```
 my-agent-toolkit/
@@ -358,7 +425,7 @@ my-agent-toolkit/
 └── README.md
 ```
 
-## 8. 后续扩展（不在首期）
+## 10. 后续扩展（不在首期）
 
 - 权限控制：限制某些 Bot 只能读不能写 shared
 - 多模态描述：用 VLM 给图片生成描述后索引
