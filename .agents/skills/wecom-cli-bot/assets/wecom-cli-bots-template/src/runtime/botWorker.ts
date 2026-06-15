@@ -42,6 +42,7 @@ export class BotWorker {
 
     // Slash commands
     if (text === "/help") { await this.handleHelp(message); return; }
+    if (text === "/init") { await this.handleInit(message); return; }
     if (text === "/history") { await this.handleHistory(message); return; }
     if (text === "/new") { await this.handleNew(message); return; }
     if (text === "/memory") { await this.handleMemoryStats(message); return; }
@@ -138,6 +139,7 @@ export class BotWorker {
       "/skill_add <git_url> | 安装技能",
       "/skill_remove <name> | 卸载技能",
       "/help | 显示本帮助",
+      "/init | 重新初始化机器人配置",
     );
     await this.wecom.sendText(message.conversationId, rows.join("\n"));
   }
@@ -224,6 +226,26 @@ export class BotWorker {
     await this.wecom.sendText(message.conversationId, `已删除 ${count} 条记忆。`);
   }
 
+  // --- Init ---
+  private async handleInit(message: IncomingWeComMessage): Promise<void> {
+    const soulPath = path.join(this.runtime.privateDir, "soul.md");
+    const bootstrapPath = path.join(this.runtime.rootDir, "bootstrap-soul.md");
+    let bootstrap: string;
+    if (fs.existsSync(bootstrapPath)) {
+      bootstrap = fs.readFileSync(bootstrapPath, "utf8");
+    } else {
+      bootstrap = BOOTSTRAP_SOUL;
+    }
+    fs.writeFileSync(soulPath, bootstrap);
+    // Clear instructions
+    const agentsPath = path.join(this.runtime.instructionsDir, "AGENTS.md");
+    if (fs.existsSync(agentsPath)) fs.unlinkSync(agentsPath);
+    // Reset session
+    this.cli.clearUserSession(message.userId);
+    this.sessions.expire(message.userId);
+    await this.wecom.sendText(message.conversationId, "已进入初始化模式，请开始配置你的机器人。");
+  }
+
   // --- Soul commands ---
   private async handleGetSoul(message: IncomingWeComMessage): Promise<void> {
     const soulPath = path.join(this.runtime.privateDir, "soul.md");
@@ -299,3 +321,35 @@ function extractTags(text: string): string[] {
   const matches = text.match(/#(\S+)/g);
   return matches ? matches.map(t => t.slice(1)) : [];
 }
+
+const BOOTSTRAP_SOUL = `# [BOOTSTRAP]
+
+你是一个 Bot 初始化引导助手。当前机器人尚未配置，你的任务是通过一问一答的方式帮助用户完成初始化。
+
+## 引导规则
+
+- 每次只问一个问题，等待用户回答后再问下一个。
+- 问题要具体，可以给出选项或示例降低回答门槛。
+
+## 引导步骤
+
+1. 角色定位 — "你希望这个机器人扮演什么角色？"
+2. 核心职责 — "它主要负责哪些具体事情？"
+3. 输出风格 — "回复风格偏正式还是随意？默认中文还是英文？"
+4. 文档管理 — "是否需要管理文档？文档类型是什么？"
+5. 版本追踪 — "文档需要版本追踪吗？"
+6. 记忆需求 — "需要长期记忆吗？记住哪类信息？"
+7. 特殊要求 — "还有其他规则或约束吗？"
+8. 确认 — 汇总配置让用户确认。
+
+## 确认后操作
+
+1. 将正式 soul 写入 private/soul.md（不包含 [BOOTSTRAP] 标记）。
+2. 生成 workspace/instructions/AGENTS.md（工作规范）。
+3. 创建所需目录结构。
+4. 回复"✅ 初始化完成，开始工作。"
+
+## 权限
+
+Init 阶段你可以读写所有文件，包括 private/ 目录。
+`;
