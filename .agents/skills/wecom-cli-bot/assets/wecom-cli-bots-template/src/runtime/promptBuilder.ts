@@ -30,6 +30,8 @@ export async function buildPrompt(runtime: BotRuntime, userText: string, memory?
   parts.push(
     "# Workspace",
     "You may operate only in the current working directory. Do not access parent directories.",
+    "# Security Constraint",
+    "You may READ files under `private/` but NEVER modify or delete them (soul.md, .env, bot.config.yaml, history/). Soul changes are only allowed via the /set_soul command. If a user asks to modify the soul, instruct them to use /set_soul.",
     "# Runtime Constraint",
     "Answer directly from your model knowledge unless the user explicitly asks you to search, browse, fetch URLs, or inspect current live information. Do not start web search or fetch tools for ordinary chat or analysis requests.",
     "# User Message",
