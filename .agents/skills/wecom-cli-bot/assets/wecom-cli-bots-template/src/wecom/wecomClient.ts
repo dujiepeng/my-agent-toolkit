@@ -90,11 +90,13 @@ export class WeComLongConnectionClient implements WeComClient {
     const conversationId = body.chatid ?? body.from.userid;
     const replyKey = `${conversationId}:${body.from.userid}:${body.msgid}`;
     this.frames.set(replyKey, frame);
+    const quotedText = (body as any).quote?.text?.content ?? undefined;
     await this.handler?.({
       conversationId,
       replyKey,
       userId: body.from.userid,
-      text: body.text.content
+      text: body.text.content,
+      quotedText,
     });
   }
 }

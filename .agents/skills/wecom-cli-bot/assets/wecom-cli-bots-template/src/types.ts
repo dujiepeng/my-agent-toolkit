@@ -53,6 +53,7 @@ export type IncomingWeComMessage = {
   replyKey: string;
   userId: string;
   text: string;
+  quotedText?: string;
 };
 
 export type StreamHandle = {

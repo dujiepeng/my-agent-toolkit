@@ -53,8 +53,8 @@ export class BotWorker {
     const nameMatch = text.match(/^\/name\s+(.+)$/);
     if (nameMatch) { await this.handleName(message, nameMatch[1].trim()); return; }
 
-    const rememberMatch = text.match(/^\/remember\s+(--shared\s+)?(.+)$/s);
-    if (rememberMatch) { await this.handleRemember(message, !!rememberMatch[1], rememberMatch[2].trim()); return; }
+    const rememberMatch = text.match(/^\/remember(?:\s+(--shared\s+)?([\s\S]*))?$/);
+    if (rememberMatch && text.startsWith("/remember")) { await this.handleRemember(message, !!rememberMatch[1], (rememberMatch[2] ?? "").trim()); return; }
 
     const fetchMatch = text.match(/^\/fetch\s+(https?:\/\/.+)$/);
     if (fetchMatch) { await this.handleFetch(message, fetchMatch[1].trim()); return; }
@@ -183,9 +183,18 @@ export class BotWorker {
   // --- Memory commands ---
   private async handleRemember(message: IncomingWeComMessage, shared: boolean, content: string): Promise<void> {
     if (!this.memory.enabled) { await this.wecom.sendText(message.conversationId, "记忆功能未启用。"); return; }
-    const tags = extractTags(content);
-    const text = content.replace(/#\S+\s*/g, "").trim();
-    const id = shared ? await this.memory.storeShared(text, tags) : await this.memory.store(text, tags);
+    // If content is empty but has quoted text, use the quoted text
+    let text = content;
+    if (!text && message.quotedText) {
+      text = message.quotedText;
+    } else if (message.quotedText) {
+      // If both exist, combine: content as tags/context, quoted as the memory
+      text = `${content}\n\n${message.quotedText}`;
+    }
+    if (!text) { await this.wecom.sendText(message.conversationId, "请提供要记住的内容。"); return; }
+    const tags = extractTags(text);
+    const cleaned = text.replace(/#\S+\s*/g, "").trim();
+    const id = shared ? await this.memory.storeShared(cleaned, tags) : await this.memory.store(cleaned, tags);
     await this.wecom.sendText(message.conversationId, id ? `已记住${shared ? "（共享）" : ""}。` : "存入失败。");
   }
 
