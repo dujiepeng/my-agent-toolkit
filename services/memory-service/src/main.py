@@ -1,15 +1,22 @@
 from fastapi import FastAPI, HTTPException, UploadFile, File, Form
 from pydantic import BaseModel
+import asyncio
 import httpx
 from pathlib import Path
 
 from .core.embedding import embed_texts, embed_query
 from .core.chunker import chunk_text
+from .core.lifecycle import cleanup, schedule_daily_cleanup
 from .storage.store import MemoryStorage
 from .parsers.dispatch import parse_file, supported_extensions
 
 app = FastAPI(title="Memory Service", version="0.1.0")
 storage = MemoryStorage()
+
+
+@app.on_event("startup")
+async def startup():
+    asyncio.create_task(schedule_daily_cleanup(storage))
 
 
 class StoreRequest(BaseModel):
@@ -102,6 +109,11 @@ def get_stats(namespace: str | None = None):
 @app.get("/health")
 def health():
     return {"status": "ok"}
+
+
+@app.post("/api/v1/lifecycle/cleanup")
+def run_cleanup():
+    return cleanup(storage)
 
 
 @app.post("/api/v1/memories/ingest")
