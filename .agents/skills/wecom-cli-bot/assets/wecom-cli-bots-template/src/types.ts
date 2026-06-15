@@ -11,6 +11,15 @@ export type CliConfig = {
   env?: Record<string, string>;
 };
 
+export type MemoryConfig = {
+  enabled: boolean;
+  api_url_env: string;
+  namespace_env: string;
+  auto_retrieve: boolean;
+  auto_store: boolean;
+  retrieve_limit: number;
+};
+
 export type BotConfig = {
   bot: {
     name: string;
@@ -24,6 +33,7 @@ export type BotConfig = {
     secret_env: string;
   };
   cli: CliConfig;
+  memory?: MemoryConfig;
 };
 
 export type BotRuntime = {

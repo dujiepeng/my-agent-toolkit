@@ -2,7 +2,7 @@ bot:
   name: example-bot
   session_idle_ttl_seconds: 10800
   stop_keyword: "/stop"
-  thinking_message: "正在思考... /stop 终止 | /history 历史会话 | /new 新会话 | /open N 恢复"
+  thinking_message: "正在思考...\n/stop 终止\n/help 帮助"
   busy_message: "当前任务仍在运行，请发送 /stop 终止后再发送新问题。"
 
 wecom:
