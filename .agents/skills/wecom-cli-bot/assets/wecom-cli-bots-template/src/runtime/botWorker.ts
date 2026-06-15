@@ -76,7 +76,13 @@ export class BotWorker {
     const setSoulMatch = text.match(/^\/set_soul\s+([\s\S]+)$/);
     if (setSoulMatch) { await this.handleSetSoul(message, setSoulMatch[1].trim()); return; }
 
-    // Normal message flow
+    // Normal message flow - check if initialized
+    const soulPath = path.join(this.runtime.privateDir, "soul.md");
+    if (!fs.existsSync(soulPath) || fs.readFileSync(soulPath, "utf8").trim() === "") {
+      await this.wecom.sendText(message.conversationId, "机器人尚未初始化，请发送 /init 开始配置。");
+      return;
+    }
+
     if (this.cli.isRunning(message.userId)) {
       await this.wecom.sendText(message.conversationId, this.runtime.config.bot.busy_message);
       return;
