@@ -11,12 +11,20 @@ export async function buildPrompt(runtime: BotRuntime, userText: string, memory?
   let memorySection = "";
   if (memory?.enabled && runtime.config.memory?.auto_retrieve) {
     const results = await memory.search(userText, runtime.config.memory.retrieve_limit);
-    if (results.length > 0) {
-      const items = results.map((r, i) => {
+    const relevant = results.filter(r => r.score >= 0.65);
+    if (relevant.length > 0) {
+      let totalChars = 0;
+      const items: string[] = [];
+      for (const r of relevant) {
+        const snippet = r.content.slice(0, 200);
+        if (totalChars + snippet.length > 800) break;
+        totalChars += snippet.length;
         const label = [r.tags?.join(", "), r.filename, r.title].filter(Boolean).join(" | ");
-        return `${i + 1}. [${label || "记忆"}] (${r.created_at?.slice(0, 10) ?? ""})\n   ${r.content.slice(0, 300)}`;
-      });
-      memorySection = `# 相关记忆\n以下是与当前问题相关的历史知识，供参考：\n\n${items.join("\n\n")}`;
+        items.push(`${items.length + 1}. [${label || "记忆"}] (${r.created_at?.slice(0, 10) ?? ""})\n   ${snippet}`);
+      }
+      if (items.length > 0) {
+        memorySection = `# 相关记忆\n以下是与当前问题相关的历史知识，供参考：\n\n${items.join("\n\n")}`;
+      }
     }
   }
 
