@@ -183,9 +183,11 @@ export class BotWorker {
             await stream.write(`正在生成文档 ${filename}...`);
           }
           
-          // Buffer content after the marker
+          // Content after the marker goes directly into doc buffer
           const afterMarker = full.slice(beginIdx + beginMatch[0].length);
-          this.chunkBuffer.set(message.userId, afterMarker);
+          const newBuf = this.docBuffer.get(message.userId)!;
+          newBuf.content = afterMarker;
+          this.chunkBuffer.set(message.userId, "");
           return;
         }
         
