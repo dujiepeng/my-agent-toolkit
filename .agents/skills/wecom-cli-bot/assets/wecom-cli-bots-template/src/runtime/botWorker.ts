@@ -206,17 +206,31 @@ export class BotWorker {
         if (result.kimiSessionId) this.sessions.setKimiSessionId(session, result.kimiSessionId);
         if (result.kiroSessionId) this.sessions.setKiroSessionId(session, result.kiroSessionId);
         this.sessions.append(session, { role: "assistant", event: "completed", content: result.rawOutput });
-        // If doc was being collected but never closed, flush it
+        // If doc was being collected but never closed, flush remaining buffer and write
         const buf = this.docBuffer.get(message.userId);
-        if (buf?.collecting && buf.content) {
-          const tmpDir = path.join(this.runtime.filesDir, "tmp");
-          fs.mkdirSync(tmpDir, { recursive: true });
-          const tmpPath = path.join(tmpDir, buf.filename);
-          fs.writeFileSync(tmpPath, buf.content);
-          this.pendingFiles.set(message.userId, [...(this.pendingFiles.get(message.userId) || []), tmpPath]);
-          await stream.replace(buf.content);
+        if (buf?.collecting) {
+          const remaining = this.chunkBuffer.get(message.userId) || "";
+          buf.content += remaining;
+          if (buf.content.trim()) {
+            const isConfig = buf.filename.startsWith("private/") || buf.filename.startsWith("instructions/");
+            let writePath: string;
+            if (isConfig) {
+              writePath = path.join(this.runtime.workspaceDir, buf.filename);
+            } else {
+              const tmpDir = path.join(this.runtime.filesDir, "tmp");
+              fs.mkdirSync(tmpDir, { recursive: true });
+              writePath = path.join(tmpDir, path.basename(buf.filename));
+              this.pendingFiles.set(message.userId, [...(this.pendingFiles.get(message.userId) || []), writePath]);
+            }
+            fs.mkdirSync(path.dirname(writePath), { recursive: true });
+            fs.writeFileSync(writePath, buf.content.trim());
+            if (!isConfig) {
+              await stream.replace(buf.content.trim());
+            }
+          }
         }
         this.docBuffer.delete(message.userId);
+        this.chunkBuffer.delete(message.userId);
         await stream.end();
         // Check for pending files
         if (this.pendingFiles.has(message.userId) && (this.pendingFiles.get(message.userId)?.length ?? 0) > 0) {
