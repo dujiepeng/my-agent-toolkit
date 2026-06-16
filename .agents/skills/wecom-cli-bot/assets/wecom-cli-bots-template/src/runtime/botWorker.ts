@@ -118,7 +118,7 @@ export class BotWorker {
         this.sessions.append(session, { role: "assistant", event: "chunk", content: chunk });
         const cleaned = redact(chunk, this.runtime.secrets);
         // Detect document block start
-        const docStart = cleaned.match(/~{1,3}document:(.+\.md)\s*\n/);
+        const docStart = cleaned.match(/<!--\s*BEGIN_DOC:\s*(.+\.md)\s*-->\s*\n/);
         if (docStart) {
           this.docBuffer.set(message.userId, { filename: docStart[1], content: "", collecting: true });
           const isConfig = docStart[1].startsWith("private/") || docStart[1].startsWith("instructions/");
@@ -126,7 +126,7 @@ export class BotWorker {
             await stream.write(`正在生成文档 ${docStart[1]}...`);
           }
           // Buffer the part after the marker
-          const afterMarker = cleaned.split(/~{1,3}document:.+\.md\s*\n/)[1] || "";
+          const afterMarker = cleaned.split(/<!--\s*BEGIN_DOC:\s*.+\.md\s*-->\s*\n/)[1] || "";
           if (afterMarker) {
             const buf = this.docBuffer.get(message.userId)!;
             buf.content += afterMarker;
@@ -136,7 +136,7 @@ export class BotWorker {
         const buf = this.docBuffer.get(message.userId);
         if (buf?.collecting) {
           // Check for closing marker
-          const closeMatch = cleaned.match(/\n~{1,3}\s*(?:\n|$)/);
+          const closeMatch = cleaned.match(/\n<!--\s*END_DOC\s*-->\s*(?:\n|$)/);
           if (closeMatch) {
             const closeIdx = closeMatch.index!;
             buf.content += cleaned.slice(0, closeIdx);
@@ -500,18 +500,24 @@ const BOOTSTRAP_SOUL = `# [BOOTSTRAP]
    - 如果用户提供了业务背景，写在 soul 开头作为"业务背景"段。
    - 将交互模式写入 soul（逐句引导 or 批量引导）。
    - 如果用户选择了"提供选项"，在交互规则中注明：澄清时提供若干选项供选择，用户也可直接输入自己的答案。
-~~~document:private/soul.md
+
+<!-- BEGIN_DOC: private/soul.md -->
 (生成的正式 soul 内容)
-~~~
+<!-- END_DOC -->
 
 2. 输出工作规范：
-~~~document:instructions/AGENTS.md
+
+<!-- BEGIN_DOC: instructions/AGENTS.md -->
 (生成的 AGENTS 内容)
-~~~
+<!-- END_DOC -->
 
 3. 最后回复："✅ 初始化完成，开始工作。"
 
 ## 权限
 
-CRITICAL: 绝对不要使用 write 工具或 shell 工具创建/修改文件。所有配置内容必须通过 ~~~document:filename.md~~~ 格式在回复中输出。框架会自动处理文件写入。如果你使用了文件工具，初始化将失败。
+CRITICAL: 绝对不要使用 write 工具或 shell 工具创建/修改文件。所有配置内容必须通过以下格式在回复中输出：
+<!-- BEGIN_DOC: filename.md -->
+(内容)
+<!-- END_DOC -->
+框架会自动处理文件写入。如果你使用了文件工具，初始化将失败。
 `;
