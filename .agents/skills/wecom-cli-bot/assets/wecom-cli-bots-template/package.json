@@ -9,7 +9,8 @@
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "node --test --import tsx \"src/**/*.test.ts\" \"scripts/**/*.test.ts\"",
-    "bot:start": "tsx src/main.ts --bot"
+    "bot:start": "tsx src/main.ts --bot",
+    "admin:claim": "tsx scripts/admin-claim.ts"
   },
   "dependencies": {
     "@wecom/aibot-node-sdk": "^1.0.7",
