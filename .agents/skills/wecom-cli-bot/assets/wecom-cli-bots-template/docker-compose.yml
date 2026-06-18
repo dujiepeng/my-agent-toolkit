@@ -1,23 +1,17 @@
 services:
   example-bot:
-    build: .
+    build:
+      context: .
+      args:
+        INSTALL_KIRO_CLI: "curl -fsSL https://cli.kiro.dev/install | bash"
     command: ["--bot", "example-bot"]
     restart: unless-stopped
+    volumes:
+      # Set KIRO_HOST_AUTH_DIR to a host directory containing Kiro auth/config copied from the authenticated operator device.
+      # Example only: never commit real credential paths or files.
+      - "${KIRO_HOST_AUTH_DIR:-./.docker/placeholders/kiro-auth}:/host/kiro-auth:ro"
+      # Shared docs placeholder for future cross-bot reference material.
+      - "shared-docs:/shared/docs"
 
-  # Example: Kimi Code bot
-  # kimi-bot:
-  #   build:
-  #     context: .
-  #     args:
-  #       INSTALL_KIMI_CODE: "curl -fsSL https://code.kimi.com/kimi-code/install.sh | bash"
-  #   command: ["--bot", "kimi-bot"]
-  #   restart: unless-stopped
-
-  # Example: Kiro CLI bot
-  # kiro-bot:
-  #   build:
-  #     context: .
-  #     args:
-  #       INSTALL_KIRO_CLI: "curl -fsSL https://cli.kiro.dev/install | bash"
-  #   command: ["--bot", "kiro-bot"]
-  #   restart: unless-stopped
+volumes:
+  shared-docs:

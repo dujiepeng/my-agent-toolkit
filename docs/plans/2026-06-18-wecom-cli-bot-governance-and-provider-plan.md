@@ -16,8 +16,8 @@
 - Create `.agents/skills/wecom-cli-bot/assets/wecom-cli-bots-template/src/admin/adminStore.test.ts`: focused unit tests for claim, reset, initialization, and transfer state.
 - Create `.agents/skills/wecom-cli-bot/assets/wecom-cli-bots-template/scripts/admin-claim.ts`: deployment-side CLI for claim-code generation and reset.
 - Create `.agents/skills/wecom-cli-bot/assets/wecom-cli-bots-template/scripts/admin-claim.test.ts`: CLI behavior tests using temporary bot workspaces.
-- Modify `.agents/skills/wecom-cli-bot/assets/wecom-cli-bots-template/package.json`: add `test` and `admin:claim` scripts.
-- Modify `.agents/skills/wecom-cli-bot/assets/wecom-cli-bots-template/tsconfig.json`: include scripts and tests or add a no-emit test command that does not require compiling tests into `dist`.
+- Modify `.agents/skills/wecom-cli-bot/assets/wecom-cli-bots-template/package.json`: add `test` script in Task 1; add `admin:claim` script in Task 3 after the CLI exists.
+- Verify `.agents/skills/wecom-cli-bot/assets/wecom-cli-bots-template/tsconfig.json`: keep production `rootDir` and `include` unchanged so tests do not enter the runtime build.
 - Modify `.agents/skills/wecom-cli-bot/assets/wecom-cli-bots-template/src/types.ts`: remove Kimi session type fields, keep provider string extensible, add optional shared document config.
 - Modify `.agents/skills/wecom-cli-bot/assets/wecom-cli-bots-template/src/history/sessionStore.ts`: remove Kimi-specific session state.
 - Modify `.agents/skills/wecom-cli-bot/assets/wecom-cli-bots-template/src/cli-adapters/cliRunner.ts`: preserve provider boundary but validate only `kiro-cli`; remove Kimi parsing/resume behavior.
@@ -35,7 +35,7 @@
 
 **Files:**
 - Modify: `.agents/skills/wecom-cli-bot/assets/wecom-cli-bots-template/package.json`
-- Modify: `.agents/skills/wecom-cli-bot/assets/wecom-cli-bots-template/tsconfig.json`
+- Verify unchanged: `.agents/skills/wecom-cli-bot/assets/wecom-cli-bots-template/tsconfig.json`
 
 - [ ] **Step 1: Add a failing test script expectation**
 
@@ -60,7 +60,6 @@ Patch `package.json` scripts to include:
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "node --test --import tsx \"src/**/*.test.ts\" \"scripts/**/*.test.ts\"",
-    "admin:claim": "tsx scripts/admin-claim.ts",
     "bot:start": "tsx src/main.ts --bot"
   }
 }
@@ -95,7 +94,7 @@ test("test harness runs", () => {
 - [ ] **Step 5: Commit**
 
 ```bash
-git add .agents/skills/wecom-cli-bot/assets/wecom-cli-bots-template/package.json .agents/skills/wecom-cli-bot/assets/wecom-cli-bots-template/tsconfig.json .agents/skills/wecom-cli-bot/assets/wecom-cli-bots-template/src/smoke.test.ts
+git add .agents/skills/wecom-cli-bot/assets/wecom-cli-bots-template/package.json .agents/skills/wecom-cli-bot/assets/wecom-cli-bots-template/src/smoke.test.ts
 git commit -m "test: add wecom bot template test harness"
 ```
 
@@ -511,7 +510,19 @@ npm test -- scripts/admin-claim.test.ts
 
 Expected: PASS.
 
-- [ ] **Step 5: Smoke test CLI**
+- [ ] **Step 5: Add npm script**
+
+Patch `package.json` scripts to include:
+
+```json
+{
+  "scripts": {
+    "admin:claim": "tsx scripts/admin-claim.ts"
+  }
+}
+```
+
+- [ ] **Step 6: Smoke test CLI**
 
 Run:
 
@@ -522,7 +533,7 @@ npm run admin:claim -- --bot example-bot
 
 Expected: prints `/claim_admin <code>` and writes `bots/example-bot/workspace/private/admin.json`. Do not commit the generated `admin.json`; it is private runtime state.
 
-- [ ] **Step 6: Commit**
+- [ ] **Step 7: Commit**
 
 ```bash
 git add .agents/skills/wecom-cli-bot/assets/wecom-cli-bots-template/scripts/admin-claim.ts .agents/skills/wecom-cli-bot/assets/wecom-cli-bots-template/scripts/admin-claim.test.ts .agents/skills/wecom-cli-bot/assets/wecom-cli-bots-template/package.json

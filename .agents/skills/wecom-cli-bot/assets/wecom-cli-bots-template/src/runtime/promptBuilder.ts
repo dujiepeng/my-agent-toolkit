@@ -45,6 +45,7 @@ export async function buildPrompt(runtime: BotRuntime, userText: string, memory?
     parts.push(
       "# Security Constraint",
       "You may READ files under `private/` but NEVER modify or delete them (soul.md, .env, bot.config.yaml, history/). Soul changes are only allowed via the /set_soul command. If a user asks to modify the soul, instruct them to use /set_soul.",
+      "Do not inspect, print, scan, summarize, copy, or modify CLI authentication paths such as `/run/cli-auth`, host-mounted provider auth directories, `.kiro`, or `admin.json`. These files are runtime credentials or governance state and are not user content.",
     );
   }
   parts.push(
