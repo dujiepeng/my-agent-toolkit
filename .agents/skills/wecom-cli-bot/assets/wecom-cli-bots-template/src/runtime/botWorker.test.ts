@@ -173,6 +173,35 @@ test("initializing bot blocks non-admin messages but lets admin continue normal 
   assert.equal(cliRuns[0].userId, "admin-user");
 });
 
+test("initializing bot includes recent wizard context for numeric replies", async () => {
+  const { worker, runtime, cliRuns } = createWorker();
+  const admin = new AdminStore(runtime.privateDir);
+  admin.writeClaim("CLAIM-CODE", new Date("2030-01-01T00:00:00.000Z"));
+  admin.verifyClaim("admin-user", "CLAIM-CODE", new Date("2026-01-01T00:00:00.000Z"));
+  fs.writeFileSync(path.join(runtime.privateDir, "soul.md"), "# [BOOTSTRAP]\n");
+
+  await handle(worker, message("环信，即时通讯 IM 服务商", "admin-user"));
+  const sessionPath = path.join(runtime.privateDir, "history", "admin-user");
+  const historyFile = fs.readdirSync(sessionPath).map((name) => path.join(sessionPath, name))[0];
+  fs.appendFileSync(
+    historyFile,
+    `${JSON.stringify({
+      timestamp: "2026-01-01T00:00:00.000Z",
+      role: "assistant",
+      event: "completed",
+      content: "你希望这个机器人扮演什么角色？ 1. 产品经理 2. QA测试"
+    })}\n`
+  );
+
+  await handle(worker, message("1", "admin-user"));
+
+  assert.equal(cliRuns.length, 2);
+  assert.match(cliRuns[1].prompt, /# Recent Conversation/);
+  assert.match(cliRuns[1].prompt, /User: 环信，即时通讯 IM 服务商/);
+  assert.match(cliRuns[1].prompt, /Assistant: 你希望这个机器人扮演什么角色/);
+  assert.match(cliRuns[1].prompt, /# User Message\s+1/);
+});
+
 test("initializing bot gates non-admin stop before calling cli stop", async () => {
   const { worker, runtime, wecom, getStopCalls } = createWorker();
   const admin = new AdminStore(runtime.privateDir);

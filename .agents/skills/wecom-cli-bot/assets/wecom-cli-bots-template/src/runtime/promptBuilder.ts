@@ -4,7 +4,17 @@ import type { BotRuntime } from "../types.js";
 import { assertInside } from "../security/pathFence.js";
 import type { MemoryClient } from "../memory/memoryClient.js";
 
-export async function buildPrompt(runtime: BotRuntime, userText: string, memory?: MemoryClient): Promise<string> {
+export type RecentConversationEntry = {
+  role: "user" | "assistant";
+  content: string;
+};
+
+export async function buildPrompt(
+  runtime: BotRuntime,
+  userText: string,
+  memory?: MemoryClient,
+  recentConversation: RecentConversationEntry[] = []
+): Promise<string> {
   const soul = readSafe(runtime, path.join(runtime.privateDir, "soul.md"));
   const agents = readSafe(runtime, path.join(runtime.instructionsDir, "AGENTS.md"));
 
@@ -37,6 +47,16 @@ export async function buildPrompt(runtime: BotRuntime, userText: string, memory?
   if (memorySection) parts.push(memorySection);
 
   const isBootstrap = soul.includes("[BOOTSTRAP]");
+  if (recentConversation.length > 0) {
+    const lines = recentConversation
+      .map((entry) => `${entry.role === "user" ? "User" : "Assistant"}: ${entry.content}`)
+      .join("\n\n");
+    parts.push(
+      "# Recent Conversation",
+      "Use this local conversation history to interpret short replies, numeric choices, and initialization progress. Do not restart the wizard if the latest user message answers the previous assistant question.",
+      lines
+    );
+  }
   parts.push(
     "# Workspace",
     "You may operate only in the current working directory. Do not access parent directories.",

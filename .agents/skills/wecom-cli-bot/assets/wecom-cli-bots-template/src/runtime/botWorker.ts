@@ -4,7 +4,7 @@ import { execFileSync } from "node:child_process";
 import type { BotRuntime, IncomingWeComMessage, WeComClient, StreamHandle } from "../types.js";
 import { CliRunner } from "../cli-adapters/cliRunner.js";
 import { SessionStore } from "../history/sessionStore.js";
-import { buildPrompt } from "./promptBuilder.js";
+import { buildPrompt, type RecentConversationEntry } from "./promptBuilder.js";
 import { redact } from "../security/redact.js";
 import { MemoryClient } from "../memory/memoryClient.js";
 import { AdminStore } from "../admin/adminStore.js";
@@ -168,10 +168,10 @@ export class BotWorker {
     const session = this.sessions.getOrCreate(message.userId);
     this.sessions.append(session, { role: "user", event: "message", content: text });
 
-    const prompt = await buildPrompt(this.runtime, text, this.memory);
     const soulContent = fs.existsSync(path.join(this.runtime.privateDir, "soul.md"))
       ? fs.readFileSync(path.join(this.runtime.privateDir, "soul.md"), "utf8") : "";
     const isBootstrap = soulContent.includes("[BOOTSTRAP]");
+    const prompt = await buildPrompt(this.runtime, text, this.memory, this.recentConversation(session.path, isBootstrap ? 12 : 8));
     const stream = await this.wecom.startStream(message.replyKey);
     this.activeStreams.set(message.userId, stream);
 
@@ -209,6 +209,26 @@ export class BotWorker {
         await stream.end("任务执行失败，请查看私有日志。");
       }
     }, { resumeSessionId: session.kiroSessionId, userMessage: text, useWorkspaceCwd: isBootstrap });
+  }
+
+  private recentConversation(historyPath: string, limit: number): RecentConversationEntry[] {
+    if (!fs.existsSync(historyPath)) return [];
+    const entries: RecentConversationEntry[] = [];
+    const lines = fs.readFileSync(historyPath, "utf8").trim().split(/\r?\n/).filter(Boolean);
+    for (const line of lines) {
+      try {
+        const item = JSON.parse(line) as { role?: string; event?: string; content?: string };
+        if (typeof item.content !== "string" || item.content.trim() === "") continue;
+        if (item.role === "user" && item.event === "message") {
+          entries.push({ role: "user", content: compactHistoryText(item.content) });
+        } else if (item.role === "assistant" && item.event === "completed") {
+          entries.push({ role: "assistant", content: compactHistoryText(stripAnsiNoise(item.content)) });
+        }
+      } catch {
+        continue;
+      }
+    }
+    return entries.slice(-limit);
   }
 
   // --- Help ---
@@ -519,17 +539,20 @@ export class BotWorker {
 
     // Trigger first guided question
     const session = this.sessions.getOrCreate(message.userId);
-    const prompt = await buildPrompt(this.runtime, "开始初始化", this.memory);
+    this.sessions.append(session, { role: "user", event: "message", content: "开始初始化" });
+    const prompt = await buildPrompt(this.runtime, "开始初始化", this.memory, this.recentConversation(session.path, 4));
     const stream = await this.wecom.startStream(message.replyKey);
     this.activeStreams.set(message.userId, stream);
 
     await this.cli.run(message.userId, prompt, {
       onChunk: async (chunk) => {
+        this.sessions.append(session, { role: "assistant", event: "chunk", content: chunk });
         await stream.write(redact(chunk, this.runtime.secrets));
       },
       onDone: async (result) => {
         this.activeStreams.delete(message.userId);
         if (result.kiroSessionId) this.sessions.setKiroSessionId(session, result.kiroSessionId);
+        this.sessions.append(session, { role: "assistant", event: "completed", content: result.rawOutput });
         await stream.end(redact(result.intermediateOutput || result.rawOutput, this.runtime.secrets));
       },
       onError: async (error) => {
@@ -695,6 +718,21 @@ function partialMarkerPrefixLength(text: string, marker: string): number {
     if (marker.startsWith(text.slice(-length))) return length;
   }
   return 0;
+}
+
+function stripAnsiNoise(text: string): string {
+  return text
+    .replace(/\x1B\[[0-9;?]*[A-Za-z]/g, "")
+    .split(/\r?\n/)
+    .filter((line) => !/All tools are now trusted/i.test(line))
+    .filter((line) => !/Agents can sometimes do unexpected/i.test(line))
+    .filter((line) => !/Learn more at/i.test(line))
+    .filter((line) => !/^\s*▸ Credits:/i.test(line))
+    .join("\n");
+}
+
+function compactHistoryText(text: string): string {
+  return text.replace(/\s+/g, " ").trim().slice(0, 1200);
 }
 
 const BOOTSTRAP_SOUL = `# [BOOTSTRAP]
