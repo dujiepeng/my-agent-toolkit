@@ -8,6 +8,7 @@
     "start": "node dist/main.js",
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "node --test --import tsx \"src/**/*.test.ts\" \"scripts/**/*.test.ts\"",
     "bot:start": "tsx src/main.ts --bot"
   },
   "dependencies": {
