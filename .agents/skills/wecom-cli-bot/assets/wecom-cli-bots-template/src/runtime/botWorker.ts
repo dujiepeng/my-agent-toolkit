@@ -1,26 +1,32 @@
 import fs from "node:fs";
 import path from "node:path";
-import { execSync } from "node:child_process";
+import { execFileSync } from "node:child_process";
 import type { BotRuntime, IncomingWeComMessage, WeComClient, StreamHandle } from "../types.js";
 import { CliRunner } from "../cli-adapters/cliRunner.js";
 import { SessionStore } from "../history/sessionStore.js";
 import { buildPrompt } from "./promptBuilder.js";
 import { redact } from "../security/redact.js";
 import { MemoryClient } from "../memory/memoryClient.js";
+import { AdminStore } from "../admin/adminStore.js";
+
+type DocumentBuffer = { filename: string; content: string; collecting: boolean };
+type DocumentWriteTarget = { writePath: string; isConfig: boolean } | null;
 
 export class BotWorker {
   private sessions: SessionStore;
   private cli: CliRunner;
   private memory: MemoryClient;
+  private admin: AdminStore;
   private activeStreams = new Map<string, StreamHandle>();
   private pendingFiles = new Map<string, string[]>(); // userId -> file paths in tmp/
-  private docBuffer = new Map<string, { filename: string; content: string; collecting: boolean }>();
+  private docBuffer = new Map<string, DocumentBuffer>();
   private chunkBuffer = new Map<string, string>(); // buffer for incomplete markers
 
   constructor(private runtime: BotRuntime, private wecom: WeComClient) {
     this.sessions = new SessionStore(runtime);
     this.cli = new CliRunner(runtime);
     this.memory = new MemoryClient(runtime);
+    this.admin = new AdminStore(runtime.privateDir);
   }
 
   async start(): Promise<void> {
@@ -31,6 +37,37 @@ export class BotWorker {
   private async handleMessage(message: IncomingWeComMessage): Promise<void> {
     const text = message.text.trim();
     const stopKeyword = this.runtime.config.bot.stop_keyword;
+
+    let adminState;
+    try {
+      adminState = this.admin.read();
+    } catch (error) {
+      console.error("[admin state] failed to read admin state", error instanceof Error ? error.message : error);
+      await this.wecom.sendText(message.conversationId, "机器人管理员状态异常，请联系部署者处理。");
+      return;
+    }
+    if (adminState.status === "unclaimed") {
+      const claimMatch = text.match(/^\/claim_admin\s+(\S+)$/);
+      if (!claimMatch) {
+        await this.wecom.sendText(message.conversationId, "机器人尚未完成管理员认领。请由部署者提供认领码。");
+        return;
+      }
+      const claimed = this.admin.verifyClaim(message.userId, claimMatch[1]);
+      if (!claimed) {
+        await this.wecom.sendText(message.conversationId, "管理员认领失败。");
+        return;
+      }
+      await this.wecom.sendText(message.conversationId, "管理员认领成功，开始初始化。");
+      await this.handleInit(message);
+      return;
+    }
+
+    if (text === "/accept_admin") { await this.handleAcceptAdmin(message); return; }
+
+    if (adminState.status === "initializing" && !this.admin.isAdmin(message.userId)) {
+      await this.wecom.sendText(message.conversationId, "机器人正在初始化，请稍后。");
+      return;
+    }
 
     if (text === stopKeyword || text === "/stop") {
       const stopped = await this.cli.stop(message.userId);
@@ -45,13 +82,8 @@ export class BotWorker {
 
     // Slash commands
     if (text === "/help") { await this.handleHelp(message); return; }
-    if (text === "/init") {
-      const soulPath = path.join(this.runtime.privateDir, "soul.md");
-      const soulContent = fs.existsSync(soulPath) ? fs.readFileSync(soulPath, "utf8").trim() : "";
-      if (soulContent && !soulContent.includes("[BOOTSTRAP]")) {
-        await this.wecom.sendText(message.conversationId, "机器人已完成初始化，无法重复执行。");
-        return;
-      }
+    if (text === "/init" || text === "/reinit") {
+      if (!(await this.requireAdmin(message))) return;
       await this.handleInit(message);
       return;
     }
@@ -79,14 +111,42 @@ export class BotWorker {
     if (forgetMatch) { await this.handleForget(message, forgetMatch[1].trim()); return; }
 
     const skillAddMatch = text.match(/^\/skill_add\s+(.+)$/);
-    if (skillAddMatch) { await this.handleSkillAdd(message, skillAddMatch[1].trim()); return; }
+    if (skillAddMatch) {
+      if (!(await this.requireAdmin(message))) return;
+      await this.handleSkillAdd(message, skillAddMatch[1].trim());
+      return;
+    }
 
     const skillRemoveMatch = text.match(/^\/skill_remove\s+(.+)$/);
-    if (skillRemoveMatch) { await this.handleSkillRemove(message, skillRemoveMatch[1].trim()); return; }
+    if (skillRemoveMatch) {
+      if (!(await this.requireAdmin(message))) return;
+      await this.handleSkillRemove(message, skillRemoveMatch[1].trim());
+      return;
+    }
 
-    if (text === "/soul") { await this.handleGetSoul(message); return; }
+    if (text === "/soul") {
+      if (!(await this.requireAdmin(message))) return;
+      await this.handleGetSoul(message);
+      return;
+    }
     const setSoulMatch = text.match(/^\/set_soul\s+([\s\S]+)$/);
-    if (setSoulMatch) { await this.handleSetSoul(message, setSoulMatch[1].trim()); return; }
+    if (setSoulMatch) {
+      if (!(await this.requireAdmin(message))) return;
+      await this.handleSetSoul(message, setSoulMatch[1].trim());
+      return;
+    }
+
+    const transferMatch = text.match(/^\/transfer_admin\s+(\S+)$/);
+    if (transferMatch) {
+      if (!(await this.requireAdmin(message))) return;
+      await this.handleTransferAdmin(message, transferMatch[1]);
+      return;
+    }
+    if (text === "/cancel_transfer_admin") {
+      if (!(await this.requireAdmin(message))) return;
+      await this.handleCancelTransferAdmin(message);
+      return;
+    }
 
     if (text === "/confirm") { await this.handleConfirm(message); return; }
     if (text === "/reject") { await this.handleReject(message); return; }
@@ -94,7 +154,7 @@ export class BotWorker {
     // Normal message flow - check if initialized
     const soulPath = path.join(this.runtime.privateDir, "soul.md");
     if (!fs.existsSync(soulPath) || fs.readFileSync(soulPath, "utf8").trim() === "") {
-      await this.wecom.sendText(message.conversationId, "机器人尚未初始化，请发送 /init 开始配置。");
+      await this.wecom.sendText(message.conversationId, "机器人尚未初始化，请联系管理员执行 /init。");
       return;
     }
 
@@ -118,90 +178,7 @@ export class BotWorker {
       onChunk: async (chunk) => {
         this.sessions.append(session, { role: "assistant", event: "chunk", content: chunk });
         const cleaned = redact(chunk, this.runtime.secrets);
-        
-        // Accumulate into chunk buffer for marker detection
-        const prevBuf = this.chunkBuffer.get(message.userId) || "";
-        const full = prevBuf + cleaned;
-        
-        const buf = this.docBuffer.get(message.userId);
-        
-        if (buf?.collecting) {
-          // Currently collecting document content - look for END marker
-          const endMatch = full.match(/\n~\/document\s*\n?/);
-          if (endMatch) {
-            const endIdx = endMatch.index!;
-            buf.content += full.slice(0, endIdx);
-            buf.collecting = false;
-            this.chunkBuffer.set(message.userId, "");
-            
-            // Write file
-            const isConfig = buf.filename.startsWith("private/") || buf.filename.startsWith("instructions/");
-            let writePath: string;
-            if (isConfig) {
-              writePath = path.join(this.runtime.workspaceDir, buf.filename);
-            } else {
-              const tmpDir = path.join(this.runtime.filesDir, "tmp");
-              fs.mkdirSync(tmpDir, { recursive: true });
-              writePath = path.join(tmpDir, path.basename(buf.filename));
-              this.pendingFiles.set(message.userId, [...(this.pendingFiles.get(message.userId) || []), writePath]);
-            }
-            fs.mkdirSync(path.dirname(writePath), { recursive: true });
-            fs.writeFileSync(writePath, buf.content.trim());
-            
-            if (!isConfig) {
-              await stream.replace(buf.content.trim());
-            }
-            
-            // Process remaining after END marker - put back to buffer for next BEGIN detection
-            const remaining = full.slice(endIdx + endMatch[0].length);
-            this.chunkBuffer.set(message.userId, remaining);
-          } else {
-            // Keep buffering - but flush safe content (keep last 20 chars in case marker is split)
-            if (full.length > 20) {
-              buf.content += full.slice(0, -20);
-              this.chunkBuffer.set(message.userId, full.slice(-20));
-            } else {
-              this.chunkBuffer.set(message.userId, full);
-            }
-          }
-          return;
-        }
-        
-        // Not collecting - look for BEGIN marker
-        const beginMatch = full.match(/~document:(.+?\.md)\s*\n?/);
-        if (beginMatch) {
-          const beginIdx = beginMatch.index!;
-          // Send everything before the marker
-          const before = full.slice(0, beginIdx).trim();
-          if (before) await stream.write(before);
-          
-          // Start collecting
-          const filename = beginMatch[1];
-          const isConfig = filename.startsWith("private/") || filename.startsWith("instructions/");
-          this.docBuffer.set(message.userId, { filename, content: "", collecting: true });
-          if (!isConfig) {
-            await stream.write(`正在生成文档 ${filename}...`);
-          }
-          
-          // Content after the marker goes directly into doc buffer
-          const afterMarker = full.slice(beginIdx + beginMatch[0].length);
-          const newBuf = this.docBuffer.get(message.userId)!;
-          newBuf.content = afterMarker;
-          this.chunkBuffer.set(message.userId, "");
-          return;
-        }
-        
-        // No markers - check if we might have a partial marker at the end
-        if (full.includes("~document:") || full.includes("~/document")) {
-          if (!full.match(/~document:.+?\.md\s*\n/) && !full.match(/\n~\/document/)) {
-            this.chunkBuffer.set(message.userId, full);
-            return;
-          }
-        }
-        
-        // Normal output
-        this.chunkBuffer.set(message.userId, "");
-        await stream.write(cleaned);
+        await this.processOutputChunk(message.userId, cleaned, stream);
       },
       onDone: async (result) => {
         this.activeStreams.delete(message.userId);
@@ -214,21 +191,7 @@ export class BotWorker {
           const remaining = this.chunkBuffer.get(message.userId) || "";
           buf.content += remaining;
           if (buf.content.trim()) {
-            const isConfig = buf.filename.startsWith("private/") || buf.filename.startsWith("instructions/");
-            let writePath: string;
-            if (isConfig) {
-              writePath = path.join(this.runtime.workspaceDir, buf.filename);
-            } else {
-              const tmpDir = path.join(this.runtime.filesDir, "tmp");
-              fs.mkdirSync(tmpDir, { recursive: true });
-              writePath = path.join(tmpDir, path.basename(buf.filename));
-              this.pendingFiles.set(message.userId, [...(this.pendingFiles.get(message.userId) || []), writePath]);
-            }
-            fs.mkdirSync(path.dirname(writePath), { recursive: true });
-            fs.writeFileSync(writePath, buf.content.trim());
-            if (!isConfig) {
-              await stream.replace(buf.content.trim());
-            }
+            await this.writeDocumentBuffer(message.userId, buf, stream);
           }
         }
         this.docBuffer.delete(message.userId);
@@ -281,6 +244,112 @@ export class BotWorker {
       "/init | 重新初始化机器人配置",
     );
     await this.wecom.sendText(message.conversationId, rows.join("\n"));
+  }
+
+  private async requireAdmin(message: IncomingWeComMessage): Promise<boolean> {
+    if (this.admin.isAdmin(message.userId)) return true;
+    await this.wecom.sendText(message.conversationId, "该指令仅管理员可用。");
+    return false;
+  }
+
+  private async processOutputChunk(userId: string, chunk: string, stream: StreamHandle): Promise<void> {
+    let remaining = (this.chunkBuffer.get(userId) || "") + chunk;
+    this.chunkBuffer.set(userId, "");
+
+    while (remaining) {
+      const buf = this.docBuffer.get(userId);
+      if (buf?.collecting) {
+        const endMatch = remaining.match(/\n~\/document\s*\n?/);
+        if (!endMatch) {
+          if (remaining.length > 20) {
+            buf.content += remaining.slice(0, -20);
+            this.chunkBuffer.set(userId, remaining.slice(-20));
+          } else {
+            this.chunkBuffer.set(userId, remaining);
+          }
+          return;
+        }
+
+        const endIdx = endMatch.index!;
+        buf.content += remaining.slice(0, endIdx);
+        await this.writeDocumentBuffer(userId, buf, stream);
+        this.docBuffer.delete(userId);
+        remaining = remaining.slice(endIdx + endMatch[0].length);
+        continue;
+      }
+
+      const beginMatch = remaining.match(/~document:(.+?\.md)\s*\n?/);
+      if (!beginMatch) {
+        if (remaining.includes("~document:") || remaining.includes("~/document")) {
+          this.chunkBuffer.set(userId, remaining);
+          return;
+        }
+        const partialBeginLength = partialMarkerPrefixLength(remaining, "~document:");
+        if (partialBeginLength > 0) {
+          const safeOutput = remaining.slice(0, -partialBeginLength);
+          if (safeOutput) await stream.write(safeOutput);
+          this.chunkBuffer.set(userId, remaining.slice(-partialBeginLength));
+          return;
+        }
+        await stream.write(remaining);
+        return;
+      }
+
+      const beginIdx = beginMatch.index!;
+      const before = remaining.slice(0, beginIdx).trim();
+      if (before) await stream.write(before);
+
+      const filename = beginMatch[1];
+      this.docBuffer.set(userId, { filename, content: "", collecting: true });
+      if (!this.isAllowedConfigDocument(filename)) {
+        await stream.write(`正在生成文档 ${filename}...`);
+      }
+      remaining = remaining.slice(beginIdx + beginMatch[0].length);
+    }
+  }
+
+  private async writeDocumentBuffer(userId: string, buf: DocumentBuffer, stream: StreamHandle): Promise<void> {
+    const content = buf.content.trim();
+    const target = this.resolveDocumentWrite(buf.filename);
+    if (!target) return;
+    if (target.isConfig && !this.canWriteConfigDocument(userId)) {
+      console.error("[document] rejected config document write outside initialization", buf.filename);
+      return;
+    }
+    fs.mkdirSync(path.dirname(target.writePath), { recursive: true });
+    fs.writeFileSync(target.writePath, content);
+    if (target.isConfig) {
+      this.maybeMarkInitialized();
+    } else {
+      this.pendingFiles.set(userId, [...(this.pendingFiles.get(userId) || []), target.writePath]);
+      await stream.replace(content);
+    }
+  }
+
+  private resolveDocumentWrite(filename: string): DocumentWriteTarget {
+    if (this.isAllowedConfigDocument(filename)) {
+      return { writePath: path.join(this.runtime.workspaceDir, filename), isConfig: true };
+    }
+    if (filename.startsWith("private/") || filename.startsWith("instructions/")) {
+      console.error("[document] rejected unsafe config document path", filename);
+      return null;
+    }
+    const tmpDir = path.join(this.runtime.filesDir, "tmp");
+    return { writePath: path.join(tmpDir, path.basename(filename)), isConfig: false };
+  }
+
+  private isAllowedConfigDocument(filename: string): boolean {
+    return filename === "private/soul.md" || filename === "instructions/AGENTS.md";
+  }
+
+  private canWriteConfigDocument(userId: string): boolean {
+    try {
+      const state = this.admin.read();
+      return state.status === "initializing" && state.admin_user_id === userId;
+    } catch (error) {
+      console.error("[admin state] rejected config document write after admin state read failure", error instanceof Error ? error.message : error);
+      return false;
+    }
   }
 
   // --- Session commands ---
@@ -406,6 +475,7 @@ export class BotWorker {
 
   // --- Init ---
   private async handleInit(message: IncomingWeComMessage): Promise<void> {
+    this.admin.markInitializing();
     const soulPath = path.join(this.runtime.privateDir, "soul.md");
     const bootstrapPath = path.join(this.runtime.rootDir, "bootstrap-soul.md");
     let bootstrap: string;
@@ -461,6 +531,31 @@ export class BotWorker {
     await this.wecom.sendText(message.conversationId, "Soul 已更新。");
   }
 
+  private async handleTransferAdmin(message: IncomingWeComMessage, targetUserId: string): Promise<void> {
+    const ok = this.admin.startTransfer(message.userId, targetUserId);
+    await this.wecom.sendText(message.conversationId, ok ? "管理员转移已发起，请目标用户发送 /accept_admin。" : "管理员转移失败。");
+  }
+
+  private async handleAcceptAdmin(message: IncomingWeComMessage): Promise<void> {
+    const ok = this.admin.acceptTransfer(message.userId);
+    await this.wecom.sendText(message.conversationId, ok ? "管理员转移已完成。" : "没有可接受的管理员转移。");
+  }
+
+  private async handleCancelTransferAdmin(message: IncomingWeComMessage): Promise<void> {
+    const ok = this.admin.cancelTransfer(message.userId);
+    await this.wecom.sendText(message.conversationId, ok ? "管理员转移已取消。" : "没有可取消的管理员转移。");
+  }
+
+  private maybeMarkInitialized(): void {
+    const soulPath = path.join(this.runtime.privateDir, "soul.md");
+    const agentsPath = path.join(this.runtime.instructionsDir, "AGENTS.md");
+    if (!fs.existsSync(soulPath) || !fs.existsSync(agentsPath)) return;
+    const soul = fs.readFileSync(soulPath, "utf8");
+    if (soul.includes("[BOOTSTRAP]")) return;
+    const state = this.admin.read();
+    if (state.status === "initializing") this.admin.markReady();
+  }
+
   // --- Skill commands ---
   private async handleSkillList(message: IncomingWeComMessage): Promise<void> {
     const skillsDir = path.join(this.runtime.filesDir, ".agents", "skills");
@@ -488,15 +583,19 @@ export class BotWorker {
 
   private async handleSkillAdd(message: IncomingWeComMessage, gitUrl: string): Promise<void> {
     const skillsDir = path.join(this.runtime.filesDir, ".agents", "skills");
+    const repoName = this.repoNameFromGitUrl(gitUrl);
+    if (!repoName) {
+      await this.wecom.sendText(message.conversationId, "技能名称无效。");
+      return;
+    }
     fs.mkdirSync(skillsDir, { recursive: true });
-    const repoName = gitUrl.split("/").pop()?.replace(/\.git$/, "") ?? "skill";
     const targetDir = path.join(skillsDir, repoName);
     try {
       if (fs.existsSync(targetDir)) {
-        execSync("git pull", { cwd: targetDir, timeout: 30000 });
+        this.runGit(["pull"], { cwd: targetDir, timeout: 30000 });
         await this.wecom.sendText(message.conversationId, `技能 ${repoName} 已更新。`);
       } else {
-        execSync(`git clone ${gitUrl} ${targetDir}`, { timeout: 60000 });
+        this.runGit(["clone", gitUrl, targetDir], { timeout: 60000 });
         await this.wecom.sendText(message.conversationId, `技能 ${repoName} 安装成功。`);
       }
     } catch (e: any) {
@@ -505,7 +604,17 @@ export class BotWorker {
   }
 
   private async handleSkillRemove(message: IncomingWeComMessage, name: string): Promise<void> {
-    const targetDir = path.join(this.runtime.filesDir, ".agents", "skills", name);
+    if (!isSafeSkillName(name)) {
+      await this.wecom.sendText(message.conversationId, "技能名称无效。");
+      return;
+    }
+    const skillsDir = path.join(this.runtime.filesDir, ".agents", "skills");
+    const targetDir = path.resolve(skillsDir, name);
+    const relative = path.relative(skillsDir, targetDir);
+    if (relative.startsWith("..") || path.isAbsolute(relative)) {
+      await this.wecom.sendText(message.conversationId, "技能名称无效。");
+      return;
+    }
     if (!fs.existsSync(targetDir)) {
       await this.wecom.sendText(message.conversationId, `技能 ${name} 不存在。`);
       return;
@@ -513,11 +622,32 @@ export class BotWorker {
     fs.rmSync(targetDir, { recursive: true });
     await this.wecom.sendText(message.conversationId, `技能 ${name} 已卸载。`);
   }
+
+  private repoNameFromGitUrl(gitUrl: string): string | null {
+    const repoName = gitUrl.split("/").pop()?.replace(/\.git$/, "") ?? "";
+    return isSafeSkillName(repoName) ? repoName : null;
+  }
+
+  private runGit(args: string[], options: { cwd?: string; timeout: number }): void {
+    execFileSync("git", args, options);
+  }
 }
 
 function extractTags(text: string): string[] {
   const matches = text.match(/#(\S+)/g);
   return matches ? matches.map(t => t.slice(1)) : [];
+}
+
+function isSafeSkillName(name: string): boolean {
+  return /^[A-Za-z0-9._-]+$/.test(name) && !name.startsWith(".") && name !== "..";
+}
+
+function partialMarkerPrefixLength(text: string, marker: string): number {
+  const maxLength = Math.min(text.length, marker.length - 1);
+  for (let length = maxLength; length > 0; length -= 1) {
+    if (marker.startsWith(text.slice(-length))) return length;
+  }
+  return 0;
 }
 
 const BOOTSTRAP_SOUL = `# [BOOTSTRAP]

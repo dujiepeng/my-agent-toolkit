@@ -43,10 +43,10 @@ export class AdminStore {
   read(): AdminState {
     if (!fs.existsSync(this.filePath)) return defaultState();
     try {
-      const parsed = JSON.parse(fs.readFileSync(this.filePath, "utf8")) as Partial<AdminState>;
-      return { ...defaultState(), ...parsed };
+      const parsed = JSON.parse(fs.readFileSync(this.filePath, "utf8"));
+      return validateAdminState(parsed, this.filePath);
     } catch (error) {
-      if (error instanceof SyntaxError) {
+      if (error instanceof SyntaxError || error instanceof AdminStateValidationError) {
         throw new Error(`Invalid admin state file: ${this.filePath}`);
       }
       throw error;
@@ -180,4 +180,74 @@ function defaultState(): AdminState {
     pending_transfer: null,
     initialized_at: null
   };
+}
+
+class AdminStateValidationError extends Error {}
+
+function validateAdminState(value: unknown, filePath: string): AdminState {
+  if (!isPlainObject(value)) throw new AdminStateValidationError(`Invalid admin state file: ${filePath}`);
+
+  const state = value as Record<string, unknown>;
+  if (!isNullableString(state.admin_user_id)) {
+    throw new AdminStateValidationError(`Invalid admin state file: ${filePath}`);
+  }
+  if (!isAdminStatus(state.status)) {
+    throw new AdminStateValidationError(`Invalid admin state file: ${filePath}`);
+  }
+  if (!isClaimState(state.claim)) {
+    throw new AdminStateValidationError(`Invalid admin state file: ${filePath}`);
+  }
+  if (!isPendingTransfer(state.pending_transfer)) {
+    throw new AdminStateValidationError(`Invalid admin state file: ${filePath}`);
+  }
+  if (!isNullableString(state.initialized_at)) {
+    throw new AdminStateValidationError(`Invalid admin state file: ${filePath}`);
+  }
+  if (state.status !== "unclaimed" && !state.admin_user_id) {
+    throw new AdminStateValidationError(`Invalid admin state file: ${filePath}`);
+  }
+  if (state.status === "unclaimed" && state.admin_user_id) {
+    throw new AdminStateValidationError(`Invalid admin state file: ${filePath}`);
+  }
+
+  return {
+    admin_user_id: state.admin_user_id,
+    status: state.status,
+    claim: state.claim,
+    pending_transfer: state.pending_transfer,
+    initialized_at: state.initialized_at
+  };
+}
+
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function isNullableString(value: unknown): value is string | null {
+  return typeof value === "string" || value === null;
+}
+
+function isAdminStatus(value: unknown): value is AdminStatus {
+  return value === "unclaimed" || value === "initializing" || value === "ready";
+}
+
+function isClaimState(value: unknown): value is ClaimState | null {
+  if (value === null) return true;
+  if (!isPlainObject(value)) return false;
+  return (
+    typeof value.code_hash === "string" &&
+    typeof value.created_at === "string" &&
+    typeof value.expires_at === "string" &&
+    isNullableString(value.used_at)
+  );
+}
+
+function isPendingTransfer(value: unknown): value is PendingTransfer | null {
+  if (value === null) return true;
+  if (!isPlainObject(value)) return false;
+  return (
+    typeof value.to_user_id === "string" &&
+    typeof value.created_at === "string" &&
+    typeof value.expires_at === "string"
+  );
 }

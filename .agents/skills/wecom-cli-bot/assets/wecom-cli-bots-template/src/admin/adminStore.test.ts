@@ -58,6 +58,15 @@ test("markReady rejects unclaimed store", () => {
   assert.equal(store.read().status, "unclaimed");
 });
 
+test("markInitializing requires an existing admin", () => {
+  const privateDir = tempPrivateDir();
+  const store = new AdminStore(privateDir);
+
+  assert.throws(() => store.markInitializing(), /Cannot initialize before admin claim/);
+  assert.equal(store.read().admin_user_id, null);
+  assert.equal(store.read().status, "unclaimed");
+});
+
 test("transfer requires target acceptance before expiry", () => {
   const privateDir = tempPrivateDir();
   const store = new AdminStore(privateDir);
@@ -98,4 +107,36 @@ test("read rejects malformed admin state instead of resetting", () => {
       message: new RegExp(`^Invalid admin state file: ${adminPath.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}$`)
     }
   );
+});
+
+test("read rejects ready admin state without an admin user", () => {
+  const privateDir = tempPrivateDir();
+  const adminPath = path.join(privateDir, "admin.json");
+  fs.writeFileSync(adminPath, JSON.stringify({ status: "ready", admin_user_id: null }), { mode: 0o600 });
+  const store = new AdminStore(privateDir);
+
+  assert.throws(() => store.read(), {
+    message: new RegExp(`^Invalid admin state file: ${adminPath.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}$`)
+  });
+});
+
+test("read rejects structurally invalid nested admin state", () => {
+  const privateDir = tempPrivateDir();
+  const adminPath = path.join(privateDir, "admin.json");
+  fs.writeFileSync(
+    adminPath,
+    JSON.stringify({
+      admin_user_id: null,
+      status: "unclaimed",
+      claim: { code_hash: "sha256:abc" },
+      pending_transfer: { to_user_id: 42 },
+      initialized_at: null
+    }),
+    { mode: 0o600 }
+  );
+  const store = new AdminStore(privateDir);
+
+  assert.throws(() => store.read(), {
+    message: new RegExp(`^Invalid admin state file: ${adminPath.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}$`)
+  });
 });
