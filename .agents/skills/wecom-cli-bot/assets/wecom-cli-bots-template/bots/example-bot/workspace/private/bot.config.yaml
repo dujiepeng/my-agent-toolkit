@@ -21,3 +21,4 @@ cli:
   timeout_seconds: 10800
   env:
     KIRO_HOME: "./bots/example-bot/workspace/cli-home/kiro"
+    KIRO_HOST_AUTH_DIR: "/host/kiro-auth"
