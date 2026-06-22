@@ -12,17 +12,32 @@ import {
   requireText,
   type AdminClaimRecord,
   type AdminRecord,
+  type AssetRecord,
+  type BusinessDocumentRecord,
+  type BusinessDocumentVersionRecord,
   type BotChannelDetail,
   type BotConfigDocumentRecord,
   type BotChannelRecord,
   type BotRecord,
   type ClaimAdminInput,
+  type ChunkRecord,
+  type CreateBusinessDocumentInput,
   type ConversationRecord,
+  type CreateMemoryRecordInput,
   type DataStore,
+  type KnowledgeTier,
+  type ListBusinessDocumentsInput,
   type ListCurrentMemoryDocumentsInput,
+  type ListMemoriesInput,
+  type MemoryRecord,
+  type MemoryStats,
+  type MemoryStatsInput,
   type MemoryDocumentRecord,
+  type RecordAssetInput,
+  type RecordChunksInput,
   type ResolveConversationInput,
   type TransferAdminInput,
+  type UpdateBusinessDocumentInput,
   type UpsertMemoryDocumentInput,
   type UpsertBotConfigDocumentInput,
   type CreateBotInput,
@@ -344,6 +359,42 @@ export function createSqliteDataStore(
       return listCurrentMemoryDocuments(db, input);
     },
 
+    createBusinessDocument(input) {
+      return createBusinessDocument(db, input);
+    },
+
+    updateBusinessDocument(input) {
+      return updateBusinessDocument(db, input);
+    },
+
+    getBusinessDocument(documentId, version) {
+      return getBusinessDocument(db, documentId, version);
+    },
+
+    listBusinessDocuments(input = {}) {
+      return listBusinessDocuments(db, input);
+    },
+
+    createMemoryRecord(input) {
+      return createMemoryRecord(db, input);
+    },
+
+    listMemories(input = {}) {
+      return listMemories(db, input);
+    },
+
+    recordChunks(input) {
+      return recordChunks(db, input);
+    },
+
+    recordAsset(input) {
+      return recordAsset(db, input);
+    },
+
+    getMemoryStats(input = {}) {
+      return getMemoryStats(db, input);
+    },
+
     close() {
       db.close();
     },
@@ -589,6 +640,396 @@ function listCurrentMemoryDocuments(
     .all(input.scope, requireText(input.owner_id, "owner_id")) as MemoryDocumentRecord[];
 }
 
+function createBusinessDocument(
+  db: Database.Database,
+  input: CreateBusinessDocumentInput,
+): BusinessDocumentRecord {
+  if (isBotConfigDocumentTitle(input.title)) {
+    throw new Error("bot config documents must use /v1/bot-config-documents");
+  }
+  const now = new Date().toISOString();
+  const document: BusinessDocumentRecord = {
+    document_id: input.document_id ?? `doc_${crypto.randomUUID()}`,
+    scope: input.scope,
+    owner_id: requireText(input.owner_id, "owner_id"),
+    title: requireText(input.title, "title"),
+    doc_type: requireText(input.doc_type, "doc_type"),
+    visibility: input.visibility ?? input.scope,
+    tier: input.tier ?? "core",
+    ...(input.source_type ? { source_type: input.source_type } : {}),
+    ...(input.source_uri ? { source_uri: input.source_uri } : {}),
+    ...(input.content_hash ? { content_hash: input.content_hash } : {}),
+    ...(input.created_by_bot_id ? { created_by_bot_id: input.created_by_bot_id } : {}),
+    ...(input.created_by_user_id ? { created_by_user_id: input.created_by_user_id } : {}),
+    version: 1,
+    tags: normalizeTags(input.tags),
+    created_at: now,
+    updated_at: now,
+    hit_count: 0,
+    status: "active",
+  };
+  const insertDocument = db.prepare(
+    `
+      insert into business_documents (
+        document_id, scope, owner_id, title, doc_type, visibility, tier,
+        source_type, source_uri, content_hash, created_by_bot_id, created_by_user_id,
+        version, created_at, updated_at, last_hit_at, hit_count, status
+      ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `,
+  );
+  const insertVersion = db.prepare(
+    `
+      insert into business_document_versions (
+        document_id, version, content, change_summary, created_at, chunk_count
+      ) values (?, ?, ?, ?, ?, ?)
+    `,
+  );
+  const insertTag = db.prepare(
+    "insert or ignore into business_document_tags (document_id, tag) values (?, ?)",
+  );
+  db.transaction(() => {
+    insertDocument.run(
+      document.document_id,
+      document.scope,
+      document.owner_id,
+      document.title,
+      document.doc_type,
+      document.visibility,
+      document.tier,
+      document.source_type ?? null,
+      document.source_uri ?? null,
+      document.content_hash ?? null,
+      document.created_by_bot_id ?? null,
+      document.created_by_user_id ?? null,
+      document.version,
+      document.created_at,
+      document.updated_at,
+      document.last_hit_at ?? null,
+      document.hit_count,
+      document.status,
+    );
+    insertVersion.run(document.document_id, 1, input.content, null, now, 0);
+    for (const tag of document.tags) {
+      insertTag.run(document.document_id, tag);
+    }
+  })();
+  return document;
+}
+
+function updateBusinessDocument(
+  db: Database.Database,
+  input: UpdateBusinessDocumentInput,
+): BusinessDocumentVersionRecord {
+  const document = mapBusinessDocumentRecord(
+    db.prepare("select * from business_documents where document_id = ?")
+      .get(input.document_id),
+    db,
+  );
+  if (!document) {
+    throw new Error(`business document not found: ${input.document_id}`);
+  }
+  const nextVersion = document.version + 1;
+  const now = nextIsoTimestamp(document.updated_at);
+  const version: BusinessDocumentVersionRecord = {
+    document_id: document.document_id,
+    version: nextVersion,
+    content: input.content,
+    ...(input.change_summary ? { change_summary: input.change_summary } : {}),
+    created_at: now,
+    chunk_count: input.chunk_count ?? 0,
+  };
+  db.transaction(() => {
+    db.prepare(
+      `
+        insert into business_document_versions (
+          document_id, version, content, change_summary, created_at, chunk_count
+        ) values (?, ?, ?, ?, ?, ?)
+      `,
+    ).run(
+      version.document_id,
+      version.version,
+      version.content,
+      version.change_summary ?? null,
+      version.created_at,
+      version.chunk_count,
+    );
+    db.prepare(
+      "update business_documents set version = ?, updated_at = ? where document_id = ?",
+    ).run(version.version, version.created_at, version.document_id);
+  })();
+  return version;
+}
+
+function getBusinessDocument(
+  db: Database.Database,
+  documentId: string,
+  version?: number,
+): BusinessDocumentVersionRecord | undefined {
+  const row = version === undefined
+    ? db.prepare(
+      `
+        select *
+        from business_document_versions
+        where document_id = ?
+        order by version desc
+        limit 1
+      `,
+    ).get(documentId)
+    : db.prepare(
+      "select * from business_document_versions where document_id = ? and version = ?",
+    ).get(documentId, version);
+  return mapBusinessDocumentVersionRecord(row);
+}
+
+function listBusinessDocuments(
+  db: Database.Database,
+  input: ListBusinessDocumentsInput,
+): BusinessDocumentRecord[] {
+  const rows = db.prepare(
+    `
+      select *
+      from business_documents
+      where (? is null or scope = ?)
+        and (? is null or owner_id = ?)
+        and (? is null or doc_type = ?)
+        and (? is null or status = ?)
+        and lower(title) not in ('soul', 'soul.md', 'private/soul.md', 'agents', 'agents.md', 'instructions/agents.md')
+      order by created_at asc
+    `,
+  ).all(
+    input.scope ?? null,
+    input.scope ?? null,
+    input.owner_id ?? null,
+    input.owner_id ?? null,
+    input.doc_type ?? null,
+    input.doc_type ?? null,
+    input.status ?? null,
+    input.status ?? null,
+  );
+  return rows
+    .map((row) => mapBusinessDocumentRecord(row, db))
+    .filter((document): document is BusinessDocumentRecord => Boolean(document));
+}
+
+function createMemoryRecord(
+  db: Database.Database,
+  input: CreateMemoryRecordInput,
+): MemoryRecord {
+  const now = new Date().toISOString();
+  const memory: MemoryRecord = {
+    memory_id: input.memory_id ?? `mem_${crypto.randomUUID()}`,
+    scope: input.scope,
+    owner_id: requireText(input.owner_id, "owner_id"),
+    content: requireText(input.content, "content"),
+    tier: input.tier ?? "core",
+    source_type: input.source_type ?? "text",
+    ...(input.source_conversation_id
+      ? { source_conversation_id: input.source_conversation_id }
+      : {}),
+    ...(input.source_message_id ? { source_message_id: input.source_message_id } : {}),
+    ...(input.created_by_bot_id ? { created_by_bot_id: input.created_by_bot_id } : {}),
+    ...(input.created_by_user_id ? { created_by_user_id: input.created_by_user_id } : {}),
+    tags: normalizeTags(input.tags),
+    created_at: now,
+    updated_at: now,
+    hit_count: 0,
+    status: "active",
+  };
+  const insertMemory = db.prepare(
+    `
+      insert into memories (
+        memory_id, scope, owner_id, content, tier, source_type,
+        source_conversation_id, source_message_id, created_by_bot_id, created_by_user_id,
+        created_at, updated_at, last_hit_at, hit_count, status
+      ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `,
+  );
+  const insertTag = db.prepare(
+    "insert or ignore into memory_tags (memory_id, tag) values (?, ?)",
+  );
+  db.transaction(() => {
+    insertMemory.run(
+      memory.memory_id,
+      memory.scope,
+      memory.owner_id,
+      memory.content,
+      memory.tier,
+      memory.source_type,
+      memory.source_conversation_id ?? null,
+      memory.source_message_id ?? null,
+      memory.created_by_bot_id ?? null,
+      memory.created_by_user_id ?? null,
+      memory.created_at,
+      memory.updated_at,
+      memory.last_hit_at ?? null,
+      memory.hit_count,
+      memory.status,
+    );
+    for (const tag of memory.tags) {
+      insertTag.run(memory.memory_id, tag);
+    }
+  })();
+  return memory;
+}
+
+function listMemories(db: Database.Database, input: ListMemoriesInput): MemoryRecord[] {
+  const rows = db.prepare(
+    `
+      select *
+      from memories
+      where (? is null or scope = ?)
+        and (? is null or owner_id = ?)
+        and (? is null or tier = ?)
+        and (? is null or status = ?)
+      order by created_at asc
+    `,
+  ).all(
+    input.scope ?? null,
+    input.scope ?? null,
+    input.owner_id ?? null,
+    input.owner_id ?? null,
+    input.tier ?? null,
+    input.tier ?? null,
+    input.status ?? null,
+    input.status ?? null,
+  );
+  return rows
+    .map((row) => mapMemoryRecord(row, db))
+    .filter((memory): memory is MemoryRecord => Boolean(memory));
+}
+
+function recordChunks(db: Database.Database, input: RecordChunksInput): ChunkRecord[] {
+  const createdAt = new Date().toISOString();
+  const insertChunk = db.prepare(
+    `
+      insert into chunks (
+        chunk_id, source_type, source_id, scope, owner_id, content, chunk_index,
+        heading_path, location, tier, created_at, last_hit_at, hit_count
+      ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `,
+  );
+  const records = input.chunks.map((chunk) => ({
+    chunk_id: `chunk_${crypto.randomUUID()}`,
+    source_type: input.source_type,
+    source_id: requireText(input.source_id, "source_id"),
+    scope: input.scope,
+    owner_id: requireText(input.owner_id, "owner_id"),
+    content: requireText(chunk.content, "content"),
+    chunk_index: chunk.chunk_index,
+    ...(chunk.heading_path ? { heading_path: chunk.heading_path } : {}),
+    ...(chunk.location ? { location: chunk.location } : {}),
+    tier: chunk.tier ?? "core",
+    created_at: createdAt,
+    hit_count: 0,
+  }) satisfies ChunkRecord);
+  db.transaction(() => {
+    for (const chunk of records) {
+      insertChunk.run(
+        chunk.chunk_id,
+        chunk.source_type,
+        chunk.source_id,
+        chunk.scope,
+        chunk.owner_id,
+        chunk.content,
+        chunk.chunk_index,
+        chunk.heading_path ?? null,
+        chunk.location ?? null,
+        chunk.tier,
+        chunk.created_at,
+        null,
+        chunk.hit_count,
+      );
+    }
+  })();
+  return records;
+}
+
+function recordAsset(db: Database.Database, input: RecordAssetInput): AssetRecord {
+  const asset: AssetRecord = {
+    asset_id: `asset_${crypto.randomUUID()}`,
+    source_type: input.source_type,
+    source_id: requireText(input.source_id, "source_id"),
+    filename: requireText(input.filename, "filename"),
+    content_type: requireText(input.content_type, "content_type"),
+    storage_uri: requireText(input.storage_uri, "storage_uri"),
+    size_bytes: input.size_bytes,
+    content_hash: requireText(input.content_hash, "content_hash"),
+    created_at: new Date().toISOString(),
+  };
+  db.prepare(
+    `
+      insert into assets (
+        asset_id, source_type, source_id, filename, content_type,
+        storage_uri, size_bytes, content_hash, created_at
+      ) values (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `,
+  ).run(
+    asset.asset_id,
+    asset.source_type,
+    asset.source_id,
+    asset.filename,
+    asset.content_type,
+    asset.storage_uri,
+    asset.size_bytes,
+    asset.content_hash,
+    asset.created_at,
+  );
+  return asset;
+}
+
+function getMemoryStats(db: Database.Database, input: MemoryStatsInput): MemoryStats {
+  const memories = listMemories(db, {
+    scope: input.scope,
+    owner_id: input.owner_id,
+  });
+  const chunkRow = db.prepare(
+    `
+      select count(*) as count
+      from chunks
+      where (? is null or scope = ?)
+        and (? is null or owner_id = ?)
+    `,
+  ).get(
+    input.scope ?? null,
+    input.scope ?? null,
+    input.owner_id ?? null,
+    input.owner_id ?? null,
+  ) as { count: number };
+  const assetRow = db.prepare(
+    `
+      select coalesce(sum(assets.size_bytes), 0) as bytes
+      from assets
+      left join memories on assets.source_type = 'memory' and assets.source_id = memories.memory_id
+      left join business_documents on assets.source_type = 'document' and assets.source_id = business_documents.document_id
+      where (
+          assets.source_type = 'memory'
+          and (? is null or memories.scope = ?)
+          and (? is null or memories.owner_id = ?)
+        )
+        or (
+          assets.source_type = 'document'
+          and (? is null or business_documents.scope = ?)
+          and (? is null or business_documents.owner_id = ?)
+        )
+    `,
+  ).get(
+    input.scope ?? null,
+    input.scope ?? null,
+    input.owner_id ?? null,
+    input.owner_id ?? null,
+    input.scope ?? null,
+    input.scope ?? null,
+    input.owner_id ?? null,
+    input.owner_id ?? null,
+  ) as { bytes: number };
+  return {
+    total_memories: memories.length,
+    total_chunks: chunkRow.count,
+    by_tier: countMemoriesByTier(memories),
+    disk_usage_bytes: assetRow.bytes,
+  };
+}
+
 function migrate(db: Database.Database): void {
   db.exec(`
     create table if not exists bots (
@@ -658,6 +1099,95 @@ function migrate(db: Database.Database): void {
       content text not null,
       created_at text not null,
       primary key (bot_id, title, version)
+    );
+
+    create table if not exists business_documents (
+      document_id text primary key,
+      scope text not null,
+      owner_id text not null,
+      title text not null,
+      doc_type text not null,
+      visibility text not null,
+      tier text not null,
+      source_type text,
+      source_uri text,
+      content_hash text,
+      created_by_bot_id text,
+      created_by_user_id text,
+      version integer not null,
+      created_at text not null,
+      updated_at text not null,
+      last_hit_at text,
+      hit_count integer not null,
+      status text not null
+    );
+
+    create table if not exists business_document_versions (
+      document_id text not null,
+      version integer not null,
+      content text not null,
+      change_summary text,
+      created_at text not null,
+      chunk_count integer not null,
+      primary key (document_id, version)
+    );
+
+    create table if not exists business_document_tags (
+      document_id text not null,
+      tag text not null,
+      primary key (document_id, tag)
+    );
+
+    create table if not exists memories (
+      memory_id text primary key,
+      scope text not null,
+      owner_id text not null,
+      content text not null,
+      tier text not null,
+      source_type text not null,
+      source_conversation_id text,
+      source_message_id text,
+      created_by_bot_id text,
+      created_by_user_id text,
+      created_at text not null,
+      updated_at text not null,
+      last_hit_at text,
+      hit_count integer not null,
+      status text not null
+    );
+
+    create table if not exists memory_tags (
+      memory_id text not null,
+      tag text not null,
+      primary key (memory_id, tag)
+    );
+
+    create table if not exists chunks (
+      chunk_id text primary key,
+      source_type text not null,
+      source_id text not null,
+      scope text not null,
+      owner_id text not null,
+      content text not null,
+      chunk_index integer not null,
+      heading_path text,
+      location text,
+      tier text not null,
+      created_at text not null,
+      last_hit_at text,
+      hit_count integer not null
+    );
+
+    create table if not exists assets (
+      asset_id text primary key,
+      source_type text not null,
+      source_id text not null,
+      filename text not null,
+      content_type text not null,
+      storage_uri text not null,
+      size_bytes integer not null,
+      content_hash text not null,
+      created_at text not null
     );
   `);
   addColumnIfMissing(db, "bots", "wecom_bot_id", "text");
@@ -844,6 +1374,115 @@ function mapBotRecord(row: unknown): BotRecord | undefined {
     created_at: record.created_at as string,
     updated_at: record.updated_at as string,
   };
+}
+
+function mapBusinessDocumentRecord(
+  row: unknown,
+  db: Database.Database,
+): BusinessDocumentRecord | undefined {
+  if (!row || typeof row !== "object") {
+    return undefined;
+  }
+  const record = row as Record<string, unknown>;
+  const documentId = record.document_id as string;
+  return {
+    document_id: documentId,
+    scope: record.scope as BusinessDocumentRecord["scope"],
+    owner_id: record.owner_id as string,
+    title: record.title as string,
+    doc_type: record.doc_type as string,
+    visibility: record.visibility as string,
+    tier: record.tier as KnowledgeTier,
+    ...(typeof record.source_type === "string" ? { source_type: record.source_type as BusinessDocumentRecord["source_type"] } : {}),
+    ...(typeof record.source_uri === "string" ? { source_uri: record.source_uri } : {}),
+    ...(typeof record.content_hash === "string" ? { content_hash: record.content_hash } : {}),
+    ...(typeof record.created_by_bot_id === "string" ? { created_by_bot_id: record.created_by_bot_id } : {}),
+    ...(typeof record.created_by_user_id === "string" ? { created_by_user_id: record.created_by_user_id } : {}),
+    version: record.version as number,
+    tags: listTags(db, "business_document_tags", "document_id", documentId),
+    created_at: record.created_at as string,
+    updated_at: record.updated_at as string,
+    ...(typeof record.last_hit_at === "string" ? { last_hit_at: record.last_hit_at } : {}),
+    hit_count: record.hit_count as number,
+    status: record.status as BusinessDocumentRecord["status"],
+  };
+}
+
+function mapBusinessDocumentVersionRecord(
+  row: unknown,
+): BusinessDocumentVersionRecord | undefined {
+  if (!row || typeof row !== "object") {
+    return undefined;
+  }
+  const record = row as Record<string, unknown>;
+  return {
+    document_id: record.document_id as string,
+    version: record.version as number,
+    content: record.content as string,
+    ...(typeof record.change_summary === "string"
+      ? { change_summary: record.change_summary }
+      : {}),
+    created_at: record.created_at as string,
+    chunk_count: record.chunk_count as number,
+  };
+}
+
+function mapMemoryRecord(
+  row: unknown,
+  db: Database.Database,
+): MemoryRecord | undefined {
+  if (!row || typeof row !== "object") {
+    return undefined;
+  }
+  const record = row as Record<string, unknown>;
+  const memoryId = record.memory_id as string;
+  return {
+    memory_id: memoryId,
+    scope: record.scope as MemoryRecord["scope"],
+    owner_id: record.owner_id as string,
+    content: record.content as string,
+    tier: record.tier as KnowledgeTier,
+    source_type: record.source_type as MemoryRecord["source_type"],
+    ...(typeof record.source_conversation_id === "string"
+      ? { source_conversation_id: record.source_conversation_id }
+      : {}),
+    ...(typeof record.source_message_id === "string"
+      ? { source_message_id: record.source_message_id }
+      : {}),
+    ...(typeof record.created_by_bot_id === "string" ? { created_by_bot_id: record.created_by_bot_id } : {}),
+    ...(typeof record.created_by_user_id === "string" ? { created_by_user_id: record.created_by_user_id } : {}),
+    tags: listTags(db, "memory_tags", "memory_id", memoryId),
+    created_at: record.created_at as string,
+    updated_at: record.updated_at as string,
+    ...(typeof record.last_hit_at === "string" ? { last_hit_at: record.last_hit_at } : {}),
+    hit_count: record.hit_count as number,
+    status: record.status as MemoryRecord["status"],
+  };
+}
+
+function normalizeTags(tags: string[] | undefined): string[] {
+  return [...new Set((tags ?? []).map((tag) => requireText(tag, "tag")))];
+}
+
+function listTags(
+  db: Database.Database,
+  table: "business_document_tags" | "memory_tags",
+  idColumn: "document_id" | "memory_id",
+  id: string,
+): string[] {
+  return db.prepare(
+    `select tag from ${table} where ${idColumn} = ? order by rowid asc`,
+  ).all(id).map((row) => (row as { tag: string }).tag);
+}
+
+function countMemoriesByTier(memories: MemoryRecord[]): Record<KnowledgeTier, number> {
+  return memories.reduce<Record<KnowledgeTier, number>>(
+    (counts, memory) => {
+      counts[memory.tier] += 1;
+      return counts;
+    },
+    { core: 0, reference: 0, temp: 0 },
+  );
 }
 
 function addColumnIfMissing(

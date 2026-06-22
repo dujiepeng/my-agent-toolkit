@@ -118,6 +118,95 @@ export interface MemoryDocumentRecord {
   created_at: string;
 }
 
+export type KnowledgeTier = "core" | "reference" | "temp";
+export type SourceType = "text" | "file" | "url" | "directory" | "document" | "memory";
+export type StoredSourceType = "document" | "memory";
+
+export interface BusinessDocumentRecord {
+  document_id: string;
+  scope: MemoryScope;
+  owner_id: string;
+  title: string;
+  doc_type: string;
+  visibility: string;
+  tier: KnowledgeTier;
+  source_type?: SourceType;
+  source_uri?: string;
+  content_hash?: string;
+  created_by_bot_id?: string;
+  created_by_user_id?: string;
+  version: number;
+  tags: string[];
+  created_at: string;
+  updated_at: string;
+  last_hit_at?: string;
+  hit_count: number;
+  status: "active" | "archived";
+}
+
+export interface BusinessDocumentVersionRecord {
+  document_id: string;
+  version: number;
+  content: string;
+  change_summary?: string;
+  created_at: string;
+  chunk_count: number;
+}
+
+export interface MemoryRecord {
+  memory_id: string;
+  scope: MemoryScope;
+  owner_id: string;
+  content: string;
+  tier: KnowledgeTier;
+  source_type: SourceType;
+  source_conversation_id?: string;
+  source_message_id?: string;
+  created_by_bot_id?: string;
+  created_by_user_id?: string;
+  tags: string[];
+  created_at: string;
+  updated_at: string;
+  last_hit_at?: string;
+  hit_count: number;
+  status: "active" | "archived";
+}
+
+export interface ChunkRecord {
+  chunk_id: string;
+  source_type: StoredSourceType;
+  source_id: string;
+  scope: MemoryScope;
+  owner_id: string;
+  content: string;
+  chunk_index: number;
+  heading_path?: string;
+  location?: string;
+  tier: KnowledgeTier;
+  created_at: string;
+  last_hit_at?: string;
+  hit_count: number;
+}
+
+export interface AssetRecord {
+  asset_id: string;
+  source_type: StoredSourceType;
+  source_id: string;
+  filename: string;
+  content_type: string;
+  storage_uri: string;
+  size_bytes: number;
+  content_hash: string;
+  created_at: string;
+}
+
+export interface MemoryStats {
+  total_memories: number;
+  total_chunks: number;
+  by_tier: Record<KnowledgeTier, number>;
+  disk_usage_bytes: number;
+}
+
 export interface BotConfigDocumentRecord {
   bot_id: string;
   title: "soul" | "agents.md";
@@ -187,6 +276,87 @@ export interface ListCurrentMemoryDocumentsInput {
   owner_id: string;
 }
 
+export interface CreateBusinessDocumentInput {
+  document_id?: string;
+  scope: MemoryScope;
+  owner_id: string;
+  title: string;
+  doc_type: string;
+  content: string;
+  visibility?: string;
+  tier?: KnowledgeTier;
+  source_type?: SourceType;
+  source_uri?: string;
+  content_hash?: string;
+  created_by_bot_id?: string;
+  created_by_user_id?: string;
+  tags?: string[];
+}
+
+export interface UpdateBusinessDocumentInput {
+  document_id: string;
+  content: string;
+  change_summary?: string;
+  chunk_count?: number;
+}
+
+export interface ListBusinessDocumentsInput {
+  scope?: MemoryScope;
+  owner_id?: string;
+  doc_type?: string;
+  status?: "active" | "archived";
+}
+
+export interface CreateMemoryRecordInput {
+  memory_id?: string;
+  scope: MemoryScope;
+  owner_id: string;
+  content: string;
+  tier?: KnowledgeTier;
+  source_type?: SourceType;
+  source_conversation_id?: string;
+  source_message_id?: string;
+  created_by_bot_id?: string;
+  created_by_user_id?: string;
+  tags?: string[];
+}
+
+export interface ListMemoriesInput {
+  scope?: MemoryScope;
+  owner_id?: string;
+  tier?: KnowledgeTier;
+  status?: "active" | "archived";
+}
+
+export interface RecordChunksInput {
+  source_type: StoredSourceType;
+  source_id: string;
+  scope: MemoryScope;
+  owner_id: string;
+  chunks: Array<{
+    content: string;
+    chunk_index: number;
+    heading_path?: string;
+    location?: string;
+    tier?: KnowledgeTier;
+  }>;
+}
+
+export interface RecordAssetInput {
+  source_type: StoredSourceType;
+  source_id: string;
+  filename: string;
+  content_type: string;
+  storage_uri: string;
+  size_bytes: number;
+  content_hash: string;
+}
+
+export interface MemoryStatsInput {
+  scope?: MemoryScope;
+  owner_id?: string;
+}
+
 export interface DataStore {
   createBot(input: CreateBotInput): BotRecord;
   listBots(): BotRecord[];
@@ -214,6 +384,18 @@ export interface DataStore {
   listCurrentMemoryDocuments(
     input: ListCurrentMemoryDocumentsInput,
   ): MemoryDocumentRecord[];
+  createBusinessDocument(input: CreateBusinessDocumentInput): BusinessDocumentRecord;
+  updateBusinessDocument(input: UpdateBusinessDocumentInput): BusinessDocumentVersionRecord;
+  getBusinessDocument(
+    documentId: string,
+    version?: number,
+  ): BusinessDocumentVersionRecord | undefined;
+  listBusinessDocuments(input?: ListBusinessDocumentsInput): BusinessDocumentRecord[];
+  createMemoryRecord(input: CreateMemoryRecordInput): MemoryRecord;
+  listMemories(input?: ListMemoriesInput): MemoryRecord[];
+  recordChunks(input: RecordChunksInput): ChunkRecord[];
+  recordAsset(input: RecordAssetInput): AssetRecord;
+  getMemoryStats(input?: MemoryStatsInput): MemoryStats;
   close?(): void;
 }
 
@@ -233,6 +415,11 @@ export function createDataStore(options: DataStoreOptions = {}): DataStore {
   const conversations = new Map<string, ConversationRecord>();
   const memoryDocuments = new Map<string, MemoryDocumentRecord[]>();
   const botConfigDocuments = new Map<string, BotConfigDocumentRecord>();
+  const businessDocuments = new Map<string, BusinessDocumentRecord>();
+  const businessDocumentVersions = new Map<string, BusinessDocumentVersionRecord[]>();
+  const memories = new Map<string, MemoryRecord>();
+  const chunks = new Map<string, ChunkRecord>();
+  const assets = new Map<string, AssetRecord>();
   const wecomSecrets = new Map<string, string>();
 
   return {
@@ -627,6 +814,172 @@ export function createDataStore(options: DataStoreOptions = {}): DataStore {
       }
       return current;
     },
+
+    createBusinessDocument(input) {
+      if (isBotConfigDocumentTitle(input.title)) {
+        throw new Error("bot config documents must use /v1/bot-config-documents");
+      }
+      const now = new Date().toISOString();
+      const document: BusinessDocumentRecord = {
+        document_id: input.document_id ?? `doc_${crypto.randomUUID()}`,
+        scope: input.scope,
+        owner_id: requireText(input.owner_id, "owner_id"),
+        title: requireText(input.title, "title"),
+        doc_type: requireText(input.doc_type, "doc_type"),
+        visibility: input.visibility ?? input.scope,
+        tier: input.tier ?? "core",
+        ...(input.source_type ? { source_type: input.source_type } : {}),
+        ...(input.source_uri ? { source_uri: input.source_uri } : {}),
+        ...(input.content_hash ? { content_hash: input.content_hash } : {}),
+        ...(input.created_by_bot_id ? { created_by_bot_id: input.created_by_bot_id } : {}),
+        ...(input.created_by_user_id ? { created_by_user_id: input.created_by_user_id } : {}),
+        version: 1,
+        tags: normalizeTags(input.tags),
+        created_at: now,
+        updated_at: now,
+        hit_count: 0,
+        status: "active",
+      };
+      const version: BusinessDocumentVersionRecord = {
+        document_id: document.document_id,
+        version: 1,
+        content: input.content,
+        created_at: now,
+        chunk_count: 0,
+      };
+      businessDocuments.set(document.document_id, document);
+      businessDocumentVersions.set(document.document_id, [version]);
+      return document;
+    },
+
+    updateBusinessDocument(input) {
+      const document = businessDocuments.get(input.document_id);
+      if (!document) {
+        throw new Error(`business document not found: ${input.document_id}`);
+      }
+      const versions = businessDocumentVersions.get(document.document_id) ?? [];
+      const now = nextIsoTimestamp(document.updated_at);
+      const version: BusinessDocumentVersionRecord = {
+        document_id: document.document_id,
+        version: versions.length + 1,
+        content: input.content,
+        ...(input.change_summary ? { change_summary: input.change_summary } : {}),
+        created_at: now,
+        chunk_count: input.chunk_count ?? 0,
+      };
+      businessDocumentVersions.set(document.document_id, [...versions, version]);
+      businessDocuments.set(document.document_id, {
+        ...document,
+        version: version.version,
+        updated_at: now,
+      });
+      return version;
+    },
+
+    getBusinessDocument(documentId, version) {
+      const versions = businessDocumentVersions.get(documentId) ?? [];
+      if (version !== undefined) {
+        return versions.find((item) => item.version === version);
+      }
+      return versions.at(-1);
+    },
+
+    listBusinessDocuments(input = {}) {
+      return [...businessDocuments.values()]
+        .filter((document) => matchesBusinessDocumentQuery(document, input))
+        .sort((left, right) => left.created_at.localeCompare(right.created_at));
+    },
+
+    createMemoryRecord(input) {
+      const now = new Date().toISOString();
+      const memory: MemoryRecord = {
+        memory_id: input.memory_id ?? `mem_${crypto.randomUUID()}`,
+        scope: input.scope,
+        owner_id: requireText(input.owner_id, "owner_id"),
+        content: requireText(input.content, "content"),
+        tier: input.tier ?? "core",
+        source_type: input.source_type ?? "text",
+        ...(input.source_conversation_id
+          ? { source_conversation_id: input.source_conversation_id }
+          : {}),
+        ...(input.source_message_id ? { source_message_id: input.source_message_id } : {}),
+        ...(input.created_by_bot_id ? { created_by_bot_id: input.created_by_bot_id } : {}),
+        ...(input.created_by_user_id ? { created_by_user_id: input.created_by_user_id } : {}),
+        tags: normalizeTags(input.tags),
+        created_at: now,
+        updated_at: now,
+        hit_count: 0,
+        status: "active",
+      };
+      memories.set(memory.memory_id, memory);
+      return memory;
+    },
+
+    listMemories(input = {}) {
+      return [...memories.values()]
+        .filter((memory) => matchesMemoryQuery(memory, input))
+        .sort((left, right) => left.created_at.localeCompare(right.created_at));
+    },
+
+    recordChunks(input) {
+      const createdAt = new Date().toISOString();
+      const records = input.chunks.map((chunk) => {
+        const record: ChunkRecord = {
+          chunk_id: `chunk_${crypto.randomUUID()}`,
+          source_type: input.source_type,
+          source_id: requireText(input.source_id, "source_id"),
+          scope: input.scope,
+          owner_id: requireText(input.owner_id, "owner_id"),
+          content: requireText(chunk.content, "content"),
+          chunk_index: chunk.chunk_index,
+          ...(chunk.heading_path ? { heading_path: chunk.heading_path } : {}),
+          ...(chunk.location ? { location: chunk.location } : {}),
+          tier: chunk.tier ?? "core",
+          created_at: createdAt,
+          hit_count: 0,
+        };
+        chunks.set(record.chunk_id, record);
+        return record;
+      });
+      return records;
+    },
+
+    recordAsset(input) {
+      const asset: AssetRecord = {
+        asset_id: `asset_${crypto.randomUUID()}`,
+        source_type: input.source_type,
+        source_id: requireText(input.source_id, "source_id"),
+        filename: requireText(input.filename, "filename"),
+        content_type: requireText(input.content_type, "content_type"),
+        storage_uri: requireText(input.storage_uri, "storage_uri"),
+        size_bytes: input.size_bytes,
+        content_hash: requireText(input.content_hash, "content_hash"),
+        created_at: new Date().toISOString(),
+      };
+      assets.set(asset.asset_id, asset);
+      return asset;
+    },
+
+    getMemoryStats(input = {}) {
+      const filteredMemories = [...memories.values()].filter((memory) =>
+        matchesMemoryStatsQuery(memory, input)
+      );
+      const filteredChunks = [...chunks.values()].filter((chunk) =>
+        matchesMemoryStatsQuery(chunk, input)
+      );
+      const filteredAssets = [...assets.values()].filter((asset) => {
+        const source = asset.source_type === "memory"
+          ? memories.get(asset.source_id)
+          : businessDocuments.get(asset.source_id);
+        return source ? matchesMemoryStatsQuery(source, input) : false;
+      });
+      return {
+        total_memories: filteredMemories.length,
+        total_chunks: filteredChunks.length,
+        by_tier: countMemoriesByTier(filteredMemories),
+        disk_usage_bytes: filteredAssets.reduce((total, asset) => total + asset.size_bytes, 0),
+      };
+    },
   };
 }
 
@@ -679,6 +1032,45 @@ function assertUniqueWeComBotId(
       throw new Error(`wecom bot id already bound to bot: ${bot.bot_id}`);
     }
   }
+}
+
+function normalizeTags(tags: string[] | undefined): string[] {
+  return [...new Set((tags ?? []).map((tag) => requireText(tag, "tag")))];
+}
+
+function matchesBusinessDocumentQuery(
+  document: BusinessDocumentRecord,
+  input: ListBusinessDocumentsInput,
+): boolean {
+  return (!input.scope || document.scope === input.scope) &&
+    (!input.owner_id || document.owner_id === input.owner_id) &&
+    (!input.doc_type || document.doc_type === input.doc_type) &&
+    (!input.status || document.status === input.status) &&
+    !isBotConfigDocumentTitle(document.title);
+}
+
+function matchesMemoryQuery(memory: MemoryRecord, input: ListMemoriesInput): boolean {
+  return matchesMemoryStatsQuery(memory, input) &&
+    (!input.tier || memory.tier === input.tier) &&
+    (!input.status || memory.status === input.status);
+}
+
+function matchesMemoryStatsQuery(
+  record: Pick<MemoryRecord | ChunkRecord | BusinessDocumentRecord, "scope" | "owner_id">,
+  input: MemoryStatsInput,
+): boolean {
+  return (!input.scope || record.scope === input.scope) &&
+    (!input.owner_id || record.owner_id === input.owner_id);
+}
+
+function countMemoriesByTier(memories: MemoryRecord[]): Record<KnowledgeTier, number> {
+  return memories.reduce<Record<KnowledgeTier, number>>(
+    (counts, memory) => {
+      counts[memory.tier] += 1;
+      return counts;
+    },
+    { core: 0, reference: 0, temp: 0 },
+  );
 }
 
 export function requireText(value: string, field: string): string {

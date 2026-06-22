@@ -283,4 +283,137 @@ describe("sqlite data store", () => {
     })).toEqual([currentGuideline, processDoc]);
     store.close?.();
   });
+
+  it("persists business document versions across store instances", () => {
+    const dir = mkdtempSync(join(tmpdir(), "data-service-"));
+    dirs.push(dir);
+    const dbPath = join(dir, "data.db");
+
+    const first = createSqliteDataStore(dbPath);
+    const document = first.createBusinessDocument({
+      scope: "bot",
+      owner_id: "prd-bot",
+      title: "语音转文字 API PRD",
+      doc_type: "prd",
+      content: "# v1",
+      visibility: "bot",
+      tier: "core",
+      tags: ["prd", "asr"],
+      created_by_bot_id: "prd-bot",
+      created_by_user_id: "user-a",
+    });
+    const updated = first.updateBusinessDocument({
+      document_id: document.document_id,
+      content: "# v2",
+      change_summary: "补充计量计费",
+    });
+    first.close?.();
+
+    const second = createSqliteDataStore(dbPath);
+    expect(second.getBusinessDocument(document.document_id, 1)).toMatchObject({
+      document_id: document.document_id,
+      version: 1,
+      content: "# v1",
+    });
+    expect(second.getBusinessDocument(document.document_id)).toEqual(updated);
+    expect(second.listBusinessDocuments({
+      scope: "bot",
+      owner_id: "prd-bot",
+    })).toMatchObject([
+      {
+        document_id: document.document_id,
+        title: "语音转文字 API PRD",
+        version: 2,
+        tags: ["prd", "asr"],
+      },
+    ]);
+    expect(() => second.createBusinessDocument({
+      scope: "bot",
+      owner_id: "prd-bot",
+      title: "soul.md",
+      doc_type: "config",
+      content: "not allowed",
+    })).toThrow("bot config documents must use /v1/bot-config-documents");
+    second.close?.();
+  });
+
+  it("persists memory metadata chunks assets and stats", () => {
+    const dir = mkdtempSync(join(tmpdir(), "data-service-"));
+    dirs.push(dir);
+    const dbPath = join(dir, "data.db");
+
+    const first = createSqliteDataStore(dbPath);
+    const memory = first.createMemoryRecord({
+      scope: "user",
+      owner_id: "user-a",
+      content: "用户关注环信 IM 产品和 PRD 质量。",
+      tier: "core",
+      source_type: "text",
+      source_conversation_id: "conv-a",
+      source_message_id: "msg-a",
+      created_by_bot_id: "prd-bot",
+      created_by_user_id: "user-a",
+      tags: ["user-profile"],
+    });
+    first.recordChunks({
+      source_type: "memory",
+      source_id: memory.memory_id,
+      scope: "user",
+      owner_id: "user-a",
+      chunks: [
+        {
+          content: "用户关注环信 IM 产品。",
+          chunk_index: 0,
+          heading_path: "profile",
+          location: "line:1",
+          tier: "core",
+        },
+        {
+          content: "用户关注 PRD 质量。",
+          chunk_index: 1,
+          heading_path: "profile",
+          location: "line:2",
+          tier: "core",
+        },
+      ],
+    });
+    first.recordAsset({
+      source_type: "memory",
+      source_id: memory.memory_id,
+      filename: "profile.md",
+      content_type: "text/markdown",
+      storage_uri: "file:///data/profile.md",
+      size_bytes: 128,
+      content_hash: "hash-profile",
+    });
+    first.close?.();
+
+    const second = createSqliteDataStore(dbPath);
+    expect(second.listMemories({
+      scope: "user",
+      owner_id: "user-a",
+    })).toMatchObject([
+      {
+        memory_id: memory.memory_id,
+        scope: "user",
+        owner_id: "user-a",
+        tier: "core",
+        tags: ["user-profile"],
+      },
+    ]);
+    expect(second.getMemoryStats({
+      scope: "user",
+      owner_id: "user-a",
+    })).toEqual({
+      total_memories: 1,
+      total_chunks: 2,
+      by_tier: {
+        core: 1,
+        reference: 0,
+        temp: 0,
+      },
+      disk_usage_bytes: 128,
+    });
+    second.close?.();
+  });
 });
