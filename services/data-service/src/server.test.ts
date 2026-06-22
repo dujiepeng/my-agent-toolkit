@@ -346,6 +346,11 @@ describe("data-service server", () => {
       secret_configured: false,
     });
 
+    const listResponse = await server.fetch(
+      new Request("http://localhost/v1/bot-channels"),
+    );
+    await expect(listResponse.json()).resolves.toEqual([]);
+
     const botResponse = await server.fetch(
       new Request("http://localhost/v1/bots/prd-bot"),
     );

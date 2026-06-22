@@ -513,6 +513,7 @@ export function createDataStore(options: DataStoreOptions = {}): DataStore {
     listBotChannels(botId) {
       return [...bots.values()]
         .filter((bot) => !botId || bot.bot_id === botId)
+        .filter(hasWeComChannelConfig)
         .map(botToChannelRecord);
     },
 
@@ -1029,6 +1030,10 @@ function botToChannelRecord(bot: BotRecord): BotChannelRecord {
     ...(bot.last_wecom_check_at ? { last_check_at: bot.last_wecom_check_at } : {}),
     ...(bot.last_wecom_error ? { last_error: bot.last_wecom_error } : {}),
   };
+}
+
+function hasWeComChannelConfig(bot: BotRecord): boolean {
+  return Boolean(bot.wecom_bot_id || bot.wecom_secret_configured);
 }
 
 export function getRequiredBot(
