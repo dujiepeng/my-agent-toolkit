@@ -1,5 +1,7 @@
-import { createHmac } from "node:crypto";
-import type { TrustedMcpContext } from "@my-agent-toolkit/contracts";
+import {
+  signRunnerToken,
+  type TrustedMcpContext,
+} from "@my-agent-toolkit/contracts";
 import type { McpRunnerConfig } from "./config.js";
 
 export interface McpToolManifest {
@@ -200,22 +202,7 @@ export function injectMcpPromptSection(
   return `${buildMcpPromptSection(manifest)}\n\n<message>\n${prompt}\n</message>`;
 }
 
-export function signRunnerToken(
-  secret: string,
-  context: TrustedMcpContext,
-): string {
-  const payload = Buffer.from(JSON.stringify({
-    bot_id: context.bot_id,
-    user_id: context.user_id,
-    conversation_id: context.conversation_id,
-    runtime: context.runtime,
-    iat: Math.floor(Date.now() / 1000),
-  }), "utf8").toString("base64url");
-  const signature = createHmac("sha256", requireSecret(secret))
-    .update(payload)
-    .digest("base64url");
-  return `${payload}.${signature}`;
-}
+export { signRunnerToken };
 
 function parseMcpToolManifest(value: unknown): McpToolManifest {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
@@ -310,11 +297,4 @@ function readRequiredString(
     throw new Error(`${field} is required`);
   }
   return value.trim();
-}
-
-function requireSecret(secret: string): string {
-  if (typeof secret !== "string" || secret.trim() === "") {
-    throw new Error("runner secret is required");
-  }
-  return secret;
 }
