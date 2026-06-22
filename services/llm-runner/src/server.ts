@@ -124,11 +124,11 @@ async function handleChat(
     const chatRequest = parseChatRequest(await request.json());
     const runtimeRequest = await enrichChatRequest(config, chatRequest);
     const runtimeResult = await runRuntime(config, runtimeRequest);
-    const output = await appendMcpToolResult(config, chatRequest, runtimeResult.output);
+    const finalResult = await continueAfterMcpToolCall(config, chatRequest, runtimeResult);
     const response: ChatResponse = {
       run_id: `run_${crypto.randomUUID()}`,
-      runner_session_id: runtimeResult.runner_session_id,
-      output,
+      runner_session_id: finalResult.runner_session_id,
+      output: finalResult.output,
     };
 
     return jsonResponse(response);
@@ -155,18 +155,19 @@ async function handleChat(
   }
 }
 
-async function appendMcpToolResult(
+async function continueAfterMcpToolCall(
   config: RunnerConfig,
   chatRequest: ReturnType<typeof parseChatRequest>,
-  output: string,
-): Promise<string> {
+  runtimeResult: RuntimeResult,
+): Promise<RuntimeResult> {
   if (!config.mcp) {
-    return output;
+    return runtimeResult;
   }
-  const toolCall = parseMcpToolCall(output);
+  const toolCall = parseMcpToolCall(runtimeResult.output);
   if (!toolCall) {
-    return output;
+    return runtimeResult;
   }
+  let toolResult: string;
   try {
     const result = await callMcpTool({
       ...config.mcp,
@@ -177,13 +178,17 @@ async function appendMcpToolResult(
       conversation_id: chatRequest.conversation_id,
       runtime: chatRequest.runtime,
     }, toolCall);
-    return `${output}\n\n${formatMcpToolResult(result)}`;
+    toolResult = formatMcpToolResult(result);
   } catch (error) {
-    return `${output}\n\n${formatMcpToolResult({
+    toolResult = formatMcpToolResult({
       ok: false,
       error: error instanceof Error ? error.message : "mcp tool call failed",
-    })}`;
+    });
   }
+  return runRuntime(config, {
+    ...chatRequest,
+    prompt: toolResult,
+  });
 }
 
 async function enrichChatRequest(

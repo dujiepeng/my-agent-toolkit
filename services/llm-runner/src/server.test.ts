@@ -116,15 +116,26 @@ describe("llm-runner server", () => {
     expect(mcpRequests[0].url).toBe("http://mcp-service:8700/mcp/bots/prd-bot/sessions/conv-1/tools");
   });
 
-  it("executes one MCP tool call emitted by the runtime", async () => {
+  it("executes one MCP tool call emitted by the runtime and resumes for final output", async () => {
     const mcpRequests: Request[] = [];
+    const command = [
+      "let input = '';",
+      "process.stdin.on('data', chunk => input += chunk);",
+      "process.stdin.on('end', () => {",
+      "  if (input.includes('<mcp_tool_result>')) {",
+      "    process.stdout.write('最终回复: mem-1');",
+      "  } else {",
+      "    process.stdout.write('<mcp_tool_call>{\"tool\":\"memory.search\",\"input\":{\"query\":\"ASR\"}}</mcp_tool_call>');",
+      "  }",
+      "});",
+    ].join(" ");
     const server = createLlmRunnerServer({
       enabled_runtimes: ["kiro"],
       kiro: {
         command: process.execPath,
         args: [
           "-e",
-          "process.stdout.write('<mcp_tool_call>{\"tool\":\"memory.search\",\"input\":{\"query\":\"ASR\"}}</mcp_tool_call>')",
+          command,
         ],
         timeout_ms: 1000,
       },
@@ -183,8 +194,7 @@ describe("llm-runner server", () => {
 
     expect(response.status).toBe(200);
     const body = await response.json();
-    expect(body.output).toContain("<mcp_tool_result>");
-    expect(body.output).toContain("\"mem-1\"");
+    expect(body.output).toBe("最终回复: mem-1");
     expect(mcpRequests.map((request) => new URL(request.url).pathname)).toEqual([
       "/mcp/bots/prd-bot/sessions/conv-1/tools",
       "/mcp/bots/prd-bot/sessions/conv-1/tools/call",
