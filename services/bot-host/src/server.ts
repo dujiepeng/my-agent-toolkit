@@ -164,7 +164,7 @@ export function createBotHostWorker(config: BotHostWorkerConfig): BotHostWorker 
       conversationId = undefined;
     }
     const output = startInitializationWizard(messageInput, config, conversationId);
-    await config.wecomClient.sendText(input.adminWeComUserId, output);
+    await config.wecomClient.sendText(input.adminWeComUserId, output, { forceActive: true });
     return {
       bot_id: config.botId,
       admin_wecom_user_id: input.adminWeComUserId,

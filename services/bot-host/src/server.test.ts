@@ -2096,7 +2096,11 @@ describe("bot-host server", () => {
   });
 
   it("actively sends initialization wizard to the admin when restarted", async () => {
-    const sent: Array<{ conversationId: string; text: string }> = [];
+    const sent: Array<{
+      conversationId: string;
+      text: string;
+      options?: { forceActive?: boolean };
+    }> = [];
     const worker = createBotHostWorker({
       botId: "prd-bot",
       runtime: "mock",
@@ -2107,8 +2111,8 @@ describe("bot-host server", () => {
         async connect() {},
         disconnect() {},
         onMessage() {},
-        async sendText(conversationId, text) {
-          sent.push({ conversationId, text });
+        async sendText(conversationId, text, options) {
+          sent.push({ conversationId, text, options });
         },
       },
     });
@@ -2127,6 +2131,7 @@ describe("bot-host server", () => {
       {
         conversationId: "admin-a",
         text: result?.output,
+        options: { forceActive: true },
       },
     ]);
   });

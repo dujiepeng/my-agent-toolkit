@@ -11,7 +11,7 @@ export interface WeComClient {
   connect(): Promise<void>;
   disconnect(): void;
   onMessage(handler: (message: IncomingWeComMessage) => Promise<void>): void;
-  sendText(conversationId: string, text: string, options?: { finish?: boolean }): Promise<void>;
+  sendText(conversationId: string, text: string, options?: { finish?: boolean; forceActive?: boolean }): Promise<void>;
 }
 
 export class WeComLongConnectionClient implements WeComClient {
@@ -86,10 +86,10 @@ export class WeComLongConnectionClient implements WeComClient {
   async sendText(
     conversationId: string,
     text: string,
-    options: { finish?: boolean } = {},
+    options: { finish?: boolean; forceActive?: boolean } = {},
   ): Promise<void> {
     const frame = this.frames.get(conversationId);
-    if (frame) {
+    if (frame && !options.forceActive) {
       const finish = options.finish ?? true;
       const streamId = this.streamIds.get(conversationId) ?? createStreamId();
       this.streamIds.set(conversationId, streamId);
