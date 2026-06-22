@@ -5,7 +5,7 @@ import {
   fetchMcpToolManifest,
   formatMcpToolResult,
   injectMcpPromptSection,
-  parseMcpToolCall,
+  parseMcpToolCallRequest,
 } from "./mcpClient.js";
 import { getRuntimeStatuses } from "./runtimeStatus.js";
 import {
@@ -83,11 +83,13 @@ async function handleChatStream(
               return;
             }
             const firstOutput = await collectRuntimeStream(runtimeResult.stream);
-            const toolCall = config.mcp ? parseMcpToolCall(firstOutput) : undefined;
-            if (!toolCall) {
+            const toolRequest = parseMcpToolCallRequest(firstOutput);
+            if (toolRequest.status === "none") {
               enqueueChunk(controller, encoder, firstOutput);
             } else {
-              const toolResult = await executeMcpToolCall(config, chatRequest, toolCall);
+              const toolResult = toolRequest.status === "call"
+                ? await executeMcpToolCall(config, chatRequest, toolRequest.call)
+                : formatMcpToolResult(toolRequest.result);
               const secondRuntimeResult = runRuntimeStream(config, {
                 ...chatRequest,
                 prompt: toolResult,
@@ -212,11 +214,13 @@ async function continueAfterMcpToolCall(
   if (!config.mcp) {
     return runtimeResult;
   }
-  const toolCall = parseMcpToolCall(runtimeResult.output);
-  if (!toolCall) {
+  const toolRequest = parseMcpToolCallRequest(runtimeResult.output);
+  if (toolRequest.status === "none") {
     return runtimeResult;
   }
-  const toolResult = await executeMcpToolCall(config, chatRequest, toolCall);
+  const toolResult = toolRequest.status === "call"
+    ? await executeMcpToolCall(config, chatRequest, toolRequest.call)
+    : formatMcpToolResult(toolRequest.result);
   return runRuntime(config, {
     ...chatRequest,
     prompt: toolResult,
@@ -226,7 +230,7 @@ async function continueAfterMcpToolCall(
 async function executeMcpToolCall(
   config: RunnerConfig,
   chatRequest: ReturnType<typeof parseChatRequest>,
-  toolCall: NonNullable<ReturnType<typeof parseMcpToolCall>>,
+  toolCall: { tool: string; input: unknown },
 ): Promise<string> {
   if (!config.mcp) {
     return formatMcpToolResult({

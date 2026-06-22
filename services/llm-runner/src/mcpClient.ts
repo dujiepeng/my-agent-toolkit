@@ -38,6 +38,19 @@ export interface McpToolResult {
   error?: unknown;
 }
 
+export type McpToolCallRequest =
+  | {
+    status: "none";
+  }
+  | {
+    status: "call";
+    call: McpToolCall;
+  }
+  | {
+    status: "error";
+    result: McpToolResult;
+  };
+
 export async function fetchMcpToolManifest(
   config: McpClientConfig,
   context: TrustedMcpContext,
@@ -89,26 +102,66 @@ export async function callMcpTool(
 }
 
 export function parseMcpToolCall(output: string): McpToolCall | undefined {
-  const match = output.match(/<mcp_tool_call>\s*([\s\S]*?)\s*<\/mcp_tool_call>/);
-  if (!match) {
+  const request = parseMcpToolCallRequest(output);
+  if (request.status !== "call") {
     return undefined;
   }
+  return request.call;
+}
+
+export function parseMcpToolCallRequest(output: string): McpToolCallRequest {
+  const matches = [...output.matchAll(/<mcp_tool_call>\s*([\s\S]*?)\s*<\/mcp_tool_call>/g)];
+  if (matches.length === 0) {
+    return { status: "none" };
+  }
+  if (matches.length > 1) {
+    return protocolError(
+      "multiple_tool_calls",
+      "Only one MCP tool call is allowed per runtime turn",
+    );
+  }
+  const match = matches[0];
   let parsed: unknown;
   try {
     parsed = JSON.parse(match[1]);
   } catch {
-    return undefined;
+    return protocolError(
+      "invalid_tool_call_json",
+      "MCP tool call JSON is invalid",
+    );
   }
   if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
-    return undefined;
+    return protocolError(
+      "invalid_tool_call",
+      "MCP tool call must be a JSON object",
+    );
   }
   const record = parsed as Record<string, unknown>;
   if (typeof record.tool !== "string" || record.tool.trim() === "") {
-    return undefined;
+    return protocolError(
+      "invalid_tool_call",
+      "MCP tool call requires a non-empty tool name",
+    );
   }
   return {
-    tool: record.tool.trim(),
-    input: record.input ?? {},
+    status: "call",
+    call: {
+      tool: record.tool.trim(),
+      input: record.input ?? {},
+    },
+  };
+}
+
+function protocolError(code: string, message: string): McpToolCallRequest {
+  return {
+    status: "error",
+    result: {
+      ok: false,
+      error: {
+        code,
+        message,
+      },
+    },
   };
 }
 

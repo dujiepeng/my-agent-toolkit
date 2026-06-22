@@ -4,6 +4,7 @@ import {
   callMcpTool,
   fetchMcpToolManifest,
   formatMcpToolResult,
+  parseMcpToolCallRequest,
   parseMcpToolCall,
   signRunnerToken,
 } from "./mcpClient.js";
@@ -111,6 +112,54 @@ describe("mcpClient", () => {
         query: "ASR",
         scopes: ["bot"],
         owner_ids: ["prd-bot"],
+      },
+    });
+  });
+
+  it("returns no_call when runtime output has no MCP tool call", () => {
+    expect(parseMcpToolCallRequest("plain answer")).toEqual({
+      status: "none",
+    });
+  });
+
+  it("returns protocol errors for invalid MCP tool call JSON", () => {
+    expect(parseMcpToolCallRequest("<mcp_tool_call>{bad json}</mcp_tool_call>")).toEqual({
+      status: "error",
+      result: {
+        ok: false,
+        error: {
+          code: "invalid_tool_call_json",
+          message: "MCP tool call JSON is invalid",
+        },
+      },
+    });
+  });
+
+  it("returns protocol errors for multiple MCP tool calls", () => {
+    expect(parseMcpToolCallRequest([
+      "<mcp_tool_call>{\"tool\":\"memory.search\",\"input\":{}}</mcp_tool_call>",
+      "<mcp_tool_call>{\"tool\":\"memory.stats\",\"input\":{}}</mcp_tool_call>",
+    ].join("\n"))).toEqual({
+      status: "error",
+      result: {
+        ok: false,
+        error: {
+          code: "multiple_tool_calls",
+          message: "Only one MCP tool call is allowed per runtime turn",
+        },
+      },
+    });
+  });
+
+  it("returns protocol errors for missing MCP tool names", () => {
+    expect(parseMcpToolCallRequest("<mcp_tool_call>{\"input\":{}}</mcp_tool_call>")).toEqual({
+      status: "error",
+      result: {
+        ok: false,
+        error: {
+          code: "invalid_tool_call",
+          message: "MCP tool call requires a non-empty tool name",
+        },
       },
     });
   });

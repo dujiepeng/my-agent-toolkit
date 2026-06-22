@@ -377,6 +377,70 @@ describe("llm-runner server", () => {
     ]);
   });
 
+  it("feeds MCP tool call protocol errors back into streaming runtime output", async () => {
+    const mcpRequests: Request[] = [];
+    const command = [
+      "let input = '';",
+      "process.stdin.on('data', chunk => input += chunk);",
+      "process.stdin.on('end', () => {",
+      "  if (input.includes('invalid_tool_call_json')) {",
+      "    process.stdout.write('工具调用格式错误');",
+      "  } else {",
+      "    process.stdout.write('<mcp_tool_call>{bad json}</mcp_tool_call>');",
+      "  }",
+      "});",
+    ].join(" ");
+    const server = createLlmRunnerServer({
+      enabled_runtimes: ["kiro"],
+      kiro: {
+        command: process.execPath,
+        args: ["-e", command],
+        timeout_ms: 1000,
+      },
+      mcp: {
+        service_url: "http://mcp-service:8700",
+        runner_secret: "runner-secret",
+      },
+      fetch: async (input) => {
+        const request = input instanceof Request ? input : new Request(input);
+        mcpRequests.push(request);
+        return new Response(JSON.stringify({
+          version: 1,
+          directory_refs: [],
+          tools: [],
+        }), {
+          status: 200,
+          headers: {
+            "content-type": "application/json",
+          },
+        });
+      },
+    });
+
+    const response = await server.fetch(
+      new Request("http://localhost/v1/chat/stream", {
+        method: "POST",
+        body: JSON.stringify({
+          bot_id: "prd-bot",
+          user_id: "user-a",
+          conversation_id: "conv-1",
+          runtime: "kiro",
+          prompt: "bad call",
+        }),
+      }),
+    );
+
+    expect(response.status).toBe(200);
+    const lines = (await response.text()).trim().split("\n").map((line) => JSON.parse(line));
+    expect(lines.slice(1)).toEqual([
+      { type: "chunk", content: "工具调用格式错误" },
+      { type: "done" },
+    ]);
+    expect(mcpRequests.map((request) => new URL(request.url).pathname)).toEqual([
+      "/mcp/bots/prd-bot/sessions/conv-1/tools",
+    ]);
+  });
+
   it("maps runtime execution errors to stable redacted responses", async () => {
     const server = createLlmRunnerServer({
       enabled_runtimes: ["kiro"],
