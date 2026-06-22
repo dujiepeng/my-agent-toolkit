@@ -117,6 +117,231 @@ describe("document MCP tools", () => {
     expect(called).toBe(false);
   });
 
+  it("ingests document files into data-service and memory backend", async () => {
+    const calls: unknown[] = [];
+    const deps = createNoopDeps({
+      async ingestFile(input) {
+        calls.push({ backend: input });
+        return {
+          backend_memory_id: "vec-doc-1",
+          chunks: 2,
+        };
+      },
+    });
+    deps.dataClient.createDocument = async (input) => {
+      calls.push({ document: input });
+      return {
+        document_id: "doc-1",
+        title: input.title,
+        version: 1,
+      };
+    };
+
+    const result = await callMcpTool(context, deps, {
+      tool: "document.ingest_file",
+      input: {
+        scope: "bot",
+        owner_id: "prd-bot",
+        filename: "asr-api.md",
+        title: "语音转文字 API",
+        doc_type: "prd",
+        content: "# ASR API",
+        tags: ["prd", "asr"],
+        tier: "core",
+      },
+    });
+
+    expect(result).toEqual({
+      ok: true,
+      result: {
+        document: {
+          document_id: "doc-1",
+          title: "语音转文字 API",
+          version: 1,
+        },
+        backend: {
+          backend_memory_id: "vec-doc-1",
+          chunks: 2,
+        },
+      },
+    });
+    expect(calls).toEqual([
+      {
+        document: {
+          scope: "bot",
+          owner_id: "prd-bot",
+          title: "语音转文字 API",
+          doc_type: "prd",
+          content: "# ASR API",
+          tags: ["prd", "asr"],
+          tier: "core",
+          source_type: "file",
+          source_uri: "asr-api.md",
+          created_by_bot_id: "prd-bot",
+          created_by_user_id: "user-a",
+        },
+      },
+      {
+        backend: {
+          scope: "bot",
+          owner_id: "prd-bot",
+          filename: "asr-api.md",
+          content: "# ASR API",
+          tags: ["prd", "asr"],
+          tier: "core",
+          source_kind: "document",
+          source_id: "doc-1",
+        },
+      },
+    ]);
+  });
+
+  it("ingests document urls into data-service and memory backend", async () => {
+    const calls: unknown[] = [];
+    const deps = createNoopDeps({
+      async fetchUrl(input) {
+        calls.push({ backend: input });
+        return {
+          backend_memory_id: "vec-url-1",
+          chunks: 4,
+        };
+      },
+    });
+    deps.dataClient.createDocument = async (input) => {
+      calls.push({ document: input });
+      return {
+        document_id: "doc-url-1",
+        title: input.title,
+        version: 1,
+      };
+    };
+
+    const result = await callMcpTool(context, deps, {
+      tool: "document.ingest_url",
+      input: {
+        scope: "bot",
+        owner_id: "prd-bot",
+        url: "https://example.com/asr",
+        title: "ASR 参考资料",
+        doc_type: "reference",
+      },
+    });
+
+    expect(result).toEqual({
+      ok: true,
+      result: {
+        document: {
+          document_id: "doc-url-1",
+          title: "ASR 参考资料",
+          version: 1,
+        },
+        backend: {
+          backend_memory_id: "vec-url-1",
+          chunks: 4,
+        },
+      },
+    });
+    expect(calls).toEqual([
+      {
+        document: expect.objectContaining({
+          scope: "bot",
+          owner_id: "prd-bot",
+          title: "ASR 参考资料",
+          doc_type: "reference",
+          content: "Imported from URL: https://example.com/asr",
+          source_type: "url",
+          source_uri: "https://example.com/asr",
+          created_by_bot_id: "prd-bot",
+          created_by_user_id: "user-a",
+        }),
+      },
+      {
+        backend: {
+          scope: "bot",
+          owner_id: "prd-bot",
+          url: "https://example.com/asr",
+          source_kind: "document",
+          source_id: "doc-url-1",
+        },
+      },
+    ]);
+  });
+
+  it("scans authorized directories as document imports", async () => {
+    const documents: unknown[] = [];
+    const deps = createNoopDeps({
+      async scanDirectory(input) {
+        expect(input).toMatchObject({
+          scope: "bot",
+          owner_id: "prd-bot",
+          directory_ref: "knowledge-base",
+          directory: "/data/knowledge",
+          source_kind: "document",
+        });
+        return {
+          scanned: 2,
+          files: [
+            { backend_memory_id: "vec-1", filename: "a.md", chunks: 1 },
+            { backend_memory_id: "vec-2", filename: "b.md", chunks: 3 },
+          ],
+        };
+      },
+    }, {
+      "knowledge-base": "/data/knowledge",
+    });
+    deps.dataClient.createDocument = async (input) => {
+      documents.push(input);
+      return {
+        document_id: `doc-${documents.length}`,
+        title: input.title,
+        version: 1,
+      };
+    };
+
+    const result = await callMcpTool(context, deps, {
+      tool: "document.scan",
+      input: {
+        scope: "bot",
+        owner_id: "prd-bot",
+        directory_ref: "knowledge-base",
+        doc_type: "reference",
+        tags: ["kb"],
+      },
+    });
+
+    expect(result).toEqual({
+      ok: true,
+      result: {
+        scanned: 2,
+        documents: [
+          { document_id: "doc-1", title: "a.md", version: 1 },
+          { document_id: "doc-2", title: "b.md", version: 1 },
+        ],
+        backend: {
+          scanned: 2,
+          files: [
+            { backend_memory_id: "vec-1", filename: "a.md", chunks: 1 },
+            { backend_memory_id: "vec-2", filename: "b.md", chunks: 3 },
+          ],
+        },
+      },
+    });
+    expect(documents).toEqual([
+      expect.objectContaining({
+        title: "a.md",
+        doc_type: "reference",
+        content: "Imported from directory knowledge-base: a.md",
+        source_type: "file",
+        source_uri: "knowledge-base/a.md",
+        tags: ["kb"],
+      }),
+      expect.objectContaining({
+        title: "b.md",
+        source_uri: "knowledge-base/b.md",
+      }),
+    ]);
+  });
+
   it("prevents a bot from writing another bot owner scope", async () => {
     const deps: McpToolDependencies = {
       dataClient: {

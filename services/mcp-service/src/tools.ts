@@ -50,6 +50,120 @@ export async function callMcpTool(
       };
     }
 
+    if (call.tool === "document.ingest_file") {
+      const input = parseDocumentIngestFileInput(call.input);
+      assertDocumentWritePermission(context, input);
+      const ingestFile = requireBackendMethod(deps.memoryBackend.ingestFile, "ingestFile");
+      const document = await deps.dataClient.createDocument({
+        scope: input.scope,
+        owner_id: input.owner_id,
+        title: input.title,
+        doc_type: input.doc_type,
+        content: input.content,
+        ...(input.tags ? { tags: input.tags } : {}),
+        ...(input.tier ? { tier: input.tier } : {}),
+        source_type: "file",
+        source_uri: input.filename,
+        created_by_bot_id: context.bot_id,
+        created_by_user_id: context.user_id,
+      });
+      const backend = await ingestFile({
+        scope: input.scope,
+        owner_id: input.owner_id,
+        filename: input.filename,
+        content: input.content,
+        ...(input.tags ? { tags: input.tags } : {}),
+        ...(input.tier ? { tier: input.tier } : {}),
+        source_kind: "document",
+        source_id: readDocumentId(document),
+      });
+      return {
+        ok: true,
+        result: {
+          document,
+          backend,
+        },
+      };
+    }
+
+    if (call.tool === "document.ingest_url") {
+      const input = parseDocumentIngestUrlInput(call.input);
+      assertScopedWritePermission(context, input);
+      const fetchUrl = requireBackendMethod(deps.memoryBackend.fetchUrl, "fetchUrl");
+      const document = await deps.dataClient.createDocument({
+        scope: input.scope,
+        owner_id: input.owner_id,
+        title: input.title,
+        doc_type: input.doc_type,
+        content: `Imported from URL: ${input.url}`,
+        ...(input.tags ? { tags: input.tags } : {}),
+        ...(input.tier ? { tier: input.tier } : {}),
+        source_type: "url",
+        source_uri: input.url,
+        created_by_bot_id: context.bot_id,
+        created_by_user_id: context.user_id,
+      });
+      const backend = await fetchUrl({
+        scope: input.scope,
+        owner_id: input.owner_id,
+        url: input.url,
+        ...(input.tags ? { tags: input.tags } : {}),
+        ...(input.tier ? { tier: input.tier } : {}),
+        source_kind: "document",
+        source_id: readDocumentId(document),
+      });
+      return {
+        ok: true,
+        result: {
+          document,
+          backend,
+        },
+      };
+    }
+
+    if (call.tool === "document.scan") {
+      const input = parseDocumentScanInput(call.input);
+      assertScopedWritePermission(context, input);
+      const directory = deps.allowedDirectoryRefs?.[input.directory_ref];
+      if (!directory) {
+        throw new PermissionError("directory_ref is not authorized");
+      }
+      const scanDirectory = requireBackendMethod(deps.memoryBackend.scanDirectory, "scanDirectory");
+      const backend = await scanDirectory({
+        scope: input.scope,
+        owner_id: input.owner_id,
+        directory_ref: input.directory_ref,
+        directory,
+        ...(input.tags ? { tags: input.tags } : {}),
+        ...(input.tier ? { tier: input.tier } : {}),
+        source_kind: "document",
+      });
+      const documents = [];
+      for (const file of readScannedFiles(backend)) {
+        documents.push(await deps.dataClient.createDocument({
+          scope: input.scope,
+          owner_id: input.owner_id,
+          title: file.filename,
+          doc_type: input.doc_type,
+          content: `Imported from directory ${input.directory_ref}: ${file.filename}`,
+          ...(input.tags ? { tags: input.tags } : {}),
+          ...(input.tier ? { tier: input.tier } : {}),
+          source_type: "file",
+          source_uri: `${input.directory_ref}/${file.filename}`,
+          created_by_bot_id: context.bot_id,
+          created_by_user_id: context.user_id,
+        }));
+      }
+      return {
+        ok: true,
+        result: {
+          scanned: documents.length,
+          documents,
+          backend,
+        },
+      };
+    }
+
     if (call.tool === "memory.write") {
       const input = parseMemoryWriteInput(call.input);
       assertScopedWritePermission(context, input);
@@ -287,6 +401,29 @@ interface DeleteInput {
   memory_id: string;
 }
 
+interface DocumentIngestFileInput extends DocumentCreateInput {
+  filename: string;
+}
+
+interface DocumentIngestUrlInput {
+  scope: McpScope;
+  owner_id: string;
+  url: string;
+  title: string;
+  doc_type: string;
+  tags?: string[];
+  tier?: McpTier;
+}
+
+interface DocumentScanInput {
+  scope: McpScope;
+  owner_id: string;
+  directory_ref: string;
+  doc_type: string;
+  tags?: string[];
+  tier?: McpTier;
+}
+
 function parseMemoryWriteInput(value: unknown): MemoryWriteInput {
   const record = requireRecord(value, "memory write input");
   return {
@@ -318,6 +455,39 @@ function parseMemoryStatsInput(value: unknown): MemoryStatsInput {
   return {
     ...(record.scope !== undefined ? { scope: parseMcpScope(record.scope) } : {}),
     ...(record.owner_id !== undefined ? { owner_id: readRequiredString(record, "owner_id") } : {}),
+  };
+}
+
+function parseDocumentIngestFileInput(value: unknown): DocumentIngestFileInput {
+  const record = requireRecord(value, "document ingest file input");
+  return {
+    ...parseDocumentCreateInput(value),
+    filename: readRequiredString(record, "filename"),
+  };
+}
+
+function parseDocumentIngestUrlInput(value: unknown): DocumentIngestUrlInput {
+  const record = requireRecord(value, "document ingest url input");
+  return {
+    scope: parseMcpScope(record.scope),
+    owner_id: readRequiredString(record, "owner_id"),
+    url: readRequiredString(record, "url"),
+    title: readRequiredString(record, "title"),
+    doc_type: readRequiredString(record, "doc_type"),
+    ...(record.tags !== undefined ? { tags: parseStringArray(record.tags, "tags") } : {}),
+    ...(record.tier !== undefined ? { tier: parseMcpTier(record.tier) } : {}),
+  };
+}
+
+function parseDocumentScanInput(value: unknown): DocumentScanInput {
+  const record = requireRecord(value, "document scan input");
+  return {
+    scope: parseMcpScope(record.scope),
+    owner_id: readRequiredString(record, "owner_id"),
+    directory_ref: readRequiredString(record, "directory_ref"),
+    doc_type: readRequiredString(record, "doc_type"),
+    ...(record.tags !== undefined ? { tags: parseStringArray(record.tags, "tags") } : {}),
+    ...(record.tier !== undefined ? { tier: parseMcpTier(record.tier) } : {}),
   };
 }
 
@@ -416,6 +586,31 @@ function readRequiredString(
     throw new Error(`${field} is required`);
   }
   return value.trim();
+}
+
+function readDocumentId(document: Record<string, unknown>): string {
+  const value = document.document_id;
+  if (typeof value !== "string" || value.trim() === "") {
+    throw new StorageUnavailableError("data-service document response missing document_id");
+  }
+  return value;
+}
+
+function readScannedFiles(scanResult: Record<string, unknown>): Array<{ filename: string }> {
+  const files = scanResult.files;
+  if (!Array.isArray(files)) {
+    return [];
+  }
+  return files.flatMap((file) => {
+    if (!file || typeof file !== "object" || Array.isArray(file)) {
+      return [];
+    }
+    const filename = (file as Record<string, unknown>).filename;
+    if (typeof filename !== "string" || filename.trim() === "") {
+      return [];
+    }
+    return [{ filename: filename.trim() }];
+  });
 }
 
 function toolError(

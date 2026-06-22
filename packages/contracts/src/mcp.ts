@@ -18,6 +18,10 @@ export interface DocumentCreateInput {
   tags?: string[];
   visibility?: "private" | "bot" | "shared";
   tier?: McpTier;
+  source_type?: string;
+  source_uri?: string;
+  created_by_bot_id?: string;
+  created_by_user_id?: string;
 }
 
 const MCP_SCOPES = ["system", "shared", "bot", "user", "session"] as const;
@@ -58,6 +62,18 @@ export function parseDocumentCreateInput(value: unknown): DocumentCreateInput {
       ? { visibility: parseDocumentVisibility(record.visibility) }
       : {}),
     ...(record.tier !== undefined ? { tier: parseMcpTier(record.tier) } : {}),
+    ...(record.source_type !== undefined
+      ? { source_type: readRequiredString(record, "source_type").trim() }
+      : {}),
+    ...(record.source_uri !== undefined
+      ? { source_uri: readRequiredString(record, "source_uri").trim() }
+      : {}),
+    ...(record.created_by_bot_id !== undefined
+      ? { created_by_bot_id: readRequiredString(record, "created_by_bot_id").trim() }
+      : {}),
+    ...(record.created_by_user_id !== undefined
+      ? { created_by_user_id: readRequiredString(record, "created_by_user_id").trim() }
+      : {}),
   };
 }
 
