@@ -75,19 +75,24 @@ async function handleChatStream(
             runner_session_id: runtimeResult.runner_session_id,
           })));
 
-          const reader = runtimeResult.stream.getReader();
           try {
-            while (true) {
-              const { done, value } = await reader.read();
-              if (done) {
-                break;
-              }
-              if (value) {
-                controller.enqueue(encoder.encode(ndjsonLine({
-                  type: "chunk",
-                  content: value,
-                })));
-              }
+            if (!config.mcp) {
+              await pipeRuntimeStream(runtimeResult.stream, controller, encoder);
+              controller.enqueue(encoder.encode(ndjsonLine({ type: "done" })));
+              controller.close();
+              return;
+            }
+            const firstOutput = await collectRuntimeStream(runtimeResult.stream);
+            const toolCall = config.mcp ? parseMcpToolCall(firstOutput) : undefined;
+            if (!toolCall) {
+              enqueueChunk(controller, encoder, firstOutput);
+            } else {
+              const toolResult = await executeMcpToolCall(config, chatRequest, toolCall);
+              const secondRuntimeResult = runRuntimeStream(config, {
+                ...chatRequest,
+                prompt: toolResult,
+              });
+              await pipeRuntimeStream(secondRuntimeResult.stream, controller, encoder);
             }
             controller.enqueue(encoder.encode(ndjsonLine({ type: "done" })));
             controller.close();
@@ -114,6 +119,50 @@ async function handleChatStream(
       400,
     );
   }
+}
+
+async function collectRuntimeStream(stream: ReadableStream<string>): Promise<string> {
+  const chunks: string[] = [];
+  const reader = stream.getReader();
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) {
+      break;
+    }
+    if (value) {
+      chunks.push(value);
+    }
+  }
+  return chunks.join("");
+}
+
+async function pipeRuntimeStream(
+  stream: ReadableStream<string>,
+  controller: ReadableStreamDefaultController<Uint8Array>,
+  encoder: TextEncoder,
+): Promise<void> {
+  const reader = stream.getReader();
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) {
+      break;
+    }
+    enqueueChunk(controller, encoder, value);
+  }
+}
+
+function enqueueChunk(
+  controller: ReadableStreamDefaultController<Uint8Array>,
+  encoder: TextEncoder,
+  value: string | undefined,
+): void {
+  if (!value) {
+    return;
+  }
+  controller.enqueue(encoder.encode(ndjsonLine({
+    type: "chunk",
+    content: value,
+  })));
 }
 
 async function handleChat(
@@ -167,7 +216,24 @@ async function continueAfterMcpToolCall(
   if (!toolCall) {
     return runtimeResult;
   }
-  let toolResult: string;
+  const toolResult = await executeMcpToolCall(config, chatRequest, toolCall);
+  return runRuntime(config, {
+    ...chatRequest,
+    prompt: toolResult,
+  });
+}
+
+async function executeMcpToolCall(
+  config: RunnerConfig,
+  chatRequest: ReturnType<typeof parseChatRequest>,
+  toolCall: NonNullable<ReturnType<typeof parseMcpToolCall>>,
+): Promise<string> {
+  if (!config.mcp) {
+    return formatMcpToolResult({
+      ok: false,
+      error: "mcp is not configured",
+    });
+  }
   try {
     const result = await callMcpTool({
       ...config.mcp,
@@ -178,17 +244,13 @@ async function continueAfterMcpToolCall(
       conversation_id: chatRequest.conversation_id,
       runtime: chatRequest.runtime,
     }, toolCall);
-    toolResult = formatMcpToolResult(result);
+    return formatMcpToolResult(result);
   } catch (error) {
-    toolResult = formatMcpToolResult({
+    return formatMcpToolResult({
       ok: false,
       error: error instanceof Error ? error.message : "mcp tool call failed",
     });
   }
-  return runRuntime(config, {
-    ...chatRequest,
-    prompt: toolResult,
-  });
 }
 
 async function enrichChatRequest(

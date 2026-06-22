@@ -292,6 +292,91 @@ describe("llm-runner server", () => {
     ]);
   });
 
+  it("streams final runtime output after an MCP tool call", async () => {
+    const mcpRequests: Request[] = [];
+    const command = [
+      "let input = '';",
+      "process.stdin.on('data', chunk => input += chunk);",
+      "process.stdin.on('end', () => {",
+      "  if (input.includes('<mcp_tool_result>')) {",
+      "    process.stdout.write('最终');",
+      "    setTimeout(() => process.stdout.write('回复'), 10);",
+      "  } else {",
+      "    process.stdout.write('<mcp_tool_call>{\"tool\":\"memory.search\",\"input\":{\"query\":\"ASR\"}}</mcp_tool_call>');",
+      "  }",
+      "});",
+    ].join(" ");
+    const server = createLlmRunnerServer({
+      enabled_runtimes: ["kiro"],
+      kiro: {
+        command: process.execPath,
+        args: ["-e", command],
+        timeout_ms: 1000,
+      },
+      mcp: {
+        service_url: "http://mcp-service:8700",
+        runner_secret: "runner-secret",
+      },
+      fetch: async (input) => {
+        const request = input instanceof Request ? input : new Request(input);
+        mcpRequests.push(request);
+        if (request.url.endsWith("/tools")) {
+          return new Response(JSON.stringify({
+            version: 1,
+            directory_refs: [],
+            tools: [],
+          }), {
+            status: 200,
+            headers: {
+              "content-type": "application/json",
+            },
+          });
+        }
+        return new Response(JSON.stringify({
+          ok: true,
+          result: {
+            results: [{ id: "mem-1" }],
+          },
+        }), {
+          status: 200,
+          headers: {
+            "content-type": "application/json",
+          },
+        });
+      },
+    });
+
+    const response = await server.fetch(
+      new Request("http://localhost/v1/chat/stream", {
+        method: "POST",
+        body: JSON.stringify({
+          bot_id: "prd-bot",
+          user_id: "user-a",
+          conversation_id: "conv-1",
+          runtime: "kiro",
+          prompt: "search memory",
+        }),
+      }),
+    );
+
+    expect(response.status).toBe(200);
+    const lines = (await response.text()).trim().split("\n").map((line) => JSON.parse(line));
+    expect(lines[0]).toMatchObject({
+      type: "run",
+      runner_session_id: "kiro:prd-bot:user-a:conv-1",
+    });
+    expect(lines.slice(1)).toEqual([
+      { type: "chunk", content: "最终" },
+      { type: "chunk", content: "回复" },
+      { type: "done" },
+    ]);
+    expect(JSON.stringify(lines)).not.toContain("mcp_tool_call");
+    expect(mcpRequests.map((request) => new URL(request.url).pathname)).toEqual([
+      "/mcp/bots/prd-bot/sessions/conv-1/tools",
+      "/mcp/bots/prd-bot/sessions/conv-1/tools/call",
+    ]);
+  });
+
   it("maps runtime execution errors to stable redacted responses", async () => {
     const server = createLlmRunnerServer({
       enabled_runtimes: ["kiro"],
