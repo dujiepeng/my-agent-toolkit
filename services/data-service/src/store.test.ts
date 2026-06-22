@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { buildDefaultMcpCapabilityConfig } from "@my-agent-toolkit/contracts";
 import { ADMIN_CLAIM_TTL_MS, createDataStore } from "./store.js";
 
 describe("data-service store", () => {
@@ -23,6 +24,68 @@ describe("data-service store", () => {
     });
     expect(JSON.stringify(bot)).not.toContain("super-secret-value");
     expect(store.getBot("prd-bot")).toEqual(bot);
+  });
+
+  it("gets and updates bot MCP capability config", () => {
+    const store = createDataStore();
+    store.createBot({ bot_id: "prd-bot", name: "PRD Bot", runtime: "kiro" });
+
+    expect(store.getBotMcpCapabilityConfig("prd-bot")).toEqual(
+      buildDefaultMcpCapabilityConfig(),
+    );
+
+    const updated = store.updateBotMcpCapabilityConfig("prd-bot", {
+      version: 1,
+      memory: {
+        enabled: true,
+        readable_scopes: ["bot"],
+        writable_scopes: ["bot"],
+      },
+      documents: {
+        enabled: false,
+        writable_scopes: [],
+      },
+      tools: {
+        enabled: ["memory.search"],
+      },
+      directory_refs: ["bot-workspace"],
+    });
+
+    expect(updated).toEqual({
+      version: 1,
+      memory: {
+        enabled: true,
+        readable_scopes: ["bot"],
+        writable_scopes: ["bot"],
+      },
+      documents: {
+        enabled: false,
+        writable_scopes: [],
+      },
+      tools: {
+        enabled: ["memory.search"],
+      },
+      directory_refs: ["bot-workspace"],
+    });
+    expect(store.getBotMcpCapabilityConfig("prd-bot")).toEqual(updated);
+    expect(() => store.getBotMcpCapabilityConfig("missing-bot"))
+      .toThrow("bot not found: missing-bot");
+    expect(() => store.updateBotMcpCapabilityConfig("prd-bot", {
+      version: 1,
+      memory: {
+        enabled: true,
+        readable_scopes: ["namespace"],
+        writable_scopes: [],
+      },
+      documents: {
+        enabled: true,
+        writable_scopes: [],
+      },
+      tools: {
+        enabled: [],
+      },
+      directory_refs: [],
+    })).toThrow("scope must be system, shared, bot, user, or session");
   });
 
   it("creates versioned business documents and rejects bot config document titles", () => {

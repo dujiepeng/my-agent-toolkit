@@ -207,6 +207,24 @@ describe("control-api server", () => {
             },
           });
         }
+        if (request.url === "http://data-service/v1/bots/prd-bot/mcp-capabilities/config") {
+          return Response.json({
+            version: 1,
+            memory: {
+              enabled: true,
+              readable_scopes: ["bot"],
+              writable_scopes: ["bot"],
+            },
+            documents: {
+              enabled: false,
+              writable_scopes: [],
+            },
+            tools: {
+              enabled: ["memory.search"],
+            },
+            directory_refs: ["bot-workspace"],
+          });
+        }
         return Response.json({ error: "unexpected" }, { status: 500 });
       },
     });
@@ -252,30 +270,17 @@ describe("control-api server", () => {
         version: 1,
         memory: {
           enabled: true,
-          readable_scopes: ["system", "shared", "bot", "user", "session"],
-          writable_scopes: ["bot", "user", "session"],
+          readable_scopes: ["bot"],
+          writable_scopes: ["bot"],
         },
         documents: {
-          enabled: true,
-          writable_scopes: ["bot", "user", "session"],
+          enabled: false,
+          writable_scopes: [],
         },
         tools: {
-          enabled: [
-            "document.create",
-            "document.ingest_file",
-            "document.ingest_url",
-            "document.scan",
-            "memory.write",
-            "memory.ingest_file",
-            "memory.ingest_url",
-            "memory.scan",
-            "memory.delete",
-            "memory.search",
-            "memory.stats",
-            "search.query",
-          ],
+          enabled: ["memory.search"],
         },
-        directory_refs: [],
+        directory_refs: ["bot-workspace"],
       },
     });
     expect(calls).toEqual([
@@ -283,6 +288,82 @@ describe("control-api server", () => {
       "http://data-service/v1/bots/prd-bot/config-documents",
       "http://data-service/internal/documents?scope=bot&owner_id=prd-bot&status=active",
       "http://data-service/internal/memory-stats?scope=bot&owner_id=prd-bot",
+      "http://data-service/v1/bots/prd-bot/mcp-capabilities/config",
+    ]);
+  });
+
+  it("updates bot MCP capability config through data-service and records audit events", async () => {
+    const calls: Array<{ url: string; method: string; body?: unknown }> = [];
+    const server = createControlApiServer({
+      dataServiceUrl: "http://data-service",
+      logServiceUrl: "http://log-service",
+      fetch: async (request) => {
+        if (!(request instanceof Request)) {
+          throw new Error("expected Request");
+        }
+        const bodyText = request.method === "PUT" || request.method === "POST"
+          ? await request.text()
+          : "";
+        const body = bodyText ? JSON.parse(bodyText) : undefined;
+        calls.push({ url: request.url, method: request.method, body });
+        if (request.url === "http://data-service/v1/bots/prd-bot/mcp-capabilities/config") {
+          return Response.json(body);
+        }
+        if (request.url === "http://log-service/v1/audit-events") {
+          return Response.json({ ok: true }, { status: 201 });
+        }
+        return Response.json({ error: "unexpected" }, { status: 500 });
+      },
+    });
+
+    const payload = {
+      actor_id: "admin-a",
+      version: 1,
+      memory: {
+        enabled: true,
+        readable_scopes: ["bot"],
+        writable_scopes: ["bot"],
+      },
+      documents: {
+        enabled: false,
+        writable_scopes: [],
+      },
+      tools: {
+        enabled: ["memory.search"],
+      },
+      directory_refs: ["bot-workspace"],
+    };
+    const response = await server.fetch(
+      new Request("http://localhost/v1/bots/prd-bot/mcp-capabilities/config", {
+        method: "PUT",
+        body: JSON.stringify(payload),
+      }),
+    );
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toEqual(payload);
+    expect(calls).toEqual([
+      {
+        url: "http://data-service/v1/bots/prd-bot/mcp-capabilities/config",
+        method: "PUT",
+        body: payload,
+      },
+      {
+        url: "http://log-service/v1/audit-events",
+        method: "POST",
+        body: {
+          actor_id: "admin-a",
+          action: "mcp.capability_config.update",
+          target_type: "bot",
+          target_id: "prd-bot",
+          metadata: {
+            tools_enabled: ["memory.search"],
+            readable_scopes: ["bot"],
+            writable_scopes: ["bot"],
+            directory_refs: ["bot-workspace"],
+          },
+        },
+      },
     ]);
   });
 

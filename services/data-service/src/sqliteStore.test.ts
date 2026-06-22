@@ -96,6 +96,51 @@ describe("sqlite data store", () => {
     second.close?.();
   });
 
+  it("persists bot MCP capability config across store instances", () => {
+    const dir = mkdtempSync(join(tmpdir(), "data-service-"));
+    dirs.push(dir);
+    const dbPath = join(dir, "data.db");
+
+    const first = createSqliteDataStore(dbPath);
+    first.createBot({ bot_id: "prd-bot", name: "PRD Bot", runtime: "kiro" });
+    first.updateBotMcpCapabilityConfig("prd-bot", {
+      version: 1,
+      memory: {
+        enabled: true,
+        readable_scopes: ["bot"],
+        writable_scopes: ["bot"],
+      },
+      documents: {
+        enabled: false,
+        writable_scopes: [],
+      },
+      tools: {
+        enabled: ["memory.search"],
+      },
+      directory_refs: ["bot-workspace"],
+    });
+    first.close?.();
+
+    const second = createSqliteDataStore(dbPath);
+    expect(second.getBotMcpCapabilityConfig("prd-bot")).toEqual({
+      version: 1,
+      memory: {
+        enabled: true,
+        readable_scopes: ["bot"],
+        writable_scopes: ["bot"],
+      },
+      documents: {
+        enabled: false,
+        writable_scopes: [],
+      },
+      tools: {
+        enabled: ["memory.search"],
+      },
+      directory_refs: ["bot-workspace"],
+    });
+    second.close?.();
+  });
+
   it("rejects duplicate persisted wecom bot bindings", () => {
     const dir = mkdtempSync(join(tmpdir(), "data-service-"));
     dirs.push(dir);

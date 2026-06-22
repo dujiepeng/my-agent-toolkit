@@ -84,6 +84,97 @@ describe("data-service server", () => {
     expect(JSON.stringify(body)).not.toContain("super-secret-value");
   });
 
+  it("gets and updates bot MCP capability config over HTTP", async () => {
+    const server = createDataServiceServer();
+    await server.fetch(
+      new Request("http://localhost/v1/bots", {
+        method: "POST",
+        body: JSON.stringify({
+          bot_id: "prd-bot",
+          name: "PRD Bot",
+          runtime: "kiro",
+        }),
+      }),
+    );
+
+    const defaultResponse = await server.fetch(
+      new Request("http://localhost/v1/bots/prd-bot/mcp-capabilities/config"),
+    );
+    expect(defaultResponse.status).toBe(200);
+    await expect(defaultResponse.json()).resolves.toMatchObject({
+      version: 1,
+      memory: {
+        readable_scopes: ["system", "shared", "bot", "user", "session"],
+        writable_scopes: ["bot", "user", "session"],
+      },
+      tools: {
+        enabled: expect.arrayContaining(["memory.search", "document.create"]),
+      },
+    });
+
+    const updateResponse = await server.fetch(
+      new Request("http://localhost/v1/bots/prd-bot/mcp-capabilities/config", {
+        method: "PUT",
+        body: JSON.stringify({
+          version: 1,
+          memory: {
+            enabled: true,
+            readable_scopes: ["bot"],
+            writable_scopes: ["bot"],
+          },
+          documents: {
+            enabled: false,
+            writable_scopes: [],
+          },
+          tools: {
+            enabled: ["memory.search"],
+          },
+          directory_refs: ["bot-workspace"],
+        }),
+      }),
+    );
+    expect(updateResponse.status).toBe(200);
+    await expect(updateResponse.json()).resolves.toMatchObject({
+      memory: {
+        readable_scopes: ["bot"],
+        writable_scopes: ["bot"],
+      },
+      documents: {
+        enabled: false,
+      },
+      tools: {
+        enabled: ["memory.search"],
+      },
+      directory_refs: ["bot-workspace"],
+    });
+
+    const invalidResponse = await server.fetch(
+      new Request("http://localhost/v1/bots/prd-bot/mcp-capabilities/config", {
+        method: "PUT",
+        body: JSON.stringify({
+          version: 1,
+          memory: {
+            enabled: true,
+            readable_scopes: ["namespace"],
+            writable_scopes: [],
+          },
+          documents: {
+            enabled: true,
+            writable_scopes: [],
+          },
+          tools: {
+            enabled: [],
+          },
+          directory_refs: [],
+        }),
+      }),
+    );
+    expect(invalidResponse.status).toBe(400);
+    await expect(invalidResponse.json()).resolves.toEqual({
+      error: "scope must be system, shared, bot, user, or session",
+    });
+  });
+
   it("lists internal wecom runtime bot configs with secrets", async () => {
     const server = createDataServiceServer();
     await server.fetch(

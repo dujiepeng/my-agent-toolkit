@@ -1,5 +1,10 @@
 import Database from "better-sqlite3";
 import {
+  buildDefaultMcpCapabilityConfig,
+  parseMcpCapabilityConfig,
+  type McpCapabilityConfig,
+} from "@my-agent-toolkit/contracts";
+import {
   ADMIN_CLAIM_TTL_MS,
   buildWeComConnectionTestResult,
   configDocumentOrder,
@@ -103,6 +108,14 @@ export function createSqliteDataStore(
 
     updateBot(botId, input) {
       return updateBot(db, botId, input);
+    },
+
+    getBotMcpCapabilityConfig(botId) {
+      return getBotMcpCapabilityConfig(db, botId);
+    },
+
+    updateBotMcpCapabilityConfig(botId, input) {
+      return updateBotMcpCapabilityConfig(db, botId, input);
     },
 
     listBotChannels(botId) {
@@ -490,6 +503,37 @@ function listBotConfigDocuments(
     )
     .all(bot.bot_id) as BotConfigDocumentRecord[];
   return rows.sort((left, right) => configDocumentOrder(left.title) - configDocumentOrder(right.title));
+}
+
+function getBotMcpCapabilityConfig(
+  db: Database.Database,
+  botId: string,
+): McpCapabilityConfig {
+  const bot = getRequiredBot(db, botId);
+  const row = db
+    .prepare("select config_json from bot_mcp_capability_configs where bot_id = ?")
+    .get(bot.bot_id) as { config_json: string } | undefined;
+  if (!row) {
+    return buildDefaultMcpCapabilityConfig();
+  }
+  return parseMcpCapabilityConfig(JSON.parse(row.config_json) as unknown);
+}
+
+function updateBotMcpCapabilityConfig(
+  db: Database.Database,
+  botId: string,
+  input: unknown,
+): McpCapabilityConfig {
+  const bot = getRequiredBot(db, botId);
+  const config = parseMcpCapabilityConfig(input);
+  db.prepare(`
+    insert into bot_mcp_capability_configs (bot_id, config_json, updated_at)
+    values (?, ?, ?)
+    on conflict(bot_id) do update set
+      config_json = excluded.config_json,
+      updated_at = excluded.updated_at
+  `).run(bot.bot_id, JSON.stringify(config), new Date().toISOString());
+  return config;
 }
 
 function updateBot(
@@ -1099,6 +1143,12 @@ function migrate(db: Database.Database): void {
       content text not null,
       created_at text not null,
       primary key (bot_id, title, version)
+    );
+
+    create table if not exists bot_mcp_capability_configs (
+      bot_id text primary key,
+      config_json text not null,
+      updated_at text not null
     );
 
     create table if not exists business_documents (

@@ -1,5 +1,3 @@
-import { buildDefaultMcpCapabilityConfig } from "@my-agent-toolkit/contracts";
-
 export interface ControlApiConfig {
   dataServiceUrl: string;
   logServiceUrl: string;
@@ -111,6 +109,28 @@ export function createControlApiServer(config: ControlApiConfig): ControlApiServ
       );
       if (request.method === "GET" && mcpCapabilitiesMatch) {
         return handleGetMcpCapabilities(config, mcpCapabilitiesMatch[1]);
+      }
+
+      const mcpCapabilityConfigMatch = url.pathname.match(
+        /^\/v1\/bots\/([^/]+)\/mcp-capabilities\/config$/,
+      );
+      if (request.method === "PUT" && mcpCapabilityConfigMatch) {
+        return proxyJsonRequest(
+          request,
+          `${config.dataServiceUrl}/v1/bots/${encodeURIComponent(mcpCapabilityConfigMatch[1])}/mcp-capabilities/config`,
+          config,
+          {
+            action: "mcp.capability_config.update",
+            targetType: "bot",
+            targetId: () => mcpCapabilityConfigMatch[1],
+            metadata: (_body, payload) => ({
+              tools_enabled: readStringArrayPayload(payload, ["tools", "enabled"]),
+              readable_scopes: readStringArrayPayload(payload, ["memory", "readable_scopes"]),
+              writable_scopes: readStringArrayPayload(payload, ["memory", "writable_scopes"]),
+              directory_refs: readStringArrayPayload(payload, ["directory_refs"]),
+            }),
+          },
+        );
       }
 
       const botConfigDocumentsMatch = url.pathname.match(
@@ -285,7 +305,7 @@ async function handleGetMcpCapabilities(
   botId: string,
 ): Promise<Response> {
   const encodedBotId = encodeURIComponent(botId);
-  const [botResponse, configDocumentsResponse, documentsResponse, memoryResponse] = await Promise.all([
+  const [botResponse, configDocumentsResponse, documentsResponse, memoryResponse, capabilityConfigResponse] = await Promise.all([
     config.fetch(new Request(`${config.dataServiceUrl}/v1/bots/${encodedBotId}`)),
     config.fetch(new Request(`${config.dataServiceUrl}/v1/bots/${encodedBotId}/config-documents`)),
     config.fetch(
@@ -297,6 +317,9 @@ async function handleGetMcpCapabilities(
       new Request(
         `${config.dataServiceUrl}/internal/memory-stats?scope=bot&owner_id=${encodedBotId}`,
       ),
+    ),
+    config.fetch(
+      new Request(`${config.dataServiceUrl}/v1/bots/${encodedBotId}/mcp-capabilities/config`),
     ),
   ]);
 
@@ -312,11 +335,15 @@ async function handleGetMcpCapabilities(
   if (!memoryResponse.ok) {
     return cloneJsonResponse(memoryResponse);
   }
+  if (!capabilityConfigResponse.ok) {
+    return cloneJsonResponse(capabilityConfigResponse);
+  }
 
   const bot = await botResponse.json() as Record<string, unknown>;
   const configDocuments = await configDocumentsResponse.json() as unknown[];
   const documents = await documentsResponse.json() as unknown[];
   const memoryStats = await memoryResponse.json() as Record<string, unknown>;
+  const capabilityConfig = await capabilityConfigResponse.json() as Record<string, unknown>;
 
   return jsonResponse({
     bot_id: String(bot.bot_id ?? botId),
@@ -325,7 +352,7 @@ async function handleGetMcpCapabilities(
     config_documents: summarizeConfigDocuments(configDocuments),
     documents: summarizeDocuments(documents),
     memory: memoryStats,
-    capability_config: buildDefaultMcpCapabilityConfig(),
+    capability_config: capabilityConfig,
   });
 }
 
@@ -617,6 +644,22 @@ function readActorId(body: Record<string, unknown>): string {
     return body.current_wecom_user_id;
   }
   return "system";
+}
+
+function readStringArrayPayload(
+  payload: Record<string, unknown>,
+  path: string[],
+): string[] {
+  let current: unknown = payload;
+  for (const key of path) {
+    if (!current || typeof current !== "object" || Array.isArray(current)) {
+      return [];
+    }
+    current = (current as Record<string, unknown>)[key];
+  }
+  return Array.isArray(current)
+    ? current.filter((item): item is string => typeof item === "string")
+    : [];
 }
 
 function htmlResponse(body: string): Response {

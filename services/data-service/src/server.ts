@@ -101,6 +101,20 @@ export function createDataServiceServer(
         return handleUpdateBot(request, store, botMatch[1]);
       }
 
+      const botMcpCapabilityConfigMatch = url.pathname.match(
+        /^\/v1\/bots\/([^/]+)\/mcp-capabilities\/config$/,
+      );
+      if (request.method === "GET" && botMcpCapabilityConfigMatch) {
+        return handleGetBotMcpCapabilityConfig(store, botMcpCapabilityConfigMatch[1]);
+      }
+      if (request.method === "PUT" && botMcpCapabilityConfigMatch) {
+        return handleUpdateBotMcpCapabilityConfig(
+          request,
+          store,
+          botMcpCapabilityConfigMatch[1],
+        );
+      }
+
       const botConfigDocumentsMatch = url.pathname.match(
         /^\/v1\/bots\/([^/]+)\/config-documents$/,
       );
@@ -426,6 +440,31 @@ async function handleUpdateBot(
 ): Promise<Response> {
   try {
     return jsonResponse(store.updateBot(botId, await request.json()));
+  } catch (error) {
+    return errorResponse(error);
+  }
+}
+
+function handleGetBotMcpCapabilityConfig(
+  store: DataStore,
+  botId: string,
+): Response {
+  try {
+    return jsonResponse(store.getBotMcpCapabilityConfig(botId));
+  } catch (error) {
+    return errorResponse(error);
+  }
+}
+
+async function handleUpdateBotMcpCapabilityConfig(
+  request: Request,
+  store: DataStore,
+  botId: string,
+): Promise<Response> {
+  try {
+    return jsonResponse(
+      store.updateBotMcpCapabilityConfig(botId, await request.json()),
+    );
   } catch (error) {
     return errorResponse(error);
   }

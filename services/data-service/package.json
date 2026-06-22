@@ -10,5 +10,8 @@
     "test": "vitest run",
     "typecheck": "tsc -b",
     "build": "tsc -b"
+  },
+  "dependencies": {
+    "@my-agent-toolkit/contracts": "0.1.0"
   }
 }

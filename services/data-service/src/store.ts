@@ -1,3 +1,9 @@
+import {
+  buildDefaultMcpCapabilityConfig,
+  parseMcpCapabilityConfig,
+  type McpCapabilityConfig,
+} from "@my-agent-toolkit/contracts";
+
 export type BotStatus = "draft" | "initializing" | "ready";
 export type ConversationPurpose = "normal_chat" | "init" | "doc_generation";
 export type ConversationChannel = "wecom_direct" | "wecom_group";
@@ -362,6 +368,11 @@ export interface DataStore {
   listBots(): BotRecord[];
   getBot(botId: string): BotRecord | undefined;
   updateBot(botId: string, input: UpdateBotInput): BotRecord;
+  getBotMcpCapabilityConfig(botId: string): McpCapabilityConfig;
+  updateBotMcpCapabilityConfig(
+    botId: string,
+    input: unknown,
+  ): McpCapabilityConfig;
   listBotChannels(botId?: string): BotChannelRecord[];
   getBotChannelDetail(botId: string): BotChannelDetail;
   resetAdminClaim(botId: string): AdminClaimRecord;
@@ -421,6 +432,7 @@ export function createDataStore(options: DataStoreOptions = {}): DataStore {
   const chunks = new Map<string, ChunkRecord>();
   const assets = new Map<string, AssetRecord>();
   const wecomSecrets = new Map<string, string>();
+  const mcpCapabilityConfigs = new Map<string, McpCapabilityConfig>();
 
   return {
     createBot(input) {
@@ -484,6 +496,18 @@ export function createDataStore(options: DataStoreOptions = {}): DataStore {
         wecomSecrets.set(bot.bot_id, wecomSecret);
       }
       return updated;
+    },
+
+    getBotMcpCapabilityConfig(botId) {
+      const bot = getRequiredBot(bots, botId);
+      return mcpCapabilityConfigs.get(bot.bot_id) ?? buildDefaultMcpCapabilityConfig();
+    },
+
+    updateBotMcpCapabilityConfig(botId, input) {
+      const bot = getRequiredBot(bots, botId);
+      const config = parseMcpCapabilityConfig(input);
+      mcpCapabilityConfigs.set(bot.bot_id, config);
+      return config;
     },
 
     listBotChannels(botId) {
