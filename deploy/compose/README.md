@@ -4,6 +4,8 @@
 
 默认启动的 `bot-host` 只提供 HTTP 模拟入口，不连接真实企业微信长连接。真实企业微信连接放在 `wecom` profile 下，避免本地开发、接口测试或重复启动时抢占线上长连接。
 
+默认 `control-api` 会把消息转发到 `http://bot-host:8400`。如果需要让 WebUI 的“重置引导”等主动推送能力使用真实企业微信长连接 worker，启动时将 `BOT_HOST_URL` 覆盖为 `http://bot-host-real:8401`。
+
 ## 启动基础服务
 
 ```bash
@@ -48,7 +50,7 @@ WECOM_SECRET=enterprise-wechat-secret
 启动真实长连接：
 
 ```bash
-docker compose -f deploy/compose/docker-compose.yml --profile wecom up -d bot-host-real
+BOT_HOST_URL=http://bot-host-real:8401 docker compose -f deploy/compose/docker-compose.yml --profile wecom up -d control-api bot-host-real
 ```
 
 检查真实 Bot Host：

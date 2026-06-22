@@ -7,7 +7,7 @@ services:
       PORT: "8600"
       DATA_SERVICE_URL: "http://data-service:8300"
       LOG_SERVICE_URL: "http://log-service:8500"
-      BOT_HOST_URL: "http://bot-host-real:8401"
+      BOT_HOST_URL: "${BOT_HOST_URL:-http://bot-host:8400}"
     ports:
       - "8600:8600"
     depends_on:
@@ -15,7 +15,7 @@ services:
         condition: service_healthy
       log-service:
         condition: service_healthy
-      bot-host-real:
+      bot-host:
         condition: service_healthy
     healthcheck:
       test:
