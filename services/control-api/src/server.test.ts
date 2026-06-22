@@ -50,8 +50,15 @@ describe("control-api server", () => {
     expect(html).toContain("已同步");
     expect(html).toContain("机器人配置");
     expect(html).toContain("能力状态");
+    expect(html).toContain("编辑能力");
+    expect(html).toContain("保存能力配置");
     expect(html).toContain("MCP Tools");
     expect(html).toContain("记忆索引");
+    expect(html).toContain("memory-readable-scope");
+    expect(html).toContain("memory-writable-scope");
+    expect(html).toContain("document-writable-scope");
+    expect(html).toContain("mcp-tool");
+    expect(html).toContain("directory_refs");
     expect(html).toContain("config-status");
     expect(html).toContain("capability_config");
     expect(html).toContain("最近更新");
@@ -68,6 +75,7 @@ describe("control-api server", () => {
     expect(html).toContain("/v1/bot-channels");
     expect(html).toContain("/config-documents");
     expect(html).toContain("/mcp-capabilities");
+    expect(html).toContain("/mcp-capabilities/config");
     expect(html).toContain("/initialization/restart");
     expect(html).toContain("setInterval");
     expect(html).not.toContain("模拟管理员启用");

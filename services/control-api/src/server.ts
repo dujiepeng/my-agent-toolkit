@@ -954,6 +954,38 @@ function renderChannelWorkbenchPage(): string {
       font-size: 12px;
       font-weight: 650;
     }
+    .choice-grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 8px;
+    }
+    .choice-grid label {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      min-height: 40px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 8px 10px;
+      color: var(--text);
+      background: #fff;
+      font-size: 13px;
+    }
+    .choice-grid input { width: auto; min-height: auto; }
+    .field-group {
+      display: grid;
+      gap: 8px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 10px;
+      background: #fbfcfd;
+    }
+    .field-group legend {
+      padding: 0 4px;
+      color: var(--muted);
+      font-size: 13px;
+      font-weight: 700;
+    }
     .form-grid { display: grid; gap: 10px; }
     .row-2 { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
     .empty { padding: 28px 16px; color: var(--muted); text-align: center; }
@@ -1039,7 +1071,7 @@ function renderChannelWorkbenchPage(): string {
     @media (max-width: 680px) {
       .top { align-items: flex-start; flex-direction: column; padding: 12px 0; }
       main { width: min(100vw - 20px, 1440px); }
-      .filters, .grid-2, .row-2, .config-note, .capability-grid { grid-template-columns: 1fr; }
+      .filters, .grid-2, .row-2, .config-note, .capability-grid, .choice-grid { grid-template-columns: 1fr; }
       .kv { grid-template-columns: 1fr; gap: 2px; }
     }
   </style>
@@ -1120,7 +1152,24 @@ function renderChannelWorkbenchPage(): string {
     const searchInput = document.querySelector("#searchInput");
     const statusFilter = document.querySelector("#statusFilter");
     const modalBackdrop = document.querySelector("#modalBackdrop");
-    const channelForm = document.querySelector("#channelForm");
+    const modalTitle = document.querySelector("#modalTitle");
+    const modalBody = document.querySelector(".modal-body");
+
+    const MCP_SCOPES = ["system", "shared", "bot", "user", "session"];
+    const MCP_TOOLS = [
+      "document.create",
+      "document.ingest_file",
+      "document.ingest_url",
+      "document.scan",
+      "memory.write",
+      "memory.ingest_file",
+      "memory.ingest_url",
+      "memory.scan",
+      "memory.delete",
+      "memory.search",
+      "memory.stats",
+      "search.query",
+    ];
 
     function setToast(message, isError = false) {
       toast.textContent = message;
@@ -1268,7 +1317,7 @@ function renderChannelWorkbenchPage(): string {
           configDocPreview("soul", soul),
           configDocPreview("agents.md", agents),
         ].join("")),
-        section("能力状态", renderCapabilities(capabilities)),
+        sectionWithActions("能力状态", renderCapabilities(capabilities), '<button type="button" class="secondary" data-action="edit-capabilities">编辑能力</button>'),
         section("文档", normalDocs.length ? normalDocs.map((doc) => docPreview(doc.title, doc)).join("") : '<div class="subtle">暂无普通文档。</div>'),
         sectionWithActions("危险操作", '<div class="subtle">删除 Channel 会清除企业微信 Bot ID 和 Secret，使 runtime 不再拉起该 Channel；不会删除 Bot、聊天记录、机器人配置或普通文档。</div>', '<button type="button" class="danger" data-action="delete-channel">删除 Channel</button>'),
       ].join("");
@@ -1412,14 +1461,70 @@ function renderChannelWorkbenchPage(): string {
     }
 
     function openModal(bot) {
+      modalTitle.textContent = bot ? "编辑 Channel" : "新增 Channel";
+      modalBody.innerHTML = renderChannelForm();
+      const channelForm = document.querySelector("#channelForm");
       channelForm.reset();
-      document.querySelector("#modalTitle").textContent = bot ? "编辑 Channel" : "新增 Channel";
       channelForm.elements.bot_id.value = bot?.bot_id || "";
       channelForm.elements.name.value = bot?.name || "";
       channelForm.elements.runtime.value = bot?.runtime || "kiro";
       channelForm.elements.wecom_bot_id.value = bot?.wecom_bot_id || "";
       modalBackdrop.classList.add("open");
       channelForm.elements.name.focus();
+    }
+
+    function renderChannelForm() {
+      return '<form id="channelForm" class="form-grid">' +
+        '<input name="bot_id" type="hidden">' +
+        '<div class="row-2">' +
+          '<label>名称<input name="name" required placeholder="PRD Bot"></label>' +
+          '<label>LLM<select name="runtime"><option value="kiro">kiro</option><option value="mock">mock</option></select></label>' +
+        '</div>' +
+        '<label>企业微信Bot ID<input name="wecom_bot_id" required placeholder="企业微信后台的 Bot ID"></label>' +
+        '<label>企业微信 Secret<input name="wecom_secret" type="password" autocomplete="new-password" placeholder="新建必填；更新时留空不修改"></label>' +
+        '<div class="tools">' +
+          '<button type="submit">保存并生成验证码</button>' +
+          '<button type="button" class="secondary" data-action="modal-cancel">取消</button>' +
+        '</div>' +
+      '</form>';
+    }
+
+    function openCapabilityModal(detail) {
+      const config = detail?.mcp_capabilities?.capability_config;
+      if (!config) {
+        setToast("能力配置尚未加载。", true);
+        return;
+      }
+      modalTitle.textContent = "编辑能力";
+      modalBody.innerHTML = renderCapabilityForm(config);
+      modalBackdrop.classList.add("open");
+      document.querySelector("#capabilityForm input")?.focus();
+    }
+
+    function renderCapabilityForm(config) {
+      return '<form id="capabilityForm" class="form-grid">' +
+        '<fieldset class="field-group"><legend>MCP Tools</legend><div class="choice-grid">' +
+          MCP_TOOLS.map((tool) => checkbox("mcp-tool", tool, config.tools?.enabled?.includes(tool))).join("") +
+        '</div></fieldset>' +
+        '<fieldset class="field-group"><legend>Memory 可读 Scope</legend><div class="choice-grid">' +
+          MCP_SCOPES.map((scope) => checkbox("memory-readable-scope", scope, config.memory?.readable_scopes?.includes(scope))).join("") +
+        '</div></fieldset>' +
+        '<fieldset class="field-group"><legend>Memory 可写 Scope</legend><div class="choice-grid">' +
+          MCP_SCOPES.map((scope) => checkbox("memory-writable-scope", scope, config.memory?.writable_scopes?.includes(scope))).join("") +
+        '</div></fieldset>' +
+        '<fieldset class="field-group"><legend>Document 可写 Scope</legend><div class="choice-grid">' +
+          MCP_SCOPES.map((scope) => checkbox("document-writable-scope", scope, config.documents?.writable_scopes?.includes(scope))).join("") +
+        '</div></fieldset>' +
+        '<label>directory_refs<textarea name="directory_refs" placeholder="每行一个 directory ref">' + escapeHtml((config.directory_refs || []).join("\\n")) + '</textarea></label>' +
+        '<div class="tools">' +
+          '<button type="submit">保存能力配置</button>' +
+          '<button type="button" class="secondary" data-action="modal-cancel">取消</button>' +
+        '</div>' +
+      '</form>';
+    }
+
+    function checkbox(name, value, checked) {
+      return '<label><input type="checkbox" name="' + escapeHtml(name) + '" value="' + escapeHtml(value) + '"' + (checked ? " checked" : "") + '> <span>' + escapeHtml(value) + '</span></label>';
     }
 
     function closeModal() {
@@ -1471,6 +1576,10 @@ function renderChannelWorkbenchPage(): string {
           openModal(detail.bot);
           return;
         }
+        if (button.dataset.action === "edit-capabilities") {
+          openCapabilityModal(detail);
+          return;
+        }
         if (button.dataset.action === "reset-admin") {
           const claim = await requestJson("/v1/bots/" + encodeURIComponent(botId) + "/admin/reset", { method: "POST" });
           await loadDetail(state.selectedChannelId);
@@ -1500,8 +1609,19 @@ function renderChannelWorkbenchPage(): string {
       }
     });
 
-    channelForm.addEventListener("submit", async (event) => {
+    modalBody.addEventListener("click", (event) => {
+      const button = event.target.closest("button[data-action='modal-cancel']");
+      if (button) closeModal();
+    });
+
+    modalBody.addEventListener("submit", async (event) => {
       event.preventDefault();
+      if (event.target.id === "capabilityForm") {
+        await submitCapabilityForm(event.target);
+        return;
+      }
+      if (event.target.id !== "channelForm") return;
+      const channelForm = event.target;
       const form = Object.fromEntries(new FormData(channelForm).entries());
       const botId = form.bot_id || createBotId(form.name);
       const body = {
@@ -1532,9 +1652,45 @@ function renderChannelWorkbenchPage(): string {
       }
     });
 
+    async function submitCapabilityForm(formElement) {
+      if (!state.selectedChannelId) return;
+      const detail = state.details.get(state.selectedChannelId);
+      const botId = detail?.bot?.bot_id;
+      if (!botId) return;
+      const currentConfig = detail?.mcp_capabilities?.capability_config || {};
+      const formData = new FormData(formElement);
+      const payload = {
+        actor_id: detail.admin?.wecom_user_id || "system",
+        version: currentConfig.version || 1,
+        memory: {
+          enabled: currentConfig.memory?.enabled !== false,
+          readable_scopes: formData.getAll("memory-readable-scope"),
+          writable_scopes: formData.getAll("memory-writable-scope"),
+        },
+        documents: {
+          enabled: currentConfig.documents?.enabled !== false,
+          writable_scopes: formData.getAll("document-writable-scope"),
+        },
+        tools: {
+          enabled: formData.getAll("mcp-tool"),
+        },
+        directory_refs: String(formData.get("directory_refs") || "")
+          .split(/\\r?\\n/)
+          .map((item) => item.trim())
+          .filter(Boolean),
+      };
+      await requestJson("/v1/bots/" + encodeURIComponent(botId) + "/mcp-capabilities/config", {
+        method: "PUT",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+      closeModal();
+      await loadDetail(state.selectedChannelId);
+      setToast("能力配置已保存。");
+    }
+
     document.querySelector("#newChannelButton").addEventListener("click", () => openModal());
     document.querySelector("#closeModalButton").addEventListener("click", closeModal);
-    document.querySelector("#cancelModalButton").addEventListener("click", closeModal);
     document.querySelector("#refreshButton").addEventListener("click", () => refreshAll().catch((error) => setToast(error.error || "刷新失败", true)));
     searchInput.addEventListener("input", renderList);
     statusFilter.addEventListener("change", renderList);
