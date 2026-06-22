@@ -90,11 +90,15 @@ interface ConfigDocument {
 }
 
 interface WizardState {
-  answers: string[];
+  phase: "soul" | "agents";
+  soulAnswers: string[];
+  agentsAnswers: string[];
 }
 
 const wizardStatesByConfig = new WeakMap<BotHostConfig, Map<string, WizardState>>();
 const MISSING_GENERATED_DOCUMENTS_MESSAGE = "初始化文档生成失败：没有生成 soul 和 agents.md。请回复“确认”重新生成，或说明需要修改的配置。";
+const MISSING_SOUL_DOCUMENT_MESSAGE = "Soul 生成失败：没有生成 soul。请稍后重试或在 WebUI 重置引导。";
+const MISSING_AGENTS_DOCUMENT_MESSAGE = "工作方式生成失败：没有生成 agents.md。请稍后重试或在 WebUI 重置引导。";
 const INVALID_RUNTIME_OUTPUT_MESSAGE = "LLM 运行器没有生成有效回复，请稍后重试或检查 runtime 配置。";
 const WECOM_STREAM_REFRESH_INTERVAL_MS = 500;
 
@@ -281,19 +285,9 @@ async function shouldHandleWizardConfirmationAsync(
   config: BotHostConfig,
   input: WeComMessageInput,
 ): Promise<boolean> {
-  if (!isConfirmAnswer(input.text)) {
-    return false;
-  }
-  try {
-    const context = await resolveMessageContext(config, input);
-    if (!context.allowed || context.reason !== "initializing" || !context.conversation?.conversation_id) {
-      return false;
-    }
-    const state = getWizardStates(config).get(wizardKey(input, context.conversation.conversation_id));
-    return Boolean(state && state.answers.length >= WIZARD_FIELDS.length);
-  } catch (_error) {
-    return false;
-  }
+  void config;
+  void input;
+  return false;
 }
 
 async function shouldStreamReply(
@@ -555,11 +549,15 @@ function startInitializationWizard(
   config: BotHostConfig,
   conversationId?: string,
 ): string {
-  getWizardStates(config).set(wizardKey(input, conversationId), { answers: [] });
+  getWizardStates(config).set(wizardKey(input, conversationId), {
+    phase: "soul",
+    soulAnswers: [],
+    agentsAnswers: [],
+  });
   return [
     "管理员认领成功，开始初始化。",
     "",
-    WIZARD_QUESTIONS[0],
+    SOUL_WIZARD_QUESTIONS[0],
   ].join("\n");
 }
 
@@ -570,53 +568,79 @@ async function handleWizardMessage(
 ): Promise<Record<string, unknown>> {
   const key = wizardKey(input, conversationId);
   const wizardStates = getWizardStates(config);
-  const state = wizardStates.get(key) ?? { answers: [] };
+  const state = wizardStates.get(key) ?? {
+    phase: "soul" as const,
+    soulAnswers: [],
+    agentsAnswers: [],
+  };
   const normalized = normalizeWizardAnswer(input.text);
 
-  if (state.answers.length < WIZARD_FIELDS.length) {
-    state.answers.push(normalized);
+  if (state.phase === "soul") {
+    state.soulAnswers.push(normalized);
     wizardStates.set(key, state);
-    const output = state.answers.length < WIZARD_FIELDS.length
-      ? WIZARD_QUESTIONS[state.answers.length]
-      : buildWizardConfirmation(state.answers);
-    return { conversation_id: conversationId, output };
-  }
-
-  if (!isConfirmAnswer(normalized)) {
-    applyWizardConfirmationEdits(state.answers, normalized);
+    if (state.soulAnswers.length < SOUL_WIZARD_QUESTIONS.length) {
+      return {
+        conversation_id: conversationId,
+        output: SOUL_WIZARD_QUESTIONS[state.soulAnswers.length],
+      };
+    }
+    const result = await generateSoulFromWizardAnswers(config, input, conversationId, state.soulAnswers);
+    if (result.output.startsWith("初始化文档生成失败：") || result.output.startsWith("Soul 生成失败：")) {
+      return {
+        conversation_id: conversationId,
+        run_id: result.run_id,
+        output: result.output,
+      };
+    }
+    state.phase = "agents";
     wizardStates.set(key, state);
-    return {
-      conversation_id: conversationId,
-      output: buildWizardConfirmation(state.answers),
-    };
-  }
-
-  const result = await processAllowedWeComMessage(
-    {
-      ...input,
-      text: buildWizardGenerationPrompt(state.answers),
-    },
-    config,
-    conversationId,
-  );
-  if (result.ready) {
-    wizardStates.delete(key);
-    return result;
-  }
-
-  if (result.output === MISSING_GENERATED_DOCUMENTS_MESSAGE) {
-    const fallback = await initializeFromWizardAnswers(config, input, state.answers);
-    wizardStates.delete(key);
     return {
       conversation_id: conversationId,
       run_id: result.run_id,
-      output: fallback.visibleOutput,
-      initialized: true,
-      ready: true,
-      status: "ready",
+      output: [
+        "Soul 配置已确认，正在生成 soul。",
+        result.output,
+        "开始配置工作方式。",
+        AGENTS_WIZARD_QUESTIONS[0],
+      ].filter(Boolean).join("\n\n"),
     };
   }
-  return result;
+
+  if (state.agentsAnswers.length === 1 && isMultipleChoiceAnswer(normalized)) {
+    return {
+      conversation_id: conversationId,
+      output: "核心工作只能选择一个。请重新回复一个选项编号，或直接说明一个核心工作。",
+    };
+  }
+
+  state.agentsAnswers.push(normalized);
+  wizardStates.set(key, state);
+  if (state.agentsAnswers.length < AGENTS_WIZARD_QUESTIONS.length) {
+    return {
+      conversation_id: conversationId,
+      output: AGENTS_WIZARD_QUESTIONS[state.agentsAnswers.length],
+    };
+  }
+
+  const result = await generateAgentsFromWizardAnswers(
+    config,
+    input,
+    conversationId,
+    state.soulAnswers,
+    state.agentsAnswers,
+  );
+  wizardStates.delete(key);
+  return {
+    conversation_id: conversationId,
+    run_id: result.run_id,
+    output: [
+      "工作方式配置已确认，正在生成 agents.md。",
+      result.output,
+    ].filter(Boolean).join("\n\n"),
+    initialized: true,
+    ready: true,
+    status: "ready",
+  };
 }
 
 function wizardKey(input: WeComMessageInput, conversationId?: string): string {
@@ -695,6 +719,61 @@ async function processAllowedWeComMessage(
         status: "ready",
       }
       : {}),
+  };
+}
+
+async function generateSoulFromWizardAnswers(
+  config: BotHostConfig,
+  input: WeComMessageInput,
+  conversationId: string,
+  soulAnswers: string[],
+): Promise<{ run_id: string; output: string }> {
+  const result = await processAllowedWeComMessage(
+    {
+      ...input,
+      text: buildSoulGenerationPrompt(soulAnswers),
+    },
+    config,
+    conversationId,
+  );
+  if (result.output === MISSING_SOUL_DOCUMENT_MESSAGE) {
+    const fallback = await initializeSoulFromWizardAnswers(config, input, soulAnswers);
+    return {
+      run_id: result.run_id,
+      output: fallback.visibleOutput,
+    };
+  }
+  return {
+    run_id: result.run_id,
+    output: result.output,
+  };
+}
+
+async function generateAgentsFromWizardAnswers(
+  config: BotHostConfig,
+  input: WeComMessageInput,
+  conversationId: string,
+  soulAnswers: string[],
+  agentsAnswers: string[],
+): Promise<{ run_id: string; output: string }> {
+  const result = await processAllowedWeComMessage(
+    {
+      ...input,
+      text: buildAgentsGenerationPrompt(soulAnswers, agentsAnswers),
+    },
+    config,
+    conversationId,
+  );
+  if (result.output === MISSING_AGENTS_DOCUMENT_MESSAGE) {
+    const fallback = await initializeAgentsFromWizardAnswers(config, input, soulAnswers, agentsAnswers);
+    return {
+      run_id: result.run_id,
+      output: fallback.visibleOutput,
+    };
+  }
+  return {
+    run_id: result.run_id,
+    output: result.output,
   };
 }
 
@@ -890,12 +969,12 @@ async function processAssistantOutput(
   const titles = new Set(parsed.configDocuments.map((document) => document.title));
   await persistConfigDocuments(config, input, parsed.configDocuments);
 
-  if (titles.has("soul") && titles.has("agents.md")) {
+  if (titles.has("agents.md")) {
     return {
       ...parsed,
       visibleOutput: [
         parsed.visibleOutput,
-        "机器人已完成初始化，可以开始工作。",
+        "初始化完成，可以开始工作。",
       ].filter(Boolean).join("\n\n"),
     };
   }
@@ -930,7 +1009,7 @@ async function persistConfigDocuments(
   }
 
   const titles = new Set(documents.map((document) => document.title));
-  if (titles.has("soul") && titles.has("agents.md")) {
+  if (titles.has("agents.md")) {
     await postJson(
       config,
       `${config.dataServiceUrl}/v1/bots/${encodeURIComponent(input.bot_id)}/ready`,
@@ -951,6 +1030,18 @@ function selectVisibleAssistantOutput(
     return processed.visibleOutput.startsWith("初始化文档生成失败：")
       ? processed.visibleOutput
       : MISSING_GENERATED_DOCUMENTS_MESSAGE;
+  }
+  if (isSoulGenerationPrompt(inputText) && !processed.configDocuments.some((document) => document.title === "soul")) {
+    if (processed.visibleOutput.startsWith("初始化文档生成失败：")) {
+      return processed.visibleOutput;
+    }
+    return MISSING_SOUL_DOCUMENT_MESSAGE;
+  }
+  if (isAgentsGenerationPrompt(inputText) && !processed.configDocuments.some((document) => document.title === "agents.md")) {
+    if (processed.visibleOutput.startsWith("初始化文档生成失败：")) {
+      return processed.visibleOutput;
+    }
+    return MISSING_AGENTS_DOCUMENT_MESSAGE;
   }
 
   const output = processed.visibleOutput || rawOutput;
@@ -1082,6 +1173,171 @@ function buildWizardGenerationPrompt(answers: string[]): string {
   ].join("\n");
 }
 
+function summarizeSoulAnswers(answers: string[]): Record<SoulWizardFieldKey, string> {
+  return {
+    identity: mapSingleChoice(answers[0], SOUL_IDENTITY_OPTIONS),
+    personality: mapSingleChoice(answers[1], SOUL_PERSONALITY_OPTIONS),
+    communication: mapSingleChoice(answers[2], SOUL_COMMUNICATION_OPTIONS),
+  };
+}
+
+function summarizeAgentsAnswers(answers: string[]): Record<AgentsWizardFieldKey, string> {
+  return {
+    background: normalizeOptionalAnswer(answers[0]),
+    core_work: mapSingleChoice(answers[1], AGENTS_CORE_WORK_OPTIONS),
+    interaction: mapSingleChoice(answers[2], AGENTS_INTERACTION_OPTIONS),
+    memory: mapSingleChoice(answers[3], AGENTS_MEMORY_OPTIONS),
+    document_storage: mapSingleChoice(answers[4], AGENTS_DOCUMENT_STORAGE_OPTIONS),
+    skills_mcp: normalizeOptionalAnswer(answers[5]),
+    work_rules: normalizeOptionalAnswer(answers[6]),
+  };
+}
+
+function buildSoulGenerationPrompt(answers: string[]): string {
+  const summary = summarizeSoulAnswers(answers);
+  return [
+    "请根据以下 Soul 引导配置生成 soul 文档。",
+    "",
+    ...SOUL_WIZARD_FIELDS.map((field) => `${field.label}：${summary[field.key]}`),
+    "",
+    "输出要求：",
+    "1. 只输出简短确认语和一个 document block。",
+    "2. document block 必须严格使用文件名：private/soul.md。",
+    "3. soul 只描述机器人是谁：身份、性格、沟通风格、价值观和人格边界。",
+    "4. 不要写工作流程、工具规则、文档规则、职责清单、管理员流程或敏感信息。",
+  ].join("\n");
+}
+
+function buildAgentsGenerationPrompt(soulAnswers: string[], agentsAnswers: string[]): string {
+  const soul = summarizeSoulAnswers(soulAnswers);
+  const agents = summarizeAgentsAnswers(agentsAnswers);
+  return [
+    "请根据以下 Agents 引导配置生成 agents.md 文档。",
+    "",
+    "Soul 摘要：",
+    ...SOUL_WIZARD_FIELDS.map((field) => `${field.label}：${soul[field.key]}`),
+    "",
+    "工作方式配置：",
+    ...AGENTS_WIZARD_FIELDS.map((field) => `${field.label}：${agents[field.key]}`),
+    "",
+    "硬性规则：",
+    "1. agents.md 只描述机器人如何工作：核心工作、业务背景、交互规则、任务流程、文档生成规则、记忆策略、Skill/MCP 规则、禁止行为和管理员修改流程。",
+    "2. 一个 bot 只能有一个核心工作，其他能力只能作为辅助，不要写成多主责列表。",
+    "3. 当核心工作涉及 PRD，且管理员配置了 Console、IMM、计量计费等必须确认项时，必须逐项确认。",
+    "4. 一次只能问一个管理员指定项。",
+    "5. 不得要求用户使用组合格式一次回复多个确认项，例如 1a 2a 3a。",
+    "6. Console、IMM、计量计费等项必须分别完成确认后，才能输出 PRD。",
+    "7. 不要重复 soul 里的身份、性格和角色气质；不要写入敏感信息。",
+    "",
+    "输出要求：",
+    "1. 只输出简短确认语和一个 document block。",
+    "2. document block 必须严格使用文件名：instructions/AGENTS.md。",
+  ].join("\n");
+}
+
+async function initializeSoulFromWizardAnswers(
+  config: BotHostConfig,
+  input: WeComMessageInput,
+  answers: string[],
+): Promise<ProcessedOutput> {
+  const configDocuments = [buildFallbackSoulDocument(answers)];
+  await persistConfigDocuments(config, input, configDocuments);
+  return {
+    visibleOutput: "Soul 已生成。",
+    configDocuments,
+  };
+}
+
+async function initializeAgentsFromWizardAnswers(
+  config: BotHostConfig,
+  input: WeComMessageInput,
+  soulAnswers: string[],
+  agentsAnswers: string[],
+): Promise<ProcessedOutput> {
+  const configDocuments = [buildFallbackAgentsDocument(soulAnswers, agentsAnswers)];
+  await persistConfigDocuments(config, input, configDocuments);
+  return {
+    visibleOutput: "初始化完成，可以开始工作。",
+    configDocuments,
+  };
+}
+
+function buildFallbackSoulDocument(answers: string[]): ConfigDocument {
+  const summary = summarizeSoulAnswers(answers);
+  return {
+    title: "soul",
+    content: [
+      "# Soul",
+      "",
+      "## 我是谁",
+      `你是${summary.identity}。`,
+      "",
+      "## 性格",
+      `你的性格是${summary.personality}。`,
+      "",
+      "## 沟通风格",
+      `你的沟通风格是${summary.communication}。`,
+      "",
+      "## 人格边界",
+      "不要输出或保存企业微信 Secret、API Key、管理员认领码、认证文件路径等敏感信息。",
+      "不要伪装成真人、系统管理员或企业微信官方客服。",
+    ].join("\n"),
+  };
+}
+
+function buildFallbackAgentsDocument(soulAnswers: string[], agentsAnswers: string[]): ConfigDocument {
+  const soul = summarizeSoulAnswers(soulAnswers);
+  const agents = summarizeAgentsAnswers(agentsAnswers);
+  const prdRule = isPrdCoreWork(agents.core_work)
+    ? [
+      "- 生成 PRD 前必须逐项确认管理员指定项，例如 Console、IMM、计量计费。",
+      "- 一次只能问一个管理员指定项，不得要求用户使用组合格式一次回复多个确认项，例如 1a 2a 3a。",
+      "- Console、IMM、计量计费等项分别确认后，才能输出 PRD。",
+    ]
+    : [];
+  return {
+    title: "agents.md",
+    content: [
+      "# AGENTS",
+      "",
+      "## 核心工作",
+      `核心工作：${agents.core_work}`,
+      `业务背景：${agents.background}`,
+      `机器人身份参考：${soul.identity}`,
+      "",
+      "## 交互规则",
+      `交互方式：${agents.interaction}`,
+      "- 信息不足时，一次只问当前最关键的问题。",
+      "- 输出结论前要显式处理约束、风险、范围和待确认事项。",
+      ...prdRule,
+      "",
+      "## 文档与记忆",
+      `长期记忆：${agents.memory}`,
+      `文档存储：${agents.document_storage}`,
+      "确认后的业务规则、长期偏好和关键文档可以写入记忆；临时沟通只保留在会话上下文中。",
+      "",
+      "## Skill / MCP 使用规则",
+      `Skill / MCP 约束：${agents.skills_mcp}`,
+      "只有在任务需要且已授权时才调用外部工具；工具结果需要转化为可读结论再回复。",
+      "",
+      "## 工作规则",
+      `管理员指定规则：${agents.work_rules}`,
+      "",
+      "## 禁止行为",
+      "- 不得请求、输出或写入企业微信 Secret、API Key、管理员认领码、认证文件路径等敏感信息。",
+      "- 不得在未确认的情况下把临时猜测写入长期记忆。",
+      "- 不得绕过管理员流程修改 soul、AGENTS 或 channel 配置。",
+      "",
+      "## 管理员修改配置",
+      "管理员可以通过控制台或重置引导流程修改 soul、AGENTS、skill、MCP 和初始化配置。",
+    ].join("\n"),
+  };
+}
+
+function isPrdCoreWork(coreWork: string): boolean {
+  return /PRD|需求文档|产品需求/.test(coreWork);
+}
+
 function buildFallbackInitializationDocuments(answers: string[]): ConfigDocument[] {
   const summary = summarizeWizardAnswers(answers);
   const soul = [
@@ -1152,6 +1408,14 @@ function isInitializationGenerationPrompt(text: string): boolean {
   return text.includes("请根据以下管理员初始化配置生成两个文档块：soul 和 agents.md。");
 }
 
+function isSoulGenerationPrompt(text: string): boolean {
+  return text.includes("请根据以下 Soul 引导配置生成 soul 文档。");
+}
+
+function isAgentsGenerationPrompt(text: string): boolean {
+  return text.includes("请根据以下 Agents 引导配置生成 agents.md 文档。");
+}
+
 function normalizeOptionalAnswer(answer: string | undefined): string {
   if (!answer || answer === "跳过") {
     return "未指定";
@@ -1193,6 +1457,10 @@ function tokenizeChoiceAnswer(answer: string, options: Record<string, string>): 
     }
     return [token];
   });
+}
+
+function isMultipleChoiceAnswer(answer: string): boolean {
+  return tokenizeChoiceAnswer(answer, AGENTS_CORE_WORK_OPTIONS).length > 1;
 }
 
 function applyWizardConfirmationEdits(answers: string[], text: string): void {
@@ -1439,6 +1707,98 @@ type WizardFieldKey =
   | "memory"
   | "skills_mcp"
   | "constraints";
+
+type SoulWizardFieldKey = "identity" | "personality" | "communication";
+type AgentsWizardFieldKey =
+  | "background"
+  | "core_work"
+  | "interaction"
+  | "memory"
+  | "document_storage"
+  | "skills_mcp"
+  | "work_rules";
+
+const SOUL_WIZARD_FIELDS: Array<{ key: SoulWizardFieldKey; label: string }> = [
+  { key: "identity", label: "我是谁" },
+  { key: "personality", label: "性格" },
+  { key: "communication", label: "沟通风格" },
+];
+
+const AGENTS_WIZARD_FIELDS: Array<{ key: AgentsWizardFieldKey; label: string }> = [
+  { key: "background", label: "业务背景" },
+  { key: "core_work", label: "核心工作" },
+  { key: "interaction", label: "交互方式" },
+  { key: "memory", label: "长期存储/长期记忆" },
+  { key: "document_storage", label: "文档存储" },
+  { key: "skills_mcp", label: "Skill / MCP 约束" },
+  { key: "work_rules", label: "工作规则" },
+];
+
+const SOUL_WIZARD_QUESTIONS = [
+  "Soul 引导 1/3：我是谁？选项：1 产品经理助手 / 2 QA 测试助手 / 3 技术文档助手 / 4 项目管理助手 / 5 其他，请直接说明。",
+  "Soul 引导 2/3：我的性格是什么样的？选项：1 冷静务实 / 2 严谨审慎 / 3 主动推进 / 4 友好耐心 / 5 其他，请直接说明。",
+  "Soul 引导 3/3：我的沟通风格是什么？选项：1 简洁直接 / 2 严谨完整 / 3 先问清楚再回答 / 4 给出选项辅助决策 / 5 其他，请直接说明。",
+];
+
+const AGENTS_WIZARD_QUESTIONS = [
+  "Agents 引导 1/7：业务背景是什么？公司/团队是做什么的？（可回复“跳过”）",
+  "Agents 引导 2/7：这个机器人只负责一类核心工作，你希望它的核心工作是什么？选项：1 撰写/维护 PRD / 2 竞品分析 / 3 需求评审与拆解 / 4 用户故事编写 / 5 数据指标定义 / 6 QA 测试 / 7 技术文档 / 8 项目管理 / 9 其他，请直接说明。",
+  "Agents 引导 3/7：交互方式是什么？选项：1 逐句引导，一次只问一个问题 / 2 批量引导，一次列出多个待确认项 / 3 先给推荐方案，再让用户确认 / 4 其他，请直接说明。",
+  "Agents 引导 4/7：是否使用长期存储/长期记忆？选项：1 使用，确认后的业务规则和文档需要沉淀 / 2 不使用，只保留当前会话 / 3 待定。",
+  "Agents 引导 5/7：是否需要文档存储？选项：1 需要，生成的 PRD/方案/纪要要保存 / 2 不需要，只在对话中输出 / 3 待定。",
+  "Agents 引导 6/7：是否有固定 Skill / MCP / 工具约束？（可回复“跳过”）",
+  "Agents 引导 7/7：有没有必须遵守的工作规则？（可回复“跳过”）",
+];
+
+const SOUL_IDENTITY_OPTIONS: Record<string, string> = {
+  "1": "产品经理助手",
+  "2": "QA 测试助手",
+  "3": "技术文档助手",
+  "4": "项目管理助手",
+};
+
+const SOUL_PERSONALITY_OPTIONS: Record<string, string> = {
+  "1": "冷静务实",
+  "2": "严谨审慎",
+  "3": "主动推进",
+  "4": "友好耐心",
+};
+
+const SOUL_COMMUNICATION_OPTIONS: Record<string, string> = {
+  "1": "简洁直接",
+  "2": "严谨完整",
+  "3": "先问清楚再回答",
+  "4": "给出选项辅助决策",
+};
+
+const AGENTS_CORE_WORK_OPTIONS: Record<string, string> = {
+  "1": "撰写/维护 PRD",
+  "2": "竞品分析",
+  "3": "需求评审与拆解",
+  "4": "用户故事编写",
+  "5": "数据指标定义",
+  "6": "QA 测试",
+  "7": "技术文档",
+  "8": "项目管理",
+};
+
+const AGENTS_INTERACTION_OPTIONS: Record<string, string> = {
+  "1": "逐句引导，一次只问一个问题",
+  "2": "批量引导，一次列出多个待确认项",
+  "3": "先给推荐方案，再让用户确认",
+};
+
+const AGENTS_MEMORY_OPTIONS: Record<string, string> = {
+  "1": "使用，确认后的业务规则和文档需要沉淀",
+  "2": "不使用，只保留当前会话",
+  "3": "待定",
+};
+
+const AGENTS_DOCUMENT_STORAGE_OPTIONS: Record<string, string> = {
+  "1": "需要，生成的 PRD/方案/纪要要保存",
+  "2": "不需要，只在对话中输出",
+  "3": "待定",
+};
 
 const WIZARD_FIELDS: Array<{ key: WizardFieldKey; label: string }> = [
   { key: "background", label: "业务背景" },
