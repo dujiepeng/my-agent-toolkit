@@ -27,6 +27,17 @@ export interface McpClientConfig extends McpRunnerConfig {
   fetch?: typeof fetch;
 }
 
+export interface McpToolCall {
+  tool: string;
+  input: unknown;
+}
+
+export interface McpToolResult {
+  ok: boolean;
+  result?: unknown;
+  error?: unknown;
+}
+
 export async function fetchMcpToolManifest(
   config: McpClientConfig,
   context: TrustedMcpContext,
@@ -47,6 +58,66 @@ export async function fetchMcpToolManifest(
     throw new Error(`mcp-service tools request failed: ${response.status}`);
   }
   return parseMcpToolManifest(body);
+}
+
+export async function callMcpTool(
+  config: McpClientConfig,
+  context: TrustedMcpContext,
+  toolCall: McpToolCall,
+): Promise<McpToolResult> {
+  const fetchImpl = config.fetch ?? fetch;
+  const baseUrl = config.service_url.replace(/\/+$/, "");
+  const url = `${baseUrl}/mcp/bots/${encodeURIComponent(context.bot_id)}/sessions/${
+    encodeURIComponent(context.conversation_id)
+  }/tools/call`;
+  const response = await fetchImpl(new Request(url, {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      "x-runner-token": signRunnerToken(config.runner_secret, context),
+    },
+    body: JSON.stringify(toolCall),
+  }));
+  const body = await response.json().catch(() => ({})) as unknown;
+  if (!response.ok) {
+    return {
+      ok: false,
+      error: body,
+    };
+  }
+  return parseMcpToolResult(body);
+}
+
+export function parseMcpToolCall(output: string): McpToolCall | undefined {
+  const match = output.match(/<mcp_tool_call>\s*([\s\S]*?)\s*<\/mcp_tool_call>/);
+  if (!match) {
+    return undefined;
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(match[1]);
+  } catch {
+    return undefined;
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    return undefined;
+  }
+  const record = parsed as Record<string, unknown>;
+  if (typeof record.tool !== "string" || record.tool.trim() === "") {
+    return undefined;
+  }
+  return {
+    tool: record.tool.trim(),
+    input: record.input ?? {},
+  };
+}
+
+export function formatMcpToolResult(result: McpToolResult): string {
+  return [
+    "<mcp_tool_result>",
+    JSON.stringify(result),
+    "</mcp_tool_result>",
+  ].join("\n");
 }
 
 export function buildMcpPromptSection(manifest: McpToolManifest): string {
@@ -111,6 +182,21 @@ function parseMcpToolManifest(value: unknown): McpToolManifest {
     version: 1,
     directory_refs: record.directory_refs.filter((item): item is string => typeof item === "string"),
     tools: record.tools.map(parseMcpToolDescriptor),
+  };
+}
+
+function parseMcpToolResult(value: unknown): McpToolResult {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return {
+      ok: false,
+      error: "mcp tool result must be an object",
+    };
+  }
+  const record = value as Record<string, unknown>;
+  return {
+    ok: record.ok === true,
+    ...(record.result !== undefined ? { result: record.result } : {}),
+    ...(record.error !== undefined ? { error: record.error } : {}),
   };
 }
 

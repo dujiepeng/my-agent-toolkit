@@ -116,6 +116,81 @@ describe("llm-runner server", () => {
     expect(mcpRequests[0].url).toBe("http://mcp-service:8700/mcp/bots/prd-bot/sessions/conv-1/tools");
   });
 
+  it("executes one MCP tool call emitted by the runtime", async () => {
+    const mcpRequests: Request[] = [];
+    const server = createLlmRunnerServer({
+      enabled_runtimes: ["kiro"],
+      kiro: {
+        command: process.execPath,
+        args: [
+          "-e",
+          "process.stdout.write('<mcp_tool_call>{\"tool\":\"memory.search\",\"input\":{\"query\":\"ASR\"}}</mcp_tool_call>')",
+        ],
+        timeout_ms: 1000,
+      },
+      mcp: {
+        service_url: "http://mcp-service:8700",
+        runner_secret: "runner-secret",
+      },
+      fetch: async (input) => {
+        const request = input instanceof Request ? input : new Request(input);
+        mcpRequests.push(request);
+        if (request.url.endsWith("/tools")) {
+          return new Response(JSON.stringify({
+            version: 1,
+            directory_refs: [],
+            tools: [],
+          }), {
+            status: 200,
+            headers: {
+              "content-type": "application/json",
+            },
+          });
+        }
+        expect(request.url).toBe("http://mcp-service:8700/mcp/bots/prd-bot/sessions/conv-1/tools/call");
+        expect(await request.json()).toEqual({
+          tool: "memory.search",
+          input: {
+            query: "ASR",
+          },
+        });
+        return new Response(JSON.stringify({
+          ok: true,
+          result: {
+            results: [{ id: "mem-1" }],
+          },
+        }), {
+          status: 200,
+          headers: {
+            "content-type": "application/json",
+          },
+        });
+      },
+    });
+
+    const response = await server.fetch(
+      new Request("http://localhost/v1/chat", {
+        method: "POST",
+        body: JSON.stringify({
+          bot_id: "prd-bot",
+          user_id: "user-a",
+          conversation_id: "conv-1",
+          runtime: "kiro",
+          prompt: "search memory",
+        }),
+      }),
+    );
+
+    expect(response.status).toBe(200);
+    const body = await response.json();
+    expect(body.output).toContain("<mcp_tool_result>");
+    expect(body.output).toContain("\"mem-1\"");
+    expect(mcpRequests.map((request) => new URL(request.url).pathname)).toEqual([
+      "/mcp/bots/prd-bot/sessions/conv-1/tools",
+      "/mcp/bots/prd-bot/sessions/conv-1/tools/call",
+    ]);
+  });
+
   it("returns not implemented for unavailable runtimes", async () => {
     const server = createLlmRunnerServer();
     const response = await server.fetch(

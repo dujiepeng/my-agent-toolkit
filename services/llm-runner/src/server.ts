@@ -1,8 +1,11 @@
 import { parseChatRequest, type ChatResponse } from "@my-agent-toolkit/contracts";
 import { loadRunnerConfig, type RunnerConfig } from "./config.js";
 import {
+  callMcpTool,
   fetchMcpToolManifest,
+  formatMcpToolResult,
   injectMcpPromptSection,
+  parseMcpToolCall,
 } from "./mcpClient.js";
 import { getRuntimeStatuses } from "./runtimeStatus.js";
 import {
@@ -121,10 +124,11 @@ async function handleChat(
     const chatRequest = parseChatRequest(await request.json());
     const runtimeRequest = await enrichChatRequest(config, chatRequest);
     const runtimeResult = await runRuntime(config, runtimeRequest);
+    const output = await appendMcpToolResult(config, chatRequest, runtimeResult.output);
     const response: ChatResponse = {
       run_id: `run_${crypto.randomUUID()}`,
       runner_session_id: runtimeResult.runner_session_id,
-      output: runtimeResult.output,
+      output,
     };
 
     return jsonResponse(response);
@@ -148,6 +152,37 @@ async function handleChat(
       { error: error instanceof Error ? error.message : "invalid request" },
       400,
     );
+  }
+}
+
+async function appendMcpToolResult(
+  config: RunnerConfig,
+  chatRequest: ReturnType<typeof parseChatRequest>,
+  output: string,
+): Promise<string> {
+  if (!config.mcp) {
+    return output;
+  }
+  const toolCall = parseMcpToolCall(output);
+  if (!toolCall) {
+    return output;
+  }
+  try {
+    const result = await callMcpTool({
+      ...config.mcp,
+      ...(config.fetch ? { fetch: config.fetch } : {}),
+    }, {
+      bot_id: chatRequest.bot_id,
+      user_id: chatRequest.user_id,
+      conversation_id: chatRequest.conversation_id,
+      runtime: chatRequest.runtime,
+    }, toolCall);
+    return `${output}\n\n${formatMcpToolResult(result)}`;
+  } catch (error) {
+    return `${output}\n\n${formatMcpToolResult({
+      ok: false,
+      error: error instanceof Error ? error.message : "mcp tool call failed",
+    })}`;
   }
 }
 
