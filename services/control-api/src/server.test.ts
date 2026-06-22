@@ -159,6 +159,128 @@ describe("control-api server", () => {
     expect(calls).toEqual(["http://data-service/v1/bots/prd-bot"]);
   });
 
+  it("builds bot MCP capability views from data-service state", async () => {
+    const calls: string[] = [];
+    const server = createControlApiServer({
+      dataServiceUrl: "http://data-service",
+      logServiceUrl: "http://log-service",
+      fetch: async (request) => {
+        if (!(request instanceof Request)) {
+          throw new Error("expected Request");
+        }
+        calls.push(request.url);
+        if (request.url === "http://data-service/v1/bots/prd-bot") {
+          return Response.json({
+            bot_id: "prd-bot",
+            name: "PRD Bot",
+            status: "ready",
+            runtime: "kiro",
+          });
+        }
+        if (request.url === "http://data-service/v1/bots/prd-bot/config-documents") {
+          return Response.json([
+            { title: "soul.md", content: "我是产品经理机器人" },
+            { title: "AGENTS.md", content: "按 PRD 流程工作" },
+          ]);
+        }
+        if (request.url === "http://data-service/internal/documents?scope=bot&owner_id=prd-bot&status=active") {
+          return Response.json([
+            { document_id: "doc-1", title: "语音转文字 PRD", doc_type: "prd" },
+            { document_id: "doc-2", title: "ASR 竞品分析", doc_type: "analysis" },
+          ]);
+        }
+        if (request.url === "http://data-service/internal/memory-stats?scope=bot&owner_id=prd-bot") {
+          return Response.json({
+            memories: 6,
+            memory_documents: 2,
+            chunks: 18,
+            assets: 2,
+            by_tier: {
+              core: 3,
+              reference: 2,
+              temp: 1,
+            },
+          });
+        }
+        return Response.json({ error: "unexpected" }, { status: 500 });
+      },
+    });
+
+    const response = await server.fetch(
+      new Request("http://localhost/v1/bots/prd-bot/mcp-capabilities"),
+    );
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toEqual({
+      bot_id: "prd-bot",
+      status: "ready",
+      runtime: "kiro",
+      config_documents: {
+        soul: {
+          configured: true,
+          title: "soul.md",
+        },
+        agents: {
+          configured: true,
+          title: "AGENTS.md",
+        },
+      },
+      documents: {
+        count: 2,
+        by_type: {
+          analysis: 1,
+          prd: 1,
+        },
+      },
+      memory: {
+        memories: 6,
+        memory_documents: 2,
+        chunks: 18,
+        assets: 2,
+        by_tier: {
+          core: 3,
+          reference: 2,
+          temp: 1,
+        },
+      },
+      capability_config: {
+        version: 1,
+        memory: {
+          enabled: true,
+          readable_scopes: ["system", "shared", "bot", "user", "session"],
+          writable_scopes: ["bot", "user", "session"],
+        },
+        documents: {
+          enabled: true,
+          writable_scopes: ["bot", "user", "session"],
+        },
+        tools: {
+          enabled: [
+            "document.create",
+            "document.ingest_file",
+            "document.ingest_url",
+            "document.scan",
+            "memory.write",
+            "memory.ingest_file",
+            "memory.ingest_url",
+            "memory.scan",
+            "memory.delete",
+            "memory.search",
+            "memory.stats",
+            "search.query",
+          ],
+        },
+        directory_refs: [],
+      },
+    });
+    expect(calls).toEqual([
+      "http://data-service/v1/bots/prd-bot",
+      "http://data-service/v1/bots/prd-bot/config-documents",
+      "http://data-service/internal/documents?scope=bot&owner_id=prd-bot&status=active",
+      "http://data-service/internal/memory-stats?scope=bot&owner_id=prd-bot",
+    ]);
+  });
+
   it("lists bot records through data-service", async () => {
     const calls: string[] = [];
     const server = createControlApiServer({

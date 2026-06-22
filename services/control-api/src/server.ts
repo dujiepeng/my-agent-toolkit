@@ -1,3 +1,5 @@
+import { buildDefaultMcpCapabilityConfig } from "@my-agent-toolkit/contracts";
+
 export interface ControlApiConfig {
   dataServiceUrl: string;
   logServiceUrl: string;
@@ -102,6 +104,13 @@ export function createControlApiServer(config: ControlApiConfig): ControlApiServ
             }),
           },
         );
+      }
+
+      const mcpCapabilitiesMatch = url.pathname.match(
+        /^\/v1\/bots\/([^/]+)\/mcp-capabilities$/,
+      );
+      if (request.method === "GET" && mcpCapabilitiesMatch) {
+        return handleGetMcpCapabilities(config, mcpCapabilitiesMatch[1]);
       }
 
       const botConfigDocumentsMatch = url.pathname.match(
@@ -268,6 +277,106 @@ export function createControlApiServer(config: ControlApiConfig): ControlApiServ
 
       return jsonResponse({ error: "not found" }, 404);
     },
+  };
+}
+
+async function handleGetMcpCapabilities(
+  config: ControlApiConfig,
+  botId: string,
+): Promise<Response> {
+  const encodedBotId = encodeURIComponent(botId);
+  const [botResponse, configDocumentsResponse, documentsResponse, memoryResponse] = await Promise.all([
+    config.fetch(new Request(`${config.dataServiceUrl}/v1/bots/${encodedBotId}`)),
+    config.fetch(new Request(`${config.dataServiceUrl}/v1/bots/${encodedBotId}/config-documents`)),
+    config.fetch(
+      new Request(
+        `${config.dataServiceUrl}/internal/documents?scope=bot&owner_id=${encodedBotId}&status=active`,
+      ),
+    ),
+    config.fetch(
+      new Request(
+        `${config.dataServiceUrl}/internal/memory-stats?scope=bot&owner_id=${encodedBotId}`,
+      ),
+    ),
+  ]);
+
+  if (!botResponse.ok) {
+    return cloneJsonResponse(botResponse);
+  }
+  if (!configDocumentsResponse.ok) {
+    return cloneJsonResponse(configDocumentsResponse);
+  }
+  if (!documentsResponse.ok) {
+    return cloneJsonResponse(documentsResponse);
+  }
+  if (!memoryResponse.ok) {
+    return cloneJsonResponse(memoryResponse);
+  }
+
+  const bot = await botResponse.json() as Record<string, unknown>;
+  const configDocuments = await configDocumentsResponse.json() as unknown[];
+  const documents = await documentsResponse.json() as unknown[];
+  const memoryStats = await memoryResponse.json() as Record<string, unknown>;
+
+  return jsonResponse({
+    bot_id: String(bot.bot_id ?? botId),
+    status: typeof bot.status === "string" ? bot.status : "unknown",
+    runtime: typeof bot.runtime === "string" ? bot.runtime : "unknown",
+    config_documents: summarizeConfigDocuments(configDocuments),
+    documents: summarizeDocuments(documents),
+    memory: memoryStats,
+    capability_config: buildDefaultMcpCapabilityConfig(),
+  });
+}
+
+function summarizeConfigDocuments(documents: unknown[]): {
+  soul: { configured: boolean; title?: string };
+  agents: { configured: boolean; title?: string };
+} {
+  const titles = documents
+    .map((document) => document && typeof document === "object"
+      ? (document as Record<string, unknown>).title
+      : undefined)
+    .filter((title): title is string => typeof title === "string");
+  const soulTitle = titles.find((title) => {
+    const normalized = title.trim().toLowerCase();
+    return normalized === "soul" || normalized === "soul.md";
+  });
+  const agentsTitle = titles.find((title) => {
+    const normalized = title.trim().toLowerCase();
+    return normalized === "agents" || normalized === "agents.md";
+  });
+  return {
+    soul: {
+      configured: Boolean(soulTitle),
+      ...(soulTitle ? { title: soulTitle } : {}),
+    },
+    agents: {
+      configured: Boolean(agentsTitle),
+      ...(agentsTitle ? { title: agentsTitle } : {}),
+    },
+  };
+}
+
+function summarizeDocuments(documents: unknown[]): {
+  count: number;
+  by_type: Record<string, number>;
+} {
+  const byType: Record<string, number> = {};
+  for (const document of documents) {
+    if (!document || typeof document !== "object") {
+      continue;
+    }
+    const docType = (document as Record<string, unknown>).doc_type;
+    if (typeof docType !== "string" || docType.trim() === "") {
+      continue;
+    }
+    const normalized = docType.trim();
+    byType[normalized] = (byType[normalized] ?? 0) + 1;
+  }
+  return {
+    count: documents.length,
+    by_type: Object.fromEntries(Object.entries(byType).sort(([left], [right]) => left.localeCompare(right))),
   };
 }
 

@@ -31,9 +31,40 @@ export interface DocumentCreateInput {
   created_by_user_id?: string;
 }
 
+export interface McpCapabilityConfig {
+  version: 1;
+  memory: {
+    enabled: boolean;
+    readable_scopes: McpScope[];
+    writable_scopes: McpScope[];
+  };
+  documents: {
+    enabled: boolean;
+    writable_scopes: McpScope[];
+  };
+  tools: {
+    enabled: string[];
+  };
+  directory_refs: string[];
+}
+
 const MCP_SCOPES = ["system", "shared", "bot", "user", "session"] as const;
 const MCP_TIERS = ["core", "reference", "temp"] as const;
 const MCP_RUNTIMES = ["mock", "kiro"] as const;
+const DEFAULT_MCP_TOOLS = [
+  "document.create",
+  "document.ingest_file",
+  "document.ingest_url",
+  "document.scan",
+  "memory.write",
+  "memory.ingest_file",
+  "memory.ingest_url",
+  "memory.scan",
+  "memory.delete",
+  "memory.search",
+  "memory.stats",
+  "search.query",
+] as const;
 const RESERVED_CONFIG_DOCUMENT_TITLES = new Set([
   "soul",
   "soul.md",
@@ -91,6 +122,51 @@ export function verifyRunnerToken(
     throw new Error("runner token context does not match request path");
   }
   return context;
+}
+
+export function buildDefaultMcpCapabilityConfig(): McpCapabilityConfig {
+  return {
+    version: 1,
+    memory: {
+      enabled: true,
+      readable_scopes: ["system", "shared", "bot", "user", "session"],
+      writable_scopes: ["bot", "user", "session"],
+    },
+    documents: {
+      enabled: true,
+      writable_scopes: ["bot", "user", "session"],
+    },
+    tools: {
+      enabled: [...DEFAULT_MCP_TOOLS],
+    },
+    directory_refs: [],
+  };
+}
+
+export function parseMcpCapabilityConfig(value: unknown): McpCapabilityConfig {
+  const record = requireRecord(value, "MCP capability config");
+  if (record.version !== 1) {
+    throw new Error("MCP capability config version must be 1");
+  }
+  const memory = requireRecord(record.memory, "MCP memory capability");
+  const documents = requireRecord(record.documents, "MCP document capability");
+  const tools = requireRecord(record.tools, "MCP tool capability");
+  return {
+    version: 1,
+    memory: {
+      enabled: readRequiredBoolean(memory, "enabled"),
+      readable_scopes: parseScopeArray(memory.readable_scopes, "readable_scopes"),
+      writable_scopes: parseScopeArray(memory.writable_scopes, "writable_scopes"),
+    },
+    documents: {
+      enabled: readRequiredBoolean(documents, "enabled"),
+      writable_scopes: parseScopeArray(documents.writable_scopes, "writable_scopes"),
+    },
+    tools: {
+      enabled: parseStringArray(tools.enabled, "enabled"),
+    },
+    directory_refs: parseStringArray(record.directory_refs, "directory_refs"),
+  };
 }
 
 export function parseDocumentCreateInput(value: unknown): DocumentCreateInput {
@@ -186,6 +262,24 @@ function readRequiredString(
     throw new Error(`${field} is required`);
   }
   return value;
+}
+
+function readRequiredBoolean(
+  record: Record<string, unknown>,
+  field: string,
+): boolean {
+  const value = record[field];
+  if (typeof value !== "boolean") {
+    throw new Error(`${field} is required`);
+  }
+  return value;
+}
+
+function parseScopeArray(value: unknown, field: string): McpScope[] {
+  if (!Array.isArray(value)) {
+    throw new Error(`${field} must be an array of scopes`);
+  }
+  return value.map(parseMcpScope);
 }
 
 function isOneOf<T extends readonly string[]>(

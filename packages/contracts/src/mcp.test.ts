@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
 import {
+  buildDefaultMcpCapabilityConfig,
   isReservedConfigDocumentTitle,
+  parseMcpCapabilityConfig,
   parseDocumentCreateInput,
   parseMcpScope,
   parseMcpTier,
@@ -171,5 +173,90 @@ describe("isReservedConfigDocumentTitle", () => {
     expect(isReservedConfigDocumentTitle(" Soul.md ")).toBe(true);
     expect(isReservedConfigDocumentTitle("AGENTS.md")).toBe(true);
     expect(isReservedConfigDocumentTitle("Product PRD")).toBe(false);
+  });
+});
+
+describe("MCP capability config", () => {
+  it("builds the default bot capability profile", () => {
+    expect(buildDefaultMcpCapabilityConfig()).toEqual({
+      version: 1,
+      memory: {
+        enabled: true,
+        readable_scopes: ["system", "shared", "bot", "user", "session"],
+        writable_scopes: ["bot", "user", "session"],
+      },
+      documents: {
+        enabled: true,
+        writable_scopes: ["bot", "user", "session"],
+      },
+      tools: {
+        enabled: [
+          "document.create",
+          "document.ingest_file",
+          "document.ingest_url",
+          "document.scan",
+          "memory.write",
+          "memory.ingest_file",
+          "memory.ingest_url",
+          "memory.scan",
+          "memory.delete",
+          "memory.search",
+          "memory.stats",
+          "search.query",
+        ],
+      },
+      directory_refs: [],
+    });
+  });
+
+  it("parses explicit capability configs and rejects unknown scopes", () => {
+    expect(parseMcpCapabilityConfig({
+      version: 1,
+      memory: {
+        enabled: true,
+        readable_scopes: ["bot"],
+        writable_scopes: ["bot"],
+      },
+      documents: {
+        enabled: false,
+        writable_scopes: [],
+      },
+      tools: {
+        enabled: ["memory.search"],
+      },
+      directory_refs: ["bot-workspace"],
+    })).toEqual({
+      version: 1,
+      memory: {
+        enabled: true,
+        readable_scopes: ["bot"],
+        writable_scopes: ["bot"],
+      },
+      documents: {
+        enabled: false,
+        writable_scopes: [],
+      },
+      tools: {
+        enabled: ["memory.search"],
+      },
+      directory_refs: ["bot-workspace"],
+    });
+
+    expect(() => parseMcpCapabilityConfig({
+      version: 1,
+      memory: {
+        enabled: true,
+        readable_scopes: ["namespace"],
+        writable_scopes: [],
+      },
+      documents: {
+        enabled: true,
+        writable_scopes: [],
+      },
+      tools: {
+        enabled: [],
+      },
+      directory_refs: [],
+    })).toThrow("scope must be system, shared, bot, user, or session");
   });
 });
