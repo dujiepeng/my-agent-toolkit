@@ -1,0 +1,441 @@
+import { describe, expect, it } from "vitest";
+import { ADMIN_CLAIM_TTL_MS, createDataStore } from "./store.js";
+
+describe("data-service store", () => {
+  it("creates and reads bot records", () => {
+    const store = createDataStore();
+
+    const bot = store.createBot({
+      bot_id: "prd-bot",
+      name: "PRD Bot",
+      runtime: "kiro",
+      wecom_bot_id: "wecom-bot-a",
+      wecom_secret: "super-secret-value",
+    });
+
+    expect(bot).toMatchObject({
+      bot_id: "prd-bot",
+      name: "PRD Bot",
+      runtime: "kiro",
+      status: "draft",
+      wecom_bot_id: "wecom-bot-a",
+      wecom_secret_configured: true,
+    });
+    expect(JSON.stringify(bot)).not.toContain("super-secret-value");
+    expect(store.getBot("prd-bot")).toEqual(bot);
+  });
+
+  it("lists and updates bot records", () => {
+    const store = createDataStore();
+    const prd = store.createBot({
+      bot_id: "prd-bot",
+      name: "PRD Bot",
+      runtime: "kiro",
+    });
+    store.createBot({
+      bot_id: "ops-bot",
+      name: "Ops Bot",
+      runtime: "mock",
+    });
+
+    expect(store.listBots()).toMatchObject([
+      { bot_id: "prd-bot" },
+      { bot_id: "ops-bot" },
+    ]);
+
+    const updated = store.updateBot("prd-bot", {
+      name: "PRD Assistant",
+      runtime: "mock",
+      status: "initializing",
+      wecom_bot_id: "wecom-bot-b",
+      wecom_secret: "new-secret-value",
+    });
+
+    expect(updated).toMatchObject({
+      bot_id: "prd-bot",
+      name: "PRD Assistant",
+      runtime: "mock",
+      status: "initializing",
+      wecom_bot_id: "wecom-bot-b",
+      wecom_secret_configured: true,
+      created_at: prd.created_at,
+    });
+    expect(JSON.stringify(updated)).not.toContain("new-secret-value");
+    expect(updated.updated_at).not.toBe(prd.updated_at);
+    expect(store.getBot("prd-bot")).toEqual(updated);
+  });
+
+  it("rejects duplicate wecom bot bindings", () => {
+    const store = createDataStore();
+    store.createBot({
+      bot_id: "prd-bot",
+      name: "PRD Bot",
+      runtime: "kiro",
+      wecom_bot_id: "wecom-bot-a",
+    });
+
+    expect(() => store.createBot({
+      bot_id: "ops-bot",
+      name: "Ops Bot",
+      runtime: "kiro",
+      wecom_bot_id: "wecom-bot-a",
+    })).toThrow("wecom bot id already bound to bot: prd-bot");
+
+    store.createBot({
+      bot_id: "ops-bot",
+      name: "Ops Bot",
+      runtime: "kiro",
+      wecom_bot_id: "wecom-bot-b",
+    });
+
+    expect(() => store.updateBot("ops-bot", {
+      wecom_bot_id: "wecom-bot-a",
+    })).toThrow("wecom bot id already bound to bot: prd-bot");
+  });
+
+  it("tests wecom connection configuration without exposing secrets", async () => {
+    const store = createDataStore();
+    store.createBot({
+      bot_id: "prd-bot",
+      name: "PRD Bot",
+      runtime: "kiro",
+      wecom_bot_id: "wecom-bot-a",
+      wecom_secret: "super-secret-value",
+    });
+
+    const configured = await store.testWeComConnection("prd-bot");
+
+    expect(configured).toMatchObject({
+      bot_id: "prd-bot",
+      status: "configured",
+      wecom_bot_id: "wecom-bot-a",
+      wecom_secret_configured: true,
+    });
+    expect(configured.checked_at).toMatch(/T/);
+    expect(JSON.stringify(configured)).not.toContain("super-secret-value");
+
+    store.createBot({
+      bot_id: "missing-secret",
+      name: "Missing Secret",
+      runtime: "kiro",
+      wecom_bot_id: "wecom-bot-b",
+    });
+    await expect(store.testWeComConnection("missing-secret")).resolves.toMatchObject({
+      bot_id: "missing-secret",
+      status: "missing_config",
+      missing: ["wecom_secret"],
+      wecom_secret_configured: false,
+    });
+
+    store.createBot({
+      bot_id: "missing-bot-id",
+      name: "Missing Bot ID",
+      runtime: "kiro",
+    });
+    await expect(store.testWeComConnection("missing-bot-id")).resolves.toMatchObject({
+      bot_id: "missing-bot-id",
+      status: "missing_config",
+      missing: ["wecom_bot_id", "wecom_secret"],
+    });
+  });
+
+  it("verifies wecom credentials with an injected verifier", async () => {
+    const store = createDataStore({
+      wecomVerifier: {
+        async verify(input) {
+          expect(input).toEqual({
+            bot_id: "wecom-bot-a",
+            secret: "super-secret-value",
+          });
+          return { verified: true };
+        },
+      },
+    });
+    store.createBot({
+      bot_id: "prd-bot",
+      name: "PRD Bot",
+      runtime: "kiro",
+      wecom_bot_id: "wecom-bot-a",
+      wecom_secret: "super-secret-value",
+    });
+
+    await expect(store.testWeComConnection("prd-bot")).resolves.toMatchObject({
+      bot_id: "prd-bot",
+      status: "verified",
+      missing: [],
+    });
+  });
+
+  it("stores failed wecom verification without exposing secrets", async () => {
+    const store = createDataStore({
+      wecomVerifier: {
+        async verify() {
+          return { verified: false, error: "auth failed" };
+        },
+      },
+    });
+    store.createBot({
+      bot_id: "prd-bot",
+      name: "PRD Bot",
+      runtime: "kiro",
+      wecom_bot_id: "wecom-bot-a",
+      wecom_secret: "super-secret-value",
+    });
+
+    const result = await store.testWeComConnection("prd-bot");
+
+    expect(result).toMatchObject({
+      bot_id: "prd-bot",
+      status: "failed",
+      error: "auth failed",
+    });
+    expect(store.getBot("prd-bot")).toMatchObject({
+      wecom_connection_status: "failed",
+      last_wecom_error: "auth failed",
+    });
+    expect(JSON.stringify(result)).not.toContain("super-secret-value");
+  });
+
+  it("creates claim code and verifies admin claim without storing plain code", () => {
+    const store = createDataStore();
+    store.createBot({ bot_id: "prd-bot", name: "PRD Bot", runtime: "kiro" });
+
+    expect(store.resolveMessageContext({
+      bot_id: "prd-bot",
+      wecom_user_id: "user-a",
+      channel: "wecom_direct",
+      purpose: "normal_chat",
+    })).toMatchObject({
+      allowed: false,
+      reason: "admin_unclaimed",
+    });
+
+    const claim = store.createAdminClaim("prd-bot");
+    expect(claim.code).toMatch(/^[0-9]{6}$/);
+    expect(claim.code_hash).not.toBe(claim.code);
+    expect(new Date(claim.expires_at).getTime() - new Date(claim.created_at).getTime())
+      .toBe(ADMIN_CLAIM_TTL_MS);
+
+    expect(() => store.verifyAdminClaim({
+      bot_id: "prd-bot",
+      wecom_user_id: "admin-a",
+      code: "000000",
+    })).toThrow("invalid admin claim code");
+
+    const admin = store.verifyAdminClaim({
+      bot_id: "prd-bot",
+      wecom_user_id: "admin-a",
+      code: claim.code,
+    });
+    expect(admin).toMatchObject({
+      bot_id: "prd-bot",
+      wecom_user_id: "admin-a",
+      role: "admin",
+    });
+    expect(store.resolveMessageContext({
+      bot_id: "prd-bot",
+      wecom_user_id: "admin-a",
+      channel: "wecom_direct",
+      purpose: "normal_chat",
+    })).toMatchObject({
+      allowed: true,
+      reason: "initializing",
+      is_admin: true,
+      conversation: {
+        purpose: "init",
+      },
+    });
+    expect(store.resolveMessageContext({
+      bot_id: "prd-bot",
+      wecom_user_id: "user-a",
+      channel: "wecom_direct",
+      purpose: "normal_chat",
+    })).toMatchObject({
+      allowed: false,
+      reason: "initialization_required",
+      is_admin: false,
+    });
+
+    store.markBotReady("prd-bot");
+    expect(store.resolveMessageContext({
+      bot_id: "prd-bot",
+      wecom_user_id: "user-a",
+      channel: "wecom_direct",
+      purpose: "normal_chat",
+    })).toMatchObject({
+      allowed: true,
+      reason: "ready",
+      is_admin: false,
+    });
+  });
+
+  it("refreshes admin claim codes by replacing the pending code", () => {
+    const store = createDataStore();
+    store.createBot({ bot_id: "prd-bot", name: "PRD Bot", runtime: "kiro" });
+
+    const first = store.createAdminClaim("prd-bot");
+    const second = store.createAdminClaim("prd-bot");
+
+    expect(second.code).toMatch(/^[0-9]{6}$/);
+    expect(second.code_hash).not.toBe(first.code_hash);
+    expect(() => store.verifyAdminClaim({
+      bot_id: "prd-bot",
+      wecom_user_id: "admin-a",
+      code: first.code,
+    })).toThrow("invalid admin claim code");
+    expect(store.verifyAdminClaim({
+      bot_id: "prd-bot",
+      wecom_user_id: "admin-a",
+      code: second.code,
+    })).toMatchObject({
+      bot_id: "prd-bot",
+      wecom_user_id: "admin-a",
+    });
+  });
+
+  it("gets and transfers bot admin", () => {
+    const store = createDataStore();
+    store.createBot({ bot_id: "prd-bot", name: "PRD Bot", runtime: "kiro" });
+    const claim = store.createAdminClaim("prd-bot");
+    const admin = store.verifyAdminClaim({
+      bot_id: "prd-bot",
+      wecom_user_id: "admin-a",
+      code: claim.code,
+    });
+
+    expect(store.getAdmin("prd-bot")).toEqual(admin);
+
+    const transferred = store.transferAdmin({
+      bot_id: "prd-bot",
+      current_wecom_user_id: "admin-a",
+      new_wecom_user_id: "admin-b",
+    });
+
+    expect(transferred).toMatchObject({
+      bot_id: "prd-bot",
+      wecom_user_id: "admin-b",
+      role: "admin",
+    });
+    expect(store.getAdmin("prd-bot")).toEqual(transferred);
+    expect(store.resolveMessageContext({
+      bot_id: "prd-bot",
+      wecom_user_id: "admin-a",
+      channel: "wecom_direct",
+      purpose: "normal_chat",
+    })).toMatchObject({
+      allowed: false,
+      reason: "initialization_required",
+      is_admin: false,
+    });
+    expect(store.resolveMessageContext({
+      bot_id: "prd-bot",
+      wecom_user_id: "admin-b",
+      channel: "wecom_direct",
+      purpose: "normal_chat",
+    })).toMatchObject({
+      allowed: true,
+      reason: "initializing",
+      is_admin: true,
+    });
+  });
+
+  it("rejects admin transfer from non-current admins", () => {
+    const store = createDataStore();
+    store.createBot({ bot_id: "prd-bot", name: "PRD Bot", runtime: "kiro" });
+    const claim = store.createAdminClaim("prd-bot");
+    store.verifyAdminClaim({
+      bot_id: "prd-bot",
+      wecom_user_id: "admin-a",
+      code: claim.code,
+    });
+
+    expect(() => store.transferAdmin({
+      bot_id: "prd-bot",
+      current_wecom_user_id: "user-a",
+      new_wecom_user_id: "admin-b",
+    })).toThrow("current admin does not match");
+    expect(store.getAdmin("prd-bot")).toMatchObject({
+      wecom_user_id: "admin-a",
+    });
+  });
+
+  it("resolves the same conversation for the same bot user channel and purpose", () => {
+    const store = createDataStore();
+    store.createBot({ bot_id: "prd-bot", name: "PRD Bot", runtime: "kiro" });
+
+    const first = store.resolveConversation({
+      bot_id: "prd-bot",
+      wecom_user_id: "user-a",
+      channel: "wecom_direct",
+      purpose: "normal_chat",
+    });
+    const second = store.resolveConversation({
+      bot_id: "prd-bot",
+      wecom_user_id: "user-a",
+      channel: "wecom_direct",
+      purpose: "normal_chat",
+    });
+
+    expect(second).toEqual(first);
+    expect(first.conversation_id).toMatch(/^conv_/);
+  });
+
+  it("creates a new memory document version on update", () => {
+    const store = createDataStore();
+    const first = store.upsertMemoryDocument({
+      scope: "shared",
+      owner_id: "platform",
+      title: "Product Context",
+      content: "v1",
+    });
+    const second = store.upsertMemoryDocument({
+      memory_doc_id: first.memory_doc_id,
+      scope: "shared",
+      owner_id: "platform",
+      title: "Product Context",
+      content: "v2",
+    });
+
+    expect(first.version).toBe(1);
+    expect(second.version).toBe(2);
+    expect(second.memory_doc_id).toBe(first.memory_doc_id);
+    expect(store.listMemoryDocumentVersions(first.memory_doc_id)).toEqual([
+      first,
+      second,
+    ]);
+  });
+
+  it("lists only current memory document versions for a scope owner", () => {
+    const store = createDataStore();
+    const guideline = store.upsertMemoryDocument({
+      scope: "bot",
+      owner_id: "prd-bot",
+      title: "prd-guideline",
+      content: "v1",
+    });
+    const currentGuideline = store.upsertMemoryDocument({
+      memory_doc_id: guideline.memory_doc_id,
+      scope: "bot",
+      owner_id: "prd-bot",
+      title: "prd-guideline",
+      content: "v2",
+    });
+    const processDoc = store.upsertMemoryDocument({
+      scope: "bot",
+      owner_id: "prd-bot",
+      title: "prd-process",
+      content: "agent docs",
+    });
+    store.upsertMemoryDocument({
+      scope: "bot",
+      owner_id: "other-bot",
+      title: "prd-guideline",
+      content: "other",
+    });
+
+    expect(store.listCurrentMemoryDocuments({
+      scope: "bot",
+      owner_id: "prd-bot",
+    })).toEqual([currentGuideline, processDoc]);
+  });
+});

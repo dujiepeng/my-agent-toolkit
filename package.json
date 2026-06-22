@@ -1,0 +1,26 @@
+{
+  "name": "my-agent-toolkit",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "vitest run",
+    "typecheck": "tsc -b packages/contracts services/llm-runner services/data-service services/bot-host services/log-service services/control-api",
+    "build": "tsc -b packages/contracts services/llm-runner services/data-service services/bot-host services/log-service services/control-api"
+  },
+  "workspaces": [
+    "packages/*",
+    "services/*"
+  ],
+  "devDependencies": {
+    "@types/better-sqlite3": "^7.6.13",
+    "@types/node": "^22.10.2",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.2",
+    "vitest": "^2.1.8"
+  },
+  "dependencies": {
+    "@wecom/aibot-node-sdk": "^1.0.7",
+    "better-sqlite3": "^12.11.1"
+  }
+}

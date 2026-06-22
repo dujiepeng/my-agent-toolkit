@@ -1,0 +1,811 @@
+export type BotStatus = "draft" | "initializing" | "ready";
+export type ConversationPurpose = "normal_chat" | "init" | "doc_generation";
+export type ConversationChannel = "wecom_direct" | "wecom_group";
+export type MemoryScope = "system" | "shared" | "bot" | "user" | "session";
+export const MEMORY_SCOPES = [
+  "system",
+  "shared",
+  "bot",
+  "user",
+  "session",
+] as const;
+export const ADMIN_CLAIM_TTL_MS = 24 * 60 * 60 * 1000;
+
+export interface BotRecord {
+  bot_id: string;
+  name: string;
+  runtime: string;
+  status: BotStatus;
+  wecom_bot_id?: string;
+  wecom_secret_configured: boolean;
+  wecom_connection_status: WeComConnectionStatus;
+  last_wecom_check_at?: string;
+  last_wecom_error?: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export type WeComConnectionStatus =
+  | "unchecked"
+  | "configured"
+  | "verified"
+  | "failed"
+  | "missing_config";
+
+export interface WeComConnectionTestResult {
+  bot_id: string;
+  status: Exclude<WeComConnectionStatus, "unchecked">;
+  wecom_bot_id?: string;
+  wecom_secret_configured: boolean;
+  missing: Array<"wecom_bot_id" | "wecom_secret">;
+  checked_at: string;
+  error?: string;
+}
+
+export interface WeComRuntimeBotConfig {
+  bot_id: string;
+  runtime: string;
+  wecom_bot_id: string;
+  wecom_secret: string;
+}
+
+export interface BotChannelRecord {
+  channel_id: string;
+  bot_id: string;
+  channel_type: "wecom";
+  display_name: string;
+  wecom_bot_id?: string;
+  secret_configured: boolean;
+  connection_status: WeComConnectionStatus;
+  runtime_enabled: boolean;
+  runtime_status:
+    | "enabled"
+    | "missing_bot_id"
+    | "missing_secret";
+  last_check_at?: string;
+  last_error?: string;
+}
+
+export interface BotChannelDetail {
+  channel: BotChannelRecord;
+  bot: BotRecord;
+  admin?: AdminRecord;
+  memory_documents: MemoryDocumentRecord[];
+  config_documents: BotConfigDocumentRecord[];
+}
+
+export interface CreateBotInput {
+  bot_id: string;
+  name: string;
+  runtime: string;
+  wecom_bot_id?: string;
+  wecom_secret?: string;
+}
+
+export interface UpdateBotInput {
+  name?: string;
+  runtime?: string;
+  status?: BotStatus;
+  wecom_bot_id?: string;
+  wecom_secret?: string;
+}
+
+export interface ConversationRecord {
+  conversation_id: string;
+  bot_id: string;
+  wecom_user_id: string;
+  channel: ConversationChannel;
+  purpose: ConversationPurpose;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface ResolveConversationInput {
+  bot_id: string;
+  wecom_user_id: string;
+  channel: ConversationChannel;
+  purpose: ConversationPurpose;
+}
+
+export interface MemoryDocumentRecord {
+  memory_doc_id: string;
+  scope: MemoryScope;
+  owner_id: string;
+  title: string;
+  version: number;
+  content: string;
+  status: "active";
+  created_at: string;
+}
+
+export interface BotConfigDocumentRecord {
+  bot_id: string;
+  title: "soul" | "agents.md";
+  content: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface AdminRecord {
+  bot_id: string;
+  wecom_user_id: string;
+  role: "admin";
+  claimed_at: string;
+}
+
+export interface AdminClaimRecord {
+  bot_id: string;
+  code: string;
+  code_hash: string;
+  created_at: string;
+  expires_at: string;
+}
+
+export interface ClaimAdminInput {
+  bot_id: string;
+  wecom_user_id: string;
+  code?: string;
+}
+
+export interface TransferAdminInput {
+  bot_id: string;
+  current_wecom_user_id: string;
+  new_wecom_user_id: string;
+}
+
+export type MessageContextReason =
+  | "admin_unclaimed"
+  | "initialization_required"
+  | "initializing"
+  | "ready";
+
+export interface MessageContext {
+  bot_id: string;
+  wecom_user_id: string;
+  is_admin: boolean;
+  allowed: boolean;
+  reason: MessageContextReason;
+  conversation?: ConversationRecord;
+}
+
+export interface UpsertMemoryDocumentInput {
+  memory_doc_id?: string;
+  scope: MemoryScope;
+  owner_id: string;
+  title: string;
+  content: string;
+}
+
+export interface UpsertBotConfigDocumentInput {
+  bot_id: string;
+  title: string;
+  content: string;
+}
+
+export interface ListCurrentMemoryDocumentsInput {
+  scope: MemoryScope;
+  owner_id: string;
+}
+
+export interface DataStore {
+  createBot(input: CreateBotInput): BotRecord;
+  listBots(): BotRecord[];
+  getBot(botId: string): BotRecord | undefined;
+  updateBot(botId: string, input: UpdateBotInput): BotRecord;
+  listBotChannels(botId?: string): BotChannelRecord[];
+  getBotChannelDetail(botId: string): BotChannelDetail;
+  resetAdminClaim(botId: string): AdminClaimRecord;
+  resetBot(botId: string): BotRecord;
+  deleteBotChannel(botId: string): BotChannelRecord;
+  listWeComRuntimeBots(): WeComRuntimeBotConfig[];
+  testWeComConnection(botId: string): Promise<WeComConnectionTestResult>;
+  getAdmin(botId: string): AdminRecord | undefined;
+  createAdminClaim(botId: string): AdminClaimRecord;
+  claimAdmin(input: ClaimAdminInput): AdminRecord;
+  verifyAdminClaim(input: Required<ClaimAdminInput>): AdminRecord;
+  transferAdmin(input: TransferAdminInput): AdminRecord;
+  markBotReady(botId: string): BotRecord;
+  resolveMessageContext(input: ResolveConversationInput): MessageContext;
+  resolveConversation(input: ResolveConversationInput): ConversationRecord;
+  upsertBotConfigDocument(input: UpsertBotConfigDocumentInput): BotConfigDocumentRecord;
+  listBotConfigDocuments(botId: string): BotConfigDocumentRecord[];
+  upsertMemoryDocument(input: UpsertMemoryDocumentInput): MemoryDocumentRecord;
+  listMemoryDocumentVersions(memoryDocId: string): MemoryDocumentRecord[];
+  listCurrentMemoryDocuments(
+    input: ListCurrentMemoryDocumentsInput,
+  ): MemoryDocumentRecord[];
+  close?(): void;
+}
+
+export interface DataStoreOptions {
+  wecomVerifier?: {
+    verify(input: {
+      bot_id: string;
+      secret: string;
+    }): Promise<{ verified: true } | { verified: false; error: string }>;
+  };
+}
+
+export function createDataStore(options: DataStoreOptions = {}): DataStore {
+  const bots = new Map<string, BotRecord>();
+  const admins = new Map<string, AdminRecord>();
+  const adminClaims = new Map<string, AdminClaimRecord>();
+  const conversations = new Map<string, ConversationRecord>();
+  const memoryDocuments = new Map<string, MemoryDocumentRecord[]>();
+  const botConfigDocuments = new Map<string, BotConfigDocumentRecord>();
+  const wecomSecrets = new Map<string, string>();
+
+  return {
+    createBot(input) {
+      const now = new Date().toISOString();
+      const wecomSecret = optionalText(input.wecom_secret);
+      const wecomBotId = optionalText(input.wecom_bot_id);
+      assertUniqueWeComBotId(bots, wecomBotId);
+      const bot: BotRecord = {
+        bot_id: requireText(input.bot_id, "bot_id"),
+        name: requireText(input.name, "name"),
+        runtime: requireText(input.runtime, "runtime"),
+        status: "draft",
+        wecom_bot_id: wecomBotId,
+        wecom_secret_configured: Boolean(wecomSecret),
+        wecom_connection_status: "unchecked",
+        created_at: now,
+        updated_at: now,
+      };
+      bots.set(bot.bot_id, bot);
+      if (wecomSecret) {
+        wecomSecrets.set(bot.bot_id, wecomSecret);
+      }
+      return bot;
+    },
+
+    getBot(botId) {
+      return bots.get(botId);
+    },
+
+    listBots() {
+      return [...bots.values()];
+    },
+
+    updateBot(botId, input) {
+      const bot = getRequiredBot(bots, botId);
+      const wecomSecret = optionalText(input.wecom_secret);
+      const wecomBotId = input.wecom_bot_id === undefined
+        ? bot.wecom_bot_id
+        : optionalText(input.wecom_bot_id);
+      assertUniqueWeComBotId(bots, wecomBotId, bot.bot_id);
+      const updated: BotRecord = {
+        ...bot,
+        name: input.name === undefined ? bot.name : requireText(input.name, "name"),
+        runtime: input.runtime === undefined
+          ? bot.runtime
+          : requireText(input.runtime, "runtime"),
+        status: input.status === undefined
+          ? bot.status
+          : requireBotStatus(input.status),
+        wecom_bot_id: wecomBotId,
+        wecom_secret_configured: wecomSecret
+          ? true
+          : bot.wecom_secret_configured,
+        wecom_connection_status: "unchecked",
+        last_wecom_check_at: undefined,
+        last_wecom_error: undefined,
+        updated_at: nextIsoTimestamp(bot.updated_at),
+      };
+      bots.set(bot.bot_id, updated);
+      if (wecomSecret) {
+        wecomSecrets.set(bot.bot_id, wecomSecret);
+      }
+      return updated;
+    },
+
+    listBotChannels(botId) {
+      return [...bots.values()]
+        .filter((bot) => !botId || bot.bot_id === botId)
+        .map(botToChannelRecord);
+    },
+
+    getBotChannelDetail(botId) {
+      const bot = getRequiredBot(bots, botId);
+      return {
+        channel: botToChannelRecord(bot),
+        bot,
+        ...(admins.get(bot.bot_id) ? { admin: admins.get(bot.bot_id) } : {}),
+        memory_documents: this.listCurrentMemoryDocuments({
+          scope: "bot",
+          owner_id: bot.bot_id,
+        }),
+        config_documents: this.listBotConfigDocuments(bot.bot_id),
+      };
+    },
+
+    resetAdminClaim(botId) {
+      const bot = getRequiredBot(bots, botId);
+      admins.delete(bot.bot_id);
+      adminClaims.delete(bot.bot_id);
+      return this.createAdminClaim(bot.bot_id);
+    },
+
+    resetBot(botId) {
+      const bot = getRequiredBot(bots, botId);
+      const updated = {
+        ...bot,
+        status: admins.has(bot.bot_id) ? "initializing" as const : "draft" as const,
+        updated_at: new Date().toISOString(),
+      };
+      bots.set(bot.bot_id, updated);
+      return updated;
+    },
+
+    deleteBotChannel(botId) {
+      const bot = getRequiredBot(bots, botId);
+      wecomSecrets.delete(bot.bot_id);
+      const updated: BotRecord = {
+        ...bot,
+        wecom_bot_id: undefined,
+        wecom_secret_configured: false,
+        wecom_connection_status: "unchecked",
+        last_wecom_check_at: undefined,
+        last_wecom_error: undefined,
+        updated_at: new Date().toISOString(),
+      };
+      bots.set(bot.bot_id, updated);
+      return botToChannelRecord(updated);
+    },
+
+    listWeComRuntimeBots() {
+      return [...bots.values()]
+        .map((bot) => {
+          const secret = wecomSecrets.get(bot.bot_id);
+          return bot.wecom_bot_id && secret
+            ? {
+              bot_id: bot.bot_id,
+              runtime: bot.runtime,
+              wecom_bot_id: bot.wecom_bot_id,
+              wecom_secret: secret,
+            }
+            : undefined;
+        })
+        .filter((bot): bot is WeComRuntimeBotConfig => Boolean(bot));
+    },
+
+    async testWeComConnection(botId) {
+      const bot = getRequiredBot(bots, botId);
+      const secret = wecomSecrets.get(bot.bot_id);
+      const prelim = buildWeComConnectionTestResult(bot);
+      const verification = prelim.status === "configured" && options.wecomVerifier && secret
+        ? await options.wecomVerifier.verify({
+          bot_id: bot.wecom_bot_id ?? "",
+          secret,
+        })
+        : undefined;
+      const result = buildWeComConnectionTestResult(bot, verification);
+      const updated: BotRecord = {
+        ...bot,
+        wecom_connection_status: result.status,
+        last_wecom_check_at: result.checked_at,
+        last_wecom_error: result.error,
+        updated_at: nextIsoTimestamp(bot.updated_at),
+      };
+      bots.set(bot.bot_id, updated);
+      return result;
+    },
+
+    getAdmin(botId) {
+      return admins.get(botId);
+    },
+
+    createAdminClaim(botId) {
+      const bot = getRequiredBot(bots, botId);
+      if (admins.has(botId)) {
+        throw new Error(`admin already claimed for bot: ${botId}`);
+      }
+
+      const code = String(crypto.getRandomValues(new Uint32Array(1))[0] % 1_000_000)
+        .padStart(6, "0");
+      const now = new Date();
+      const claim: AdminClaimRecord = {
+        bot_id: bot.bot_id,
+        code,
+        code_hash: hashClaimCode(code),
+        created_at: now.toISOString(),
+        expires_at: new Date(now.getTime() + ADMIN_CLAIM_TTL_MS).toISOString(),
+      };
+      adminClaims.set(bot.bot_id, claim);
+      return claim;
+    },
+
+    claimAdmin(input) {
+      const bot = getRequiredBot(bots, input.bot_id);
+      const existing = admins.get(input.bot_id);
+      if (existing) {
+        throw new Error(`admin already claimed for bot: ${input.bot_id}`);
+      }
+
+      const admin: AdminRecord = {
+        bot_id: bot.bot_id,
+        wecom_user_id: requireText(input.wecom_user_id, "wecom_user_id"),
+        role: "admin",
+        claimed_at: new Date().toISOString(),
+      };
+      admins.set(bot.bot_id, admin);
+      bot.status = "initializing";
+      bot.updated_at = new Date().toISOString();
+      return admin;
+    },
+
+    verifyAdminClaim(input) {
+      const claim = adminClaims.get(input.bot_id);
+      if (!claim) {
+        throw new Error(`admin claim code does not exist for bot: ${input.bot_id}`);
+      }
+      if (new Date(claim.expires_at).getTime() < Date.now()) {
+        throw new Error("admin claim code expired");
+      }
+      if (claim.code_hash !== hashClaimCode(input.code)) {
+        throw new Error("invalid admin claim code");
+      }
+
+      const admin = this.claimAdmin({
+        bot_id: input.bot_id,
+        wecom_user_id: input.wecom_user_id,
+      });
+      adminClaims.delete(input.bot_id);
+      return admin;
+    },
+
+    transferAdmin(input) {
+      const bot = getRequiredBot(bots, input.bot_id);
+      const existing = admins.get(bot.bot_id);
+      if (!existing) {
+        throw new Error(`admin is not claimed for bot: ${bot.bot_id}`);
+      }
+      if (
+        existing.wecom_user_id !==
+        requireText(input.current_wecom_user_id, "current_wecom_user_id")
+      ) {
+        throw new Error("current admin does not match");
+      }
+
+      const admin: AdminRecord = {
+        bot_id: bot.bot_id,
+        wecom_user_id: requireText(input.new_wecom_user_id, "new_wecom_user_id"),
+        role: "admin",
+        claimed_at: new Date().toISOString(),
+      };
+      admins.set(bot.bot_id, admin);
+      return admin;
+    },
+
+    markBotReady(botId) {
+      const bot = getRequiredBot(bots, botId);
+      if (!admins.has(botId)) {
+        throw new Error(`admin is not claimed for bot: ${botId}`);
+      }
+      bot.status = "ready";
+      bot.updated_at = new Date().toISOString();
+      return bot;
+    },
+
+    resolveMessageContext(input) {
+      const bot = getRequiredBot(bots, input.bot_id);
+      const admin = admins.get(input.bot_id);
+      const isAdmin = admin?.wecom_user_id === input.wecom_user_id;
+
+      if (!admin) {
+        return {
+          bot_id: bot.bot_id,
+          wecom_user_id: input.wecom_user_id,
+          is_admin: false,
+          allowed: false,
+          reason: "admin_unclaimed",
+        };
+      }
+
+      if (bot.status !== "ready") {
+        if (isAdmin) {
+          return {
+            bot_id: bot.bot_id,
+            wecom_user_id: input.wecom_user_id,
+            is_admin: true,
+            allowed: true,
+            reason: "initializing",
+            conversation: this.resolveConversation({
+              ...input,
+              purpose: "init",
+            }),
+          };
+        }
+
+        return {
+          bot_id: bot.bot_id,
+          wecom_user_id: input.wecom_user_id,
+          is_admin: isAdmin,
+          allowed: false,
+          reason: "initialization_required",
+        };
+      }
+
+      return {
+        bot_id: bot.bot_id,
+        wecom_user_id: input.wecom_user_id,
+        is_admin: isAdmin,
+        allowed: true,
+        reason: "ready",
+        conversation: this.resolveConversation(input),
+      };
+    },
+
+    resolveConversation(input) {
+      getRequiredBot(bots, input.bot_id);
+
+      const key = [
+        input.bot_id,
+        input.wecom_user_id,
+        input.channel,
+        input.purpose,
+      ].join(":");
+      const existing = conversations.get(key);
+      if (existing) {
+        return existing;
+      }
+
+      const now = new Date().toISOString();
+      const conversation: ConversationRecord = {
+        conversation_id: `conv_${crypto.randomUUID()}`,
+        bot_id: requireText(input.bot_id, "bot_id"),
+        wecom_user_id: requireText(input.wecom_user_id, "wecom_user_id"),
+        channel: input.channel,
+        purpose: input.purpose,
+        created_at: now,
+        updated_at: now,
+      };
+      conversations.set(key, conversation);
+      return conversation;
+    },
+
+    upsertBotConfigDocument(input) {
+      const bot = getRequiredBot(bots, input.bot_id);
+      const title = requireBotConfigDocumentTitle(input.title);
+      const key = `${bot.bot_id}:${title}`;
+      const existing = botConfigDocuments.get(key);
+      const now = new Date().toISOString();
+      const record: BotConfigDocumentRecord = {
+        bot_id: bot.bot_id,
+        title,
+        content: input.content,
+        created_at: existing?.created_at ?? now,
+        updated_at: now,
+      };
+      botConfigDocuments.set(key, record);
+      return record;
+    },
+
+    listBotConfigDocuments(botId) {
+      const bot = getRequiredBot(bots, botId);
+      return [...botConfigDocuments.values()]
+        .filter((document) => document.bot_id === bot.bot_id)
+        .sort((left, right) => configDocumentOrder(left.title) - configDocumentOrder(right.title));
+    },
+
+    upsertMemoryDocument(input) {
+      if (input.scope === "bot" && isBotConfigDocumentTitle(input.title)) {
+        throw new Error("bot config documents must use /v1/bot-config-documents");
+      }
+      const memoryDocId = input.memory_doc_id ?? `mem_${crypto.randomUUID()}`;
+      const versions = memoryDocuments.get(memoryDocId) ?? [];
+      const record: MemoryDocumentRecord = {
+        memory_doc_id: memoryDocId,
+        scope: input.scope,
+        owner_id: requireText(input.owner_id, "owner_id"),
+        title: requireText(input.title, "title"),
+        version: versions.length + 1,
+        content: input.content,
+        status: "active",
+        created_at: new Date().toISOString(),
+      };
+      memoryDocuments.set(memoryDocId, [...versions, record]);
+      return record;
+    },
+
+    listMemoryDocumentVersions(memoryDocId) {
+      return memoryDocuments.get(memoryDocId) ?? [];
+    },
+
+    listCurrentMemoryDocuments(input) {
+      const current: MemoryDocumentRecord[] = [];
+      for (const versions of memoryDocuments.values()) {
+        const latest = versions.at(-1);
+        if (
+          latest &&
+          latest.scope === input.scope &&
+          latest.owner_id === requireText(input.owner_id, "owner_id") &&
+          !(latest.scope === "bot" && isBotConfigDocumentTitle(latest.title))
+        ) {
+          current.push(latest);
+        }
+      }
+      return current;
+    },
+  };
+}
+
+function botToChannelRecord(bot: BotRecord): BotChannelRecord {
+  const secretConfigured = bot.wecom_secret_configured;
+  const hasWeComBotId = Boolean(bot.wecom_bot_id);
+  const runtimeEnabled = hasWeComBotId && secretConfigured;
+  const runtimeStatus = !hasWeComBotId
+    ? "missing_bot_id"
+    : !secretConfigured
+      ? "missing_secret"
+      : "enabled";
+  return {
+    channel_id: `wecom:${bot.bot_id}`,
+    bot_id: bot.bot_id,
+    channel_type: "wecom",
+    display_name: "企业微信",
+    ...(bot.wecom_bot_id ? { wecom_bot_id: bot.wecom_bot_id } : {}),
+    secret_configured: secretConfigured,
+    connection_status: bot.wecom_connection_status,
+    runtime_enabled: runtimeEnabled,
+    runtime_status: runtimeStatus,
+    ...(bot.last_wecom_check_at ? { last_check_at: bot.last_wecom_check_at } : {}),
+    ...(bot.last_wecom_error ? { last_error: bot.last_wecom_error } : {}),
+  };
+}
+
+export function getRequiredBot(
+  bots: Map<string, BotRecord>,
+  botId: string,
+): BotRecord {
+  const bot = bots.get(botId);
+  if (!bot) {
+    throw new Error(`bot not found: ${botId}`);
+  }
+  return bot;
+}
+
+function assertUniqueWeComBotId(
+  bots: Map<string, BotRecord>,
+  wecomBotId: string | undefined,
+  currentBotId?: string,
+): void {
+  if (!wecomBotId) {
+    return;
+  }
+
+  for (const bot of bots.values()) {
+    if (bot.wecom_bot_id === wecomBotId && bot.bot_id !== currentBotId) {
+      throw new Error(`wecom bot id already bound to bot: ${bot.bot_id}`);
+    }
+  }
+}
+
+export function requireText(value: string, field: string): string {
+  if (typeof value !== "string" || value.trim() === "") {
+    throw new Error(`${field} is required`);
+  }
+  return value.trim();
+}
+
+export function optionalText(value: string | undefined): string | undefined {
+  if (typeof value !== "string") {
+    return undefined;
+  }
+  const trimmed = value.trim();
+  return trimmed === "" ? undefined : trimmed;
+}
+
+export function buildWeComConnectionTestResult(
+  bot: Pick<BotRecord, "bot_id" | "wecom_bot_id" | "wecom_secret_configured">,
+  verification?: { verified: true } | { verified: false; error: string },
+): WeComConnectionTestResult {
+  const missing: WeComConnectionTestResult["missing"] = [];
+  if (!optionalText(bot.wecom_bot_id)) {
+    missing.push("wecom_bot_id");
+  }
+  if (!bot.wecom_secret_configured) {
+    missing.push("wecom_secret");
+  }
+  const checkedAt = new Date().toISOString();
+  if (missing.length > 0) {
+    return {
+      bot_id: bot.bot_id,
+      status: "missing_config",
+      ...(bot.wecom_bot_id ? { wecom_bot_id: bot.wecom_bot_id } : {}),
+      wecom_secret_configured: bot.wecom_secret_configured,
+      missing,
+      checked_at: checkedAt,
+      error: `missing ${missing.join(", ")}`,
+    };
+  }
+  if (verification?.verified) {
+    return {
+      bot_id: bot.bot_id,
+      status: "verified",
+      wecom_bot_id: bot.wecom_bot_id,
+      wecom_secret_configured: true,
+      missing: [],
+      checked_at: checkedAt,
+    };
+  }
+  if (verification && !verification.verified) {
+    return {
+      bot_id: bot.bot_id,
+      status: "failed",
+      wecom_bot_id: bot.wecom_bot_id,
+      wecom_secret_configured: true,
+      missing: [],
+      checked_at: checkedAt,
+      error: verification.error,
+    };
+  }
+  return {
+    bot_id: bot.bot_id,
+    status: "configured",
+    wecom_bot_id: bot.wecom_bot_id,
+    wecom_secret_configured: true,
+    missing: [],
+    checked_at: checkedAt,
+  };
+}
+
+export function requireMemoryScope(value: string | null): MemoryScope {
+  if (!MEMORY_SCOPES.includes(value as MemoryScope)) {
+    throw new Error("scope is required");
+  }
+  return value as MemoryScope;
+}
+
+export function requireBotConfigDocumentTitle(value: string): BotConfigDocumentRecord["title"] {
+  const title = normalizeBotConfigDocumentTitle(value);
+  if (!title) {
+    throw new Error("bot config document title is invalid");
+  }
+  return title;
+}
+
+export function isBotConfigDocumentTitle(value: string): boolean {
+  return Boolean(normalizeBotConfigDocumentTitle(value));
+}
+
+function normalizeBotConfigDocumentTitle(value: string): BotConfigDocumentRecord["title"] | undefined {
+  const title = String(value).trim().toLowerCase();
+  if (title === "soul" || title === "soul.md" || title === "private/soul.md") {
+    return "soul";
+  }
+  if (
+    title === "agents" ||
+    title === "agents.md" ||
+    title === "instructions/agents.md"
+  ) {
+    return "agents.md";
+  }
+  return undefined;
+}
+
+export function configDocumentOrder(title: BotConfigDocumentRecord["title"]): number {
+  return title === "soul" ? 0 : 1;
+}
+
+export function requireBotStatus(value: string): BotStatus {
+  if (!["draft", "initializing", "ready"].includes(value)) {
+    throw new Error("status is invalid");
+  }
+  return value as BotStatus;
+}
+
+export function hashClaimCode(code: string): string {
+  let hash = 2166136261;
+  for (const char of code) {
+    hash ^= char.charCodeAt(0);
+    hash = Math.imul(hash, 16777619);
+  }
+  return `fnv1a:${(hash >>> 0).toString(16)}`;
+}
+
+export function nextIsoTimestamp(previous: string): string {
+  const now = Date.now();
+  const previousTime = new Date(previous).getTime();
+  return new Date(Math.max(now, previousTime + 1)).toISOString();
+}
