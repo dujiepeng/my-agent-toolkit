@@ -1,4 +1,4 @@
-import type { DocumentCreateInput } from "@my-agent-toolkit/contracts";
+import type { DocumentCreateInput, McpScope, McpTier } from "@my-agent-toolkit/contracts";
 
 export interface DataServiceClientOptions {
   baseUrl: string;
@@ -7,6 +7,26 @@ export interface DataServiceClientOptions {
 
 export interface DataServiceClient {
   createDocument(input: DocumentCreateInput): Promise<Record<string, unknown>>;
+  createMemory(input: CreateMemoryInput): Promise<Record<string, unknown>>;
+  getMemoryStats(input: MemoryStatsInput): Promise<Record<string, unknown>>;
+}
+
+export interface CreateMemoryInput {
+  scope: McpScope;
+  owner_id: string;
+  content: string;
+  tier?: McpTier;
+  source_type?: string;
+  source_conversation_id?: string;
+  source_message_id?: string;
+  created_by_bot_id?: string;
+  created_by_user_id?: string;
+  tags?: string[];
+}
+
+export interface MemoryStatsInput {
+  scope?: McpScope;
+  owner_id?: string;
 }
 
 export function createDataServiceClient(
@@ -24,7 +44,36 @@ export function createDataServiceClient(
         body: JSON.stringify(input),
       });
     },
+
+    async createMemory(input) {
+      return requestJson(fetchImpl, `${baseUrl}/internal/memories`, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+        },
+        body: JSON.stringify(input),
+      });
+    },
+
+    async getMemoryStats(input) {
+      const url = new URL(`${baseUrl}/internal/memory-stats`);
+      appendOptionalSearchParam(url, "scope", input.scope);
+      appendOptionalSearchParam(url, "owner_id", input.owner_id);
+      return requestJson(fetchImpl, url.toString(), {
+        method: "GET",
+      });
+    },
   };
+}
+
+function appendOptionalSearchParam(
+  url: URL,
+  name: string,
+  value: string | undefined,
+): void {
+  if (value) {
+    url.searchParams.set(name, value);
+  }
 }
 
 async function requestJson(

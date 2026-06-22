@@ -1,11 +1,17 @@
 import { verifyRunnerToken } from "./context.js";
 import { createDataServiceClient, type DataServiceClient } from "./dataClient.js";
+import {
+  createMemoryBackendClient,
+  type MemoryBackendClient,
+} from "./memoryBackendClient.js";
 import { callMcpTool } from "./tools.js";
 
 export interface McpServiceConfig {
   runnerSecret: string;
   dataServiceUrl?: string;
-  dataClient?: Pick<DataServiceClient, "createDocument">;
+  dataClient?: Pick<DataServiceClient, "createDocument" | "createMemory" | "getMemoryStats">;
+  memoryBackendUrl?: string;
+  memoryBackend?: Pick<MemoryBackendClient, "storeMemory" | "search">;
 }
 
 export interface McpServiceServer {
@@ -17,6 +23,9 @@ export function createMcpServiceServer(
 ): McpServiceServer {
   const dataClient = config.dataClient ?? createDataServiceClient({
     baseUrl: config.dataServiceUrl ?? "http://data-service:8300",
+  });
+  const memoryBackend = config.memoryBackend ?? createMemoryBackendClient({
+    baseUrl: config.memoryBackendUrl ?? "http://memory-service:8100",
   });
   return {
     async fetch(request: Request): Promise<Response> {
@@ -49,6 +58,7 @@ export function createMcpServiceServer(
           request,
           config,
           dataClient,
+          memoryBackend,
           decodeURIComponent(toolRoute[1]),
           decodeURIComponent(toolRoute[2]),
         );
@@ -86,7 +96,8 @@ function handleGetContext(
 async function handleToolCall(
   request: Request,
   config: McpServiceConfig,
-  dataClient: Pick<DataServiceClient, "createDocument">,
+  dataClient: Pick<DataServiceClient, "createDocument" | "createMemory" | "getMemoryStats">,
+  memoryBackend: Pick<MemoryBackendClient, "storeMemory" | "search">,
   botId: string,
   conversationId: string,
 ): Promise<Response> {
@@ -97,6 +108,7 @@ async function handleToolCall(
   try {
     return jsonResponse(await callMcpTool(context, {
       dataClient,
+      memoryBackend,
     }, await request.json() as { tool: string; input: unknown }));
   } catch (error) {
     return mcpErrorResponse(

@@ -22,6 +22,20 @@ describe("document MCP tools", () => {
             version: 1,
           };
         },
+        async createMemory() {
+          return {};
+        },
+        async getMemoryStats() {
+          return {};
+        },
+      },
+      memoryBackend: {
+        async storeMemory() {
+          return {};
+        },
+        async search() {
+          return { results: [] };
+        },
       },
     };
 
@@ -65,6 +79,20 @@ describe("document MCP tools", () => {
           called = true;
           return {};
         },
+        async createMemory() {
+          return {};
+        },
+        async getMemoryStats() {
+          return {};
+        },
+      },
+      memoryBackend: {
+        async storeMemory() {
+          return {};
+        },
+        async search() {
+          return { results: [] };
+        },
       },
     };
 
@@ -95,6 +123,20 @@ describe("document MCP tools", () => {
         async createDocument() {
           return {};
         },
+        async createMemory() {
+          return {};
+        },
+        async getMemoryStats() {
+          return {};
+        },
+      },
+      memoryBackend: {
+        async storeMemory() {
+          return {};
+        },
+        async search() {
+          return { results: [] };
+        },
       },
     };
 
@@ -124,11 +166,25 @@ describe("document MCP tools", () => {
         async createDocument() {
           return {};
         },
+        async createMemory() {
+          return {};
+        },
+        async getMemoryStats() {
+          return {};
+        },
+      },
+      memoryBackend: {
+        async storeMemory() {
+          return {};
+        },
+        async search() {
+          return { results: [] };
+        },
       },
     };
 
     const result = await callMcpTool(context, deps, {
-      tool: "memory.write",
+      tool: "unknown.tool",
       input: {},
     });
 
@@ -136,8 +192,307 @@ describe("document MCP tools", () => {
       ok: false,
       error: {
         code: "validation_error",
-        message: "unsupported MCP tool: memory.write",
+        message: "unsupported MCP tool: unknown.tool",
+      },
+    });
+  });
+
+  it("writes user memory to data-service and memory backend", async () => {
+    const calls: string[] = [];
+    const deps: McpToolDependencies = {
+      dataClient: {
+        async createDocument() {
+          return {};
+        },
+        async createMemory(input) {
+          calls.push(`data:${input.content}`);
+          return {
+            memory_id: "mem-1",
+            scope: input.scope,
+            owner_id: input.owner_id,
+          };
+        },
+        async getMemoryStats() {
+          return {};
+        },
+      },
+      memoryBackend: {
+        async storeMemory(input) {
+          calls.push(`backend:${input.content}`);
+          return {
+            backend_memory_id: "vec-1",
+            chunks: 2,
+          };
+        },
+        async search() {
+          return { results: [] };
+        },
+      },
+    };
+
+    const result = await callMcpTool(context, deps, {
+      tool: "memory.write",
+      input: {
+        scope: "user",
+        owner_id: "user-a",
+        content: "用户关注环信 IM 产品和 PRD 质量。",
+        tier: "core",
+        tags: ["user-profile"],
+      },
+    });
+
+    expect(result).toEqual({
+      ok: true,
+      result: {
+        memory: {
+          memory_id: "mem-1",
+          scope: "user",
+          owner_id: "user-a",
+        },
+        backend: {
+          backend_memory_id: "vec-1",
+          chunks: 2,
+        },
+      },
+    });
+    expect(calls).toEqual([
+      "data:用户关注环信 IM 产品和 PRD 质量。",
+      "backend:用户关注环信 IM 产品和 PRD 质量。",
+    ]);
+  });
+
+  it("rejects user memory writes for a different user owner", async () => {
+    const deps = createNoopDeps();
+
+    const result = await callMcpTool(context, deps, {
+      tool: "memory.write",
+      input: {
+        scope: "user",
+        owner_id: "other-user",
+        content: "not allowed",
+      },
+    });
+
+    expect(result).toEqual({
+      ok: false,
+      error: {
+        code: "permission_denied",
+        message: "user scope owner must match trusted user_id",
+      },
+    });
+  });
+
+  it("searches memory through memory backend", async () => {
+    const deps: McpToolDependencies = {
+      dataClient: {
+        async createDocument() {
+          return {};
+        },
+        async createMemory() {
+          return {};
+        },
+        async getMemoryStats() {
+          return {};
+        },
+      },
+      memoryBackend: {
+        async storeMemory() {
+          return {};
+        },
+        async search(input) {
+          expect(input).toEqual({
+            query: "PRD 质量",
+            scopes: ["user", "bot"],
+            owner_ids: ["user-a", "prd-bot"],
+            tags: ["prd"],
+            limit: 5,
+          });
+          return {
+            results: [
+              {
+                source: "memory",
+                id: "mem-1",
+                snippet: "用户关注 PRD 质量。",
+                score: 0.91,
+                metadata: {
+                  tier: "core",
+                },
+              },
+            ],
+          };
+        },
+      },
+    };
+
+    const result = await callMcpTool(context, deps, {
+      tool: "memory.search",
+      input: {
+        query: "PRD 质量",
+        scopes: ["user", "bot"],
+        owner_ids: ["user-a", "prd-bot"],
+        tags: ["prd"],
+        limit: 5,
+      },
+    });
+
+    expect(result).toEqual({
+      ok: true,
+      result: {
+        results: [
+          {
+            source: "memory",
+            id: "mem-1",
+            snippet: "用户关注 PRD 质量。",
+            score: 0.91,
+            metadata: {
+              tier: "core",
+            },
+          },
+        ],
+      },
+    });
+  });
+
+  it("returns memory stats from data-service", async () => {
+    const deps: McpToolDependencies = {
+      dataClient: {
+        async createDocument() {
+          return {};
+        },
+        async createMemory() {
+          return {};
+        },
+        async getMemoryStats(input) {
+          expect(input).toEqual({
+            scope: "bot",
+            owner_id: "prd-bot",
+          });
+          return {
+            total_memories: 2,
+            total_chunks: 8,
+          };
+        },
+      },
+      memoryBackend: {
+        async storeMemory() {
+          return {};
+        },
+        async search() {
+          return { results: [] };
+        },
+      },
+    };
+
+    const result = await callMcpTool(context, deps, {
+      tool: "memory.stats",
+      input: {
+        scope: "bot",
+        owner_id: "prd-bot",
+      },
+    });
+
+    expect(result).toEqual({
+      ok: true,
+      result: {
+        total_memories: 2,
+        total_chunks: 8,
+      },
+    });
+  });
+
+  it("runs unified search through memory backend", async () => {
+    const deps: McpToolDependencies = {
+      dataClient: {
+        async createDocument() {
+          return {};
+        },
+        async createMemory() {
+          return {};
+        },
+        async getMemoryStats() {
+          return {};
+        },
+      },
+      memoryBackend: {
+        async storeMemory() {
+          return {};
+        },
+        async search(input) {
+          expect(input).toMatchObject({
+            query: "语音转文字 API",
+            sources: ["documents", "memories"],
+            scopes: ["bot"],
+            owner_ids: ["prd-bot"],
+          });
+          return {
+            results: [
+              {
+                source: "document",
+                id: "doc-1",
+                title: "语音转文字 API PRD",
+                snippet: "计量计费",
+                score: 0.93,
+                metadata: {
+                  doc_type: "prd",
+                },
+              },
+            ],
+          };
+        },
+      },
+    };
+
+    const result = await callMcpTool(context, deps, {
+      tool: "search.query",
+      input: {
+        query: "语音转文字 API",
+        sources: ["documents", "memories"],
+        scopes: ["bot"],
+        owner_ids: ["prd-bot"],
+        limit: 10,
+      },
+    });
+
+    expect(result).toEqual({
+      ok: true,
+      result: {
+        results: [
+          {
+            source: "document",
+            id: "doc-1",
+            title: "语音转文字 API PRD",
+            snippet: "计量计费",
+            score: 0.93,
+            metadata: {
+              doc_type: "prd",
+            },
+          },
+        ],
       },
     });
   });
 });
+
+function createNoopDeps(): McpToolDependencies {
+  return {
+    dataClient: {
+      async createDocument() {
+        return {};
+      },
+      async createMemory() {
+        return {};
+      },
+      async getMemoryStats() {
+        return {};
+      },
+    },
+    memoryBackend: {
+      async storeMemory() {
+        return {};
+      },
+      async search() {
+        return { results: [] };
+      },
+    },
+  };
+}

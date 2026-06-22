@@ -99,6 +99,20 @@ describe("mcp-service server", () => {
             version: 1,
           };
         },
+        async createMemory() {
+          return {};
+        },
+        async getMemoryStats() {
+          return {};
+        },
+      },
+      memoryBackend: {
+        async storeMemory() {
+          return {};
+        },
+        async search() {
+          return { results: [] };
+        },
       },
     });
     const token = signRunnerToken(runnerSecret, {
