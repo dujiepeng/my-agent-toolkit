@@ -595,6 +595,194 @@ describe("data-service server", () => {
     });
   });
 
+  it("exposes internal document memory metadata APIs", async () => {
+    const server = createDataServiceServer();
+
+    const createDocumentResponse = await server.fetch(
+      new Request("http://localhost/internal/documents", {
+        method: "POST",
+        body: JSON.stringify({
+          scope: "bot",
+          owner_id: "prd-bot",
+          title: "语音转文字 API PRD",
+          doc_type: "prd",
+          content: "# v1",
+          visibility: "bot",
+          tier: "core",
+          tags: ["prd", "asr"],
+          created_by_bot_id: "prd-bot",
+          created_by_user_id: "user-a",
+        }),
+      }),
+    );
+
+    expect(createDocumentResponse.status).toBe(201);
+    const document = await createDocumentResponse.json() as { document_id: string };
+    expect(document).toMatchObject({
+      title: "语音转文字 API PRD",
+      version: 1,
+      tags: ["prd", "asr"],
+    });
+
+    const updateDocumentResponse = await server.fetch(
+      new Request(`http://localhost/internal/documents/${document.document_id}`, {
+        method: "PATCH",
+        body: JSON.stringify({
+          content: "# v2",
+          change_summary: "补充计量计费",
+        }),
+      }),
+    );
+    expect(updateDocumentResponse.status).toBe(200);
+    await expect(updateDocumentResponse.json()).resolves.toMatchObject({
+      document_id: document.document_id,
+      version: 2,
+      content: "# v2",
+    });
+
+    const getDocumentResponse = await server.fetch(
+      new Request(`http://localhost/internal/documents/${document.document_id}`),
+    );
+    expect(getDocumentResponse.status).toBe(200);
+    await expect(getDocumentResponse.json()).resolves.toMatchObject({
+      document_id: document.document_id,
+      version: 2,
+      content: "# v2",
+    });
+
+    const listDocumentsResponse = await server.fetch(
+      new Request("http://localhost/internal/documents?scope=bot&owner_id=prd-bot"),
+    );
+    expect(listDocumentsResponse.status).toBe(200);
+    await expect(listDocumentsResponse.json()).resolves.toMatchObject([
+      {
+        document_id: document.document_id,
+        title: "语音转文字 API PRD",
+        version: 2,
+      },
+    ]);
+
+    const reservedDocumentResponse = await server.fetch(
+      new Request("http://localhost/internal/documents", {
+        method: "POST",
+        body: JSON.stringify({
+          scope: "bot",
+          owner_id: "prd-bot",
+          title: "agents.md",
+          doc_type: "config",
+          content: "not allowed",
+        }),
+      }),
+    );
+    expect(reservedDocumentResponse.status).toBe(400);
+    await expect(reservedDocumentResponse.json()).resolves.toEqual({
+      error: "bot config documents must use /v1/bot-config-documents",
+    });
+
+    const createMemoryResponse = await server.fetch(
+      new Request("http://localhost/internal/memories", {
+        method: "POST",
+        body: JSON.stringify({
+          scope: "user",
+          owner_id: "user-a",
+          content: "用户关注环信 IM 产品和 PRD 质量。",
+          tier: "core",
+          source_type: "text",
+          source_conversation_id: "conv-a",
+          source_message_id: "msg-a",
+          created_by_bot_id: "prd-bot",
+          created_by_user_id: "user-a",
+          tags: ["user-profile"],
+        }),
+      }),
+    );
+
+    expect(createMemoryResponse.status).toBe(201);
+    const memory = await createMemoryResponse.json() as { memory_id: string };
+    expect(memory).toMatchObject({
+      scope: "user",
+      owner_id: "user-a",
+      tier: "core",
+      tags: ["user-profile"],
+    });
+
+    const listMemoriesResponse = await server.fetch(
+      new Request("http://localhost/internal/memories?scope=user&owner_id=user-a"),
+    );
+    expect(listMemoriesResponse.status).toBe(200);
+    await expect(listMemoriesResponse.json()).resolves.toMatchObject([
+      {
+        memory_id: memory.memory_id,
+        owner_id: "user-a",
+      },
+    ]);
+
+    const chunksResponse = await server.fetch(
+      new Request("http://localhost/internal/chunks", {
+        method: "POST",
+        body: JSON.stringify({
+          source_type: "memory",
+          source_id: memory.memory_id,
+          scope: "user",
+          owner_id: "user-a",
+          chunks: [
+            {
+              content: "用户关注环信 IM 产品。",
+              chunk_index: 0,
+              heading_path: "profile",
+              location: "line:1",
+              tier: "core",
+            },
+            {
+              content: "用户关注 PRD 质量。",
+              chunk_index: 1,
+              heading_path: "profile",
+              location: "line:2",
+              tier: "core",
+            },
+          ],
+        }),
+      }),
+    );
+    expect(chunksResponse.status).toBe(201);
+    await expect(chunksResponse.json()).resolves.toHaveLength(2);
+
+    const assetResponse = await server.fetch(
+      new Request("http://localhost/internal/assets", {
+        method: "POST",
+        body: JSON.stringify({
+          source_type: "memory",
+          source_id: memory.memory_id,
+          filename: "profile.md",
+          content_type: "text/markdown",
+          storage_uri: "file:///data/profile.md",
+          size_bytes: 128,
+          content_hash: "hash-profile",
+        }),
+      }),
+    );
+    expect(assetResponse.status).toBe(201);
+    await expect(assetResponse.json()).resolves.toMatchObject({
+      source_id: memory.memory_id,
+      filename: "profile.md",
+    });
+
+    const statsResponse = await server.fetch(
+      new Request("http://localhost/internal/memory-stats?scope=user&owner_id=user-a"),
+    );
+    expect(statsResponse.status).toBe(200);
+    await expect(statsResponse.json()).resolves.toEqual({
+      total_memories: 1,
+      total_chunks: 2,
+      by_tier: {
+        core: 1,
+        reference: 0,
+        temp: 0,
+      },
+      disk_usage_bytes: 128,
+    });
+  });
+
   it("resets admin claim and bot initialization state over HTTP", async () => {
     const server = createDataServiceServer();
     await server.fetch(

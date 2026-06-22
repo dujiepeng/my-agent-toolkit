@@ -2,6 +2,8 @@ import {
   createDataStore,
   requireMemoryScope,
   type DataStore,
+  type MemoryScope,
+  type UpdateBusinessDocumentInput,
 } from "./store.js";
 
 export interface DataServiceServer {
@@ -47,6 +49,48 @@ export function createDataServiceServer(
         url.pathname === "/internal/wecom-runtime/bots"
       ) {
         return handleListWeComRuntimeBots(store);
+      }
+
+      if (request.method === "POST" && url.pathname === "/internal/documents") {
+        return handleCreateBusinessDocument(request, store);
+      }
+
+      if (request.method === "GET" && url.pathname === "/internal/documents") {
+        return handleListBusinessDocuments(url, store);
+      }
+
+      const internalDocumentMatch = url.pathname.match(
+        /^\/internal\/documents\/([^/]+)$/,
+      );
+      if (request.method === "GET" && internalDocumentMatch) {
+        return handleGetBusinessDocument(url, store, internalDocumentMatch[1]);
+      }
+      if (request.method === "PATCH" && internalDocumentMatch) {
+        return handleUpdateBusinessDocument(
+          request,
+          store,
+          internalDocumentMatch[1],
+        );
+      }
+
+      if (request.method === "POST" && url.pathname === "/internal/memories") {
+        return handleCreateMemoryRecord(request, store);
+      }
+
+      if (request.method === "GET" && url.pathname === "/internal/memories") {
+        return handleListMemories(url, store);
+      }
+
+      if (request.method === "POST" && url.pathname === "/internal/chunks") {
+        return handleRecordChunks(request, store);
+      }
+
+      if (request.method === "POST" && url.pathname === "/internal/assets") {
+        return handleRecordAsset(request, store);
+      }
+
+      if (request.method === "GET" && url.pathname === "/internal/memory-stats") {
+        return handleGetMemoryStats(url, store);
       }
 
       const botMatch = url.pathname.match(/^\/v1\/bots\/([^/]+)$/);
@@ -244,6 +288,132 @@ function handleDeleteBotChannel(store: DataStore, botId: string): Response {
 function handleListWeComRuntimeBots(store: DataStore): Response {
   try {
     return jsonResponse(store.listWeComRuntimeBots());
+  } catch (error) {
+    return errorResponse(error);
+  }
+}
+
+async function handleCreateBusinessDocument(
+  request: Request,
+  store: DataStore,
+): Promise<Response> {
+  try {
+    return jsonResponse(store.createBusinessDocument(await request.json()), 201);
+  } catch (error) {
+    return errorResponse(error);
+  }
+}
+
+async function handleUpdateBusinessDocument(
+  request: Request,
+  store: DataStore,
+  documentId: string,
+): Promise<Response> {
+  try {
+    const body = await request.json() as Partial<UpdateBusinessDocumentInput>;
+    if (typeof body.content !== "string" || body.content.trim() === "") {
+      throw new Error("content is required");
+    }
+    return jsonResponse(store.updateBusinessDocument({
+      content: body.content,
+      ...(body.change_summary ? { change_summary: body.change_summary } : {}),
+      ...(body.chunk_count !== undefined ? { chunk_count: body.chunk_count } : {}),
+      document_id: documentId,
+    }));
+  } catch (error) {
+    return errorResponse(error);
+  }
+}
+
+function handleGetBusinessDocument(
+  url: URL,
+  store: DataStore,
+  documentId: string,
+): Response {
+  try {
+    const versionParam = url.searchParams.get("version");
+    const version = versionParam === null ? undefined : Number(versionParam);
+    if (
+      versionParam !== null &&
+      (!Number.isInteger(Number(versionParam)) || Number(versionParam) < 1)
+    ) {
+      throw new Error("version must be a positive integer");
+    }
+    const document = store.getBusinessDocument(documentId, version);
+    if (!document) {
+      return jsonResponse({ error: `business document not found: ${documentId}` }, 404);
+    }
+    return jsonResponse(document);
+  } catch (error) {
+    return errorResponse(error);
+  }
+}
+
+function handleListBusinessDocuments(url: URL, store: DataStore): Response {
+  try {
+    return jsonResponse(store.listBusinessDocuments({
+      scope: optionalMemoryScope(url.searchParams.get("scope")),
+      owner_id: optionalSearchParam(url, "owner_id"),
+      doc_type: optionalSearchParam(url, "doc_type"),
+      status: optionalActiveStatus(url.searchParams.get("status")),
+    }));
+  } catch (error) {
+    return errorResponse(error);
+  }
+}
+
+async function handleCreateMemoryRecord(
+  request: Request,
+  store: DataStore,
+): Promise<Response> {
+  try {
+    return jsonResponse(store.createMemoryRecord(await request.json()), 201);
+  } catch (error) {
+    return errorResponse(error);
+  }
+}
+
+function handleListMemories(url: URL, store: DataStore): Response {
+  try {
+    return jsonResponse(store.listMemories({
+      scope: optionalMemoryScope(url.searchParams.get("scope")),
+      owner_id: optionalSearchParam(url, "owner_id"),
+      tier: optionalTier(url.searchParams.get("tier")),
+      status: optionalActiveStatus(url.searchParams.get("status")),
+    }));
+  } catch (error) {
+    return errorResponse(error);
+  }
+}
+
+async function handleRecordChunks(
+  request: Request,
+  store: DataStore,
+): Promise<Response> {
+  try {
+    return jsonResponse(store.recordChunks(await request.json()), 201);
+  } catch (error) {
+    return errorResponse(error);
+  }
+}
+
+async function handleRecordAsset(
+  request: Request,
+  store: DataStore,
+): Promise<Response> {
+  try {
+    return jsonResponse(store.recordAsset(await request.json()), 201);
+  } catch (error) {
+    return errorResponse(error);
+  }
+}
+
+function handleGetMemoryStats(url: URL, store: DataStore): Response {
+  try {
+    return jsonResponse(store.getMemoryStats({
+      scope: optionalMemoryScope(url.searchParams.get("scope")),
+      owner_id: optionalSearchParam(url, "owner_id"),
+    }));
   } catch (error) {
     return errorResponse(error);
   }
@@ -460,6 +630,38 @@ async function handleVerifyAdminClaim(
   } catch (error) {
     return errorResponse(error);
   }
+}
+
+function optionalSearchParam(url: URL, name: string): string | undefined {
+  const value = url.searchParams.get(name);
+  return value && value.trim() !== "" ? value.trim() : undefined;
+}
+
+function optionalMemoryScope(value: string | null): MemoryScope | undefined {
+  if (value === null || value.trim() === "") {
+    return undefined;
+  }
+  return requireMemoryScope(value);
+}
+
+function optionalTier(value: string | null): "core" | "reference" | "temp" | undefined {
+  if (value === null || value.trim() === "") {
+    return undefined;
+  }
+  if (value === "core" || value === "reference" || value === "temp") {
+    return value;
+  }
+  throw new Error("tier must be core, reference, or temp");
+}
+
+function optionalActiveStatus(value: string | null): "active" | "archived" | undefined {
+  if (value === null || value.trim() === "") {
+    return undefined;
+  }
+  if (value === "active" || value === "archived") {
+    return value;
+  }
+  throw new Error("status must be active or archived");
 }
 
 function errorResponse(error: unknown): Response {
