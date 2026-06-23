@@ -3,6 +3,7 @@ import {
   getActiveInitializationSession,
   upsertInitializationSession,
 } from "./botStateClient.js";
+import { handleBotMessage } from "./messageHandler.js";
 import {
   createBotHostServer,
   createBotHostSupervisor,
@@ -4510,6 +4511,145 @@ describe("bot-host server", () => {
         finish: undefined,
       },
     ]);
+  });
+
+  it("uses the shared ready message handler for both api and worker paths", async () => {
+    const sent: Array<{ conversationId: string; text: string; finish?: boolean }> = [];
+    let messageHandler:
+      | ((message: {
+        conversationId: string;
+        userId: string;
+        text: string;
+      }) => Promise<void>)
+      | undefined;
+    const createFetch = (initializationSessions: Map<string, MockInitializationSession>): typeof fetch => async (input, init) => {
+      const request = input instanceof Request ? input : new Request(input, init);
+      const body = request.method === "PUT" ? await request.json().catch(() => undefined) : undefined;
+      const initializationSessionResponse = mockInitializationSessionResponse(request, body, initializationSessions);
+      if (initializationSessionResponse) {
+        return initializationSessionResponse;
+      }
+      if (request.url === "http://data-service/v1/message-context/resolve") {
+        return Response.json({
+          allowed: true,
+          reason: "ready",
+          is_admin: true,
+          conversation: {
+            conversation_id: "conv-chat",
+            purpose: "normal_chat",
+          },
+        });
+      }
+      if (request.url === "http://data-service/v1/bots/prd-bot/config-documents") {
+        return Response.json([]);
+      }
+      if (request.url.startsWith("http://data-service/v1/memory-documents/current")) {
+        return Response.json([]);
+      }
+      if (request.url.startsWith("http://data-service/internal/pending-generated-documents")) {
+        return Response.json([]);
+      }
+      return Response.json({ error: "unexpected", url: request.url }, { status: 500 });
+    };
+
+    const seedSessions = () => {
+      const initializationSessions = new Map<string, MockInitializationSession>();
+      initializationSessions.set("prd-bot:user-a:conv-chat", {
+        session_id: "init-shared",
+        bot_id: "prd-bot",
+        wecom_user_id: "user-a",
+        conversation_id: "conv-chat",
+        phase: "soul",
+        soul_answers: ["产品经理助手"],
+        agents_answers: [],
+        status: "active",
+      });
+      return initializationSessions;
+    };
+
+    const sharedSessions = seedSessions();
+    const sharedFetch = createFetch(sharedSessions);
+
+    const shared = await handleBotMessage(
+      {
+        bot_id: "prd-bot",
+        wecom_user_id: "user-a",
+        conversation_id: "conversation-a",
+        text: "冷静务实",
+        runtime: "mock",
+      },
+      {
+        dataServiceUrl: "http://data-service",
+        llmRunnerUrl: "http://llm-runner",
+        fetch: sharedFetch,
+      },
+    );
+
+    const apiSessions = seedSessions();
+    const server = createBotHostServer({
+      dataServiceUrl: "http://data-service",
+      llmRunnerUrl: "http://llm-runner",
+      fetch: createFetch(apiSessions),
+    });
+    const apiResponse = await server.fetch(new Request("http://bot-host/v1/messages/wecom", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        bot_id: "prd-bot",
+        wecom_user_id: "user-a",
+        conversation_id: "conversation-a",
+        text: "冷静务实",
+        runtime: "mock",
+      }),
+    }));
+
+    const workerSessions = seedSessions();
+    const worker = createBotHostWorker({
+      botId: "prd-bot",
+      runtime: "mock",
+      dataServiceUrl: "http://data-service",
+      llmRunnerUrl: "http://llm-runner",
+      fetch: createFetch(workerSessions),
+      wecomClient: {
+        async connect() {},
+        disconnect() {},
+        onMessage(handler) {
+          messageHandler = handler;
+        },
+        async sendText(conversationId, text, options) {
+          sent.push({ conversationId, text, finish: options?.finish });
+        },
+      },
+    });
+
+    await worker.start();
+    await messageHandler?.({
+      conversationId: "conversation-a",
+      userId: "user-a",
+      text: "冷静务实",
+    });
+
+    expect(shared).toMatchObject({
+      conversation_id: "conv-chat",
+      output: "Soul 引导 3/3：你希望我的沟通风格是什么？\n1. 简洁直接\n2. 严谨完整\n3. 先问清楚再回答\n4. 给出选项辅助决策\n5. 其他，请直接说明\n\n回复编号或直接输入。",
+    });
+    expect(await apiResponse.json()).toMatchObject(shared);
+    expect(sent).toEqual([
+      {
+        conversationId: "conversation-a",
+        text: "Soul 引导 3/3：你希望我的沟通风格是什么？\n1. 简洁直接\n2. 严谨完整\n3. 先问清楚再回答\n4. 给出选项辅助决策\n5. 其他，请直接说明\n\n回复编号或直接输入。",
+        finish: undefined,
+      },
+    ]);
+    expect(sharedSessions.get("prd-bot:user-a:conv-chat")).toMatchObject({
+      soul_answers: ["产品经理助手", "冷静务实"],
+    });
+    expect(apiSessions.get("prd-bot:user-a:conv-chat")).toMatchObject({
+      soul_answers: ["产品经理助手", "冷静务实"],
+    });
+    expect(workerSessions.get("prd-bot:user-a:conv-chat")).toMatchObject({
+      soul_answers: ["产品经理助手", "冷静务实"],
+    });
   });
 
   it("supervises wecom workers from data-service runtime config", async () => {
