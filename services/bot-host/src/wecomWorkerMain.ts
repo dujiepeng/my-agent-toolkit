@@ -1,37 +1,17 @@
-import { createServer } from "node:http";
-import { createBotHostServer, createBotHostSupervisor } from "./server.js";
+import { createNodeServer } from "./nodeServer.js";
+import { createBotHostSupervisor } from "./server.js";
 import { WeComLongConnectionClient } from "./wecomClient.js";
 
-function createNodeServer(port: number, app: { fetch(request: Request): Promise<Response> }) {
-  const server = createServer(async (req, res) => {
-    const url = `http://${req.headers.host ?? `localhost:${port}`}${req.url ?? "/"}`;
-    const chunks: Buffer[] = [];
-
-    for await (const chunk of req) {
-      chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
-    }
-
-    const request = new Request(url, {
-      method: req.method,
-      headers: req.headers as HeadersInit,
-      body: chunks.length > 0 ? Buffer.concat(chunks) : undefined,
-    });
-
-    const response = await app.fetch(request);
-    res.statusCode = response.status;
-    response.headers.forEach((value, key) => res.setHeader(key, value));
-    res.end(Buffer.from(await response.arrayBuffer()));
+function jsonResponse(body: unknown, status = 200): Response {
+  return new Response(JSON.stringify(body), {
+    status,
+    headers: {
+      "content-type": "application/json",
+    },
   });
-
-  server.listen(port, "0.0.0.0", () => {
-    console.log(`bot-host worker listening on ${port}`);
-  });
-
-  return server;
 }
 
-export function startWeComWorkerMain(): void {
-  const port = Number.parseInt(process.env.PORT ?? "8400", 10);
+export function createWeComWorkerApp() {
   const hostConfig = {
     dataServiceUrl: process.env.DATA_SERVICE_URL ?? "http://data-service:8300",
     llmRunnerUrl: process.env.LLM_RUNNER_URL ?? "http://llm-runner:8200",
@@ -53,21 +33,41 @@ export function startWeComWorkerMain(): void {
     },
   });
 
-  const app = createBotHostServer({
-    ...hostConfig,
-    initializationController: {
-      restartInitialization(input) {
-        return supervisor.restartInitialization!(input);
-      },
-    },
-    runtimeController: {
-      sync() {
-        return supervisor.sync!();
-      },
-    },
-  });
+  return {
+    supervisor,
+    app: {
+      async fetch(request: Request): Promise<Response> {
+        const url = new URL(request.url);
 
-  createNodeServer(port, app);
+        if (request.method === "GET" && url.pathname === "/health") {
+          return jsonResponse({
+            service: "wecom-worker",
+            status: "ok",
+          });
+        }
+
+        if (request.method === "POST" && url.pathname === "/internal/wecom-runtime/sync") {
+          try {
+            await supervisor.sync?.();
+            return jsonResponse({ synced: true });
+          } catch (error) {
+            return jsonResponse({
+              error: error instanceof Error ? error.message : "failed to sync runtime",
+            }, 500);
+          }
+        }
+
+        return jsonResponse({ error: "not found" }, 404);
+      },
+    },
+  };
+}
+
+export function startWeComWorkerMain(): void {
+  const port = Number.parseInt(process.env.PORT ?? "8401", 10);
+  const { app, supervisor } = createWeComWorkerApp();
+
+  createNodeServer(port, app, "bot-host worker");
 
   supervisor.start().catch((error) => {
     console.error("failed to start WeCom worker", error);
