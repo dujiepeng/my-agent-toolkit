@@ -155,6 +155,21 @@ export interface PendingGeneratedDocumentRecord {
   updated_at: string;
 }
 
+export interface RuntimeConfigRecord {
+  bot_id: string;
+  provider: string;
+  stream: boolean;
+  options: Record<string, unknown>;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface UpsertRuntimeConfigInput {
+  provider: string;
+  stream?: boolean;
+  options?: Record<string, unknown>;
+}
+
 export interface CreatePendingGeneratedDocumentInput {
   bot_id: string;
   wecom_user_id: string;
@@ -445,6 +460,11 @@ export interface DataStore {
   deleteBotChannel(botId: string): BotChannelRecord;
   listWeComRuntimeBots(): WeComRuntimeBotConfig[];
   testWeComConnection(botId: string): Promise<WeComConnectionTestResult>;
+  getRuntimeConfig(botId: string): RuntimeConfigRecord;
+  upsertRuntimeConfig(
+    botId: string,
+    input: UpsertRuntimeConfigInput,
+  ): RuntimeConfigRecord;
   getAdmin(botId: string): AdminRecord | undefined;
   createAdminClaim(botId: string): AdminClaimRecord;
   claimAdmin(input: ClaimAdminInput): AdminRecord;
@@ -508,6 +528,7 @@ export function createDataStore(options: DataStoreOptions = {}): DataStore {
   const conversations = new Map<string, ConversationRecord>();
   const initializationSessions = new Map<string, InitializationSessionRecord>();
   const pendingGeneratedDocuments = new Map<string, PendingGeneratedDocumentRecord>();
+  const runtimeConfigs = new Map<string, RuntimeConfigRecord>();
   const memoryDocuments = new Map<string, MemoryDocumentRecord[]>();
   const botConfigDocuments = new Map<string, BotConfigDocumentRecord>();
   const businessDocuments = new Map<string, BusinessDocumentRecord>();
@@ -685,6 +706,27 @@ export function createDataStore(options: DataStoreOptions = {}): DataStore {
       };
       bots.set(bot.bot_id, updated);
       return result;
+    },
+
+    getRuntimeConfig(botId) {
+      const bot = getRequiredBot(bots, botId);
+      return runtimeConfigs.get(bot.bot_id) ?? defaultRuntimeConfig(bot);
+    },
+
+    upsertRuntimeConfig(botId, input) {
+      const bot = getRequiredBot(bots, botId);
+      const existing = runtimeConfigs.get(bot.bot_id);
+      const now = existing ? nextIsoTimestamp(existing.updated_at) : new Date().toISOString();
+      const record: RuntimeConfigRecord = {
+        bot_id: bot.bot_id,
+        provider: requireText(input.provider, "provider"),
+        stream: input.stream ?? true,
+        options: normalizeRuntimeConfigOptions(input.options),
+        created_at: existing?.created_at ?? now,
+        updated_at: now,
+      };
+      runtimeConfigs.set(record.bot_id, record);
+      return record;
     },
 
     getAdmin(botId) {
@@ -1467,6 +1509,29 @@ export function normalizeAnswerArray(value: string[], field: string): string[] {
     throw new Error(`${field} is required`);
   }
   return value.map((answer) => requireText(answer, field));
+}
+
+export function normalizeRuntimeConfigOptions(
+  value: Record<string, unknown> | undefined,
+): Record<string, unknown> {
+  if (value === undefined) {
+    return {};
+  }
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new Error("options must be an object");
+  }
+  return { ...value };
+}
+
+export function defaultRuntimeConfig(bot: BotRecord): RuntimeConfigRecord {
+  return {
+    bot_id: bot.bot_id,
+    provider: bot.runtime,
+    stream: true,
+    options: {},
+    created_at: bot.created_at,
+    updated_at: bot.updated_at,
+  };
 }
 
 export function initializationSessionKey(

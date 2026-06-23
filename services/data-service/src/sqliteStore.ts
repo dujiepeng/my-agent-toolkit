@@ -8,11 +8,13 @@ import {
   ADMIN_CLAIM_TTL_MS,
   buildWeComConnectionTestResult,
   configDocumentOrder,
+  defaultRuntimeConfig,
   hashClaimCode,
   initializationSessionKey,
   isBotConfigDocumentTitle,
   nextIsoTimestamp,
   normalizeAnswerArray,
+  normalizeRuntimeConfigOptions,
   optionalText,
   requireBotConfigDocumentTitle,
   requireBotStatus,
@@ -52,8 +54,10 @@ import {
   type RecordAssetInput,
   type RecordChunksInput,
   type ResolveConversationInput,
+  type RuntimeConfigRecord,
   type TransferAdminInput,
   type UpdateBusinessDocumentInput,
+  type UpsertRuntimeConfigInput,
   type UpsertInitializationSessionInput,
   type UpsertMemoryDocumentInput,
   type UpsertBotConfigDocumentInput,
@@ -198,6 +202,14 @@ export function createSqliteDataStore(
 
     async testWeComConnection(botId) {
       return testWeComConnection(db, botId, options);
+    },
+
+    getRuntimeConfig(botId) {
+      return getRuntimeConfig(db, botId);
+    },
+
+    upsertRuntimeConfig(botId, input) {
+      return upsertRuntimeConfig(db, botId, input);
     },
 
     getAdmin(botId) {
@@ -580,6 +592,56 @@ function updateBotMcpCapabilityConfig(
       updated_at = excluded.updated_at
   `).run(bot.bot_id, JSON.stringify(config), new Date().toISOString());
   return config;
+}
+
+function getRuntimeConfig(
+  db: Database.Database,
+  botId: string,
+): RuntimeConfigRecord {
+  const bot = getRequiredBot(db, botId);
+  const record = mapRuntimeConfigRecord(
+    db.prepare("select * from runtime_configs where bot_id = ?").get(bot.bot_id),
+  );
+  return record ?? defaultRuntimeConfig(bot);
+}
+
+function upsertRuntimeConfig(
+  db: Database.Database,
+  botId: string,
+  input: UpsertRuntimeConfigInput,
+): RuntimeConfigRecord {
+  const bot = getRequiredBot(db, botId);
+  const existing = mapRuntimeConfigRecord(
+    db.prepare("select * from runtime_configs where bot_id = ?").get(bot.bot_id),
+  );
+  const now = existing ? nextIsoTimestamp(existing.updated_at) : new Date().toISOString();
+  const record: RuntimeConfigRecord = {
+    bot_id: bot.bot_id,
+    provider: requireText(input.provider, "provider"),
+    stream: input.stream ?? true,
+    options: normalizeRuntimeConfigOptions(input.options),
+    created_at: existing?.created_at ?? now,
+    updated_at: now,
+  };
+  db.prepare(
+    `
+      insert into runtime_configs (bot_id, provider, stream, options_json, created_at, updated_at)
+      values (?, ?, ?, ?, ?, ?)
+      on conflict(bot_id) do update set
+        provider = excluded.provider,
+        stream = excluded.stream,
+        options_json = excluded.options_json,
+        updated_at = excluded.updated_at
+    `,
+  ).run(
+    record.bot_id,
+    record.provider,
+    record.stream ? 1 : 0,
+    JSON.stringify(record.options),
+    record.created_at,
+    record.updated_at,
+  );
+  return record;
 }
 
 function updateBot(
@@ -1190,6 +1252,15 @@ function migrate(db: Database.Database): void {
       updated_at text not null
     );
 
+    create table if not exists runtime_configs (
+      bot_id text primary key,
+      provider text not null,
+      stream integer not null,
+      options_json text not null,
+      created_at text not null,
+      updated_at text not null
+    );
+
     create table if not exists memory_document_versions (
       memory_doc_id text not null,
       version integer not null,
@@ -1715,6 +1786,23 @@ function mapInitializationSessionRecord(
       }
       : {}),
     status: requireInitializationSessionStatus(record.status as string),
+    created_at: record.created_at as string,
+    updated_at: record.updated_at as string,
+  };
+}
+
+function mapRuntimeConfigRecord(row: unknown): RuntimeConfigRecord | undefined {
+  if (!row || typeof row !== "object") {
+    return undefined;
+  }
+  const record = row as Record<string, unknown>;
+  return {
+    bot_id: record.bot_id as string,
+    provider: requireText(record.provider as string, "provider"),
+    stream: Boolean(record.stream),
+    options: normalizeRuntimeConfigOptions(
+      JSON.parse(record.options_json as string) as Record<string, unknown>,
+    ),
     created_at: record.created_at as string,
     updated_at: record.updated_at as string,
   };

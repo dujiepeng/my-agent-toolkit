@@ -144,6 +144,44 @@ describe("sqlite data store", () => {
     second.close?.();
   });
 
+  it("persists runtime config across store instances", () => {
+    const dir = mkdtempSync(join(tmpdir(), "data-service-"));
+    dirs.push(dir);
+    const dbPath = join(dir, "data.db");
+
+    const first = createSqliteDataStore(dbPath);
+    first.createBot({ bot_id: "prd-bot", name: "PRD Bot", runtime: "kiro" });
+    expect(first.getRuntimeConfig("prd-bot")).toMatchObject({
+      bot_id: "prd-bot",
+      provider: "kiro",
+      stream: true,
+      options: {},
+    });
+    const updated = first.upsertRuntimeConfig("prd-bot", {
+      provider: "codex",
+      stream: false,
+      options: {
+        model: "gpt-5",
+      },
+    });
+    first.close?.();
+
+    const second = createSqliteDataStore(dbPath);
+    expect(second.getRuntimeConfig("prd-bot")).toEqual(updated);
+    const repeated = second.upsertRuntimeConfig("prd-bot", {
+      provider: "kimi",
+    });
+    expect(repeated).toMatchObject({
+      bot_id: "prd-bot",
+      provider: "kimi",
+      stream: true,
+      options: {},
+    });
+    expect(repeated.created_at).toBe(updated.created_at);
+    expect(repeated.updated_at).not.toBe(updated.updated_at);
+    second.close?.();
+  });
+
   it("persists pending generated documents across store instances", () => {
     const dir = mkdtempSync(join(tmpdir(), "data-service-"));
     dirs.push(dir);

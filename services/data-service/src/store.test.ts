@@ -88,6 +88,60 @@ describe("data-service store", () => {
     })).toThrow("scope must be system, shared, bot, user, or session");
   });
 
+  it("stores bot runtime provider config independently from worker code", () => {
+    const store = createDataStore();
+    store.createBot({ bot_id: "prd-bot", name: "PRD Bot", runtime: "kiro" });
+
+    const defaultConfig = store.getRuntimeConfig("prd-bot");
+    expect(defaultConfig).toMatchObject({
+      bot_id: "prd-bot",
+      provider: "kiro",
+      stream: true,
+      options: {},
+    });
+
+    const updated = store.upsertRuntimeConfig("prd-bot", {
+      provider: "codex",
+      stream: false,
+      options: {
+        model: "gpt-5",
+        temperature: 0.2,
+      },
+    });
+
+    expect(updated).toMatchObject({
+      bot_id: "prd-bot",
+      provider: "codex",
+      stream: false,
+      options: {
+        model: "gpt-5",
+        temperature: 0.2,
+      },
+    });
+    expect(store.getBot("prd-bot")).toMatchObject({
+      runtime: "kiro",
+    });
+    expect(store.getRuntimeConfig("prd-bot")).toEqual(updated);
+
+    const repeated = store.upsertRuntimeConfig("prd-bot", {
+      provider: "kimi",
+    });
+
+    expect(repeated).toMatchObject({
+      bot_id: "prd-bot",
+      provider: "kimi",
+      stream: true,
+      options: {},
+    });
+    expect(repeated.created_at).toBe(updated.created_at);
+    expect(repeated.updated_at).not.toBe(updated.updated_at);
+    expect(() => store.upsertRuntimeConfig("prd-bot", {
+      provider: "",
+    })).toThrow("provider is required");
+    expect(() => store.getRuntimeConfig("missing-bot"))
+      .toThrow("bot not found: missing-bot");
+  });
+
   it("upserts and clears active initialization sessions", () => {
     const store = createDataStore();
     store.createBot({ bot_id: "prd-bot", name: "PRD Bot", runtime: "kiro" });

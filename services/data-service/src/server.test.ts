@@ -175,6 +175,61 @@ describe("data-service server", () => {
     });
   });
 
+  it("updates runtime config over HTTP", async () => {
+    const server = createDataServiceServer();
+    await server.fetch(
+      new Request("http://localhost/v1/bots", {
+        method: "POST",
+        body: JSON.stringify({
+          bot_id: "prd-bot",
+          name: "PRD Bot",
+          runtime: "kiro",
+        }),
+      }),
+    );
+
+    const defaultResponse = await server.fetch(
+      new Request("http://localhost/internal/bots/prd-bot/runtime-config"),
+    );
+    expect(defaultResponse.status).toBe(200);
+    await expect(defaultResponse.json()).resolves.toMatchObject({
+      bot_id: "prd-bot",
+      provider: "kiro",
+      stream: true,
+      options: {},
+    });
+
+    const updateResponse = await server.fetch(
+      new Request("http://localhost/internal/bots/prd-bot/runtime-config", {
+        method: "PUT",
+        body: JSON.stringify({
+          provider: "codex",
+          stream: false,
+          options: {
+            model: "gpt-5",
+          },
+        }),
+      }),
+    );
+
+    expect(updateResponse.status).toBe(200);
+    const updated = await updateResponse.json();
+    expect(updated).toMatchObject({
+      bot_id: "prd-bot",
+      provider: "codex",
+      stream: false,
+      options: {
+        model: "gpt-5",
+      },
+    });
+
+    const getResponse = await server.fetch(
+      new Request("http://localhost/internal/bots/prd-bot/runtime-config"),
+    );
+    expect(getResponse.status).toBe(200);
+    await expect(getResponse.json()).resolves.toEqual(updated);
+  });
+
   it("lists internal wecom runtime bot configs with secrets", async () => {
     const server = createDataServiceServer();
     await server.fetch(

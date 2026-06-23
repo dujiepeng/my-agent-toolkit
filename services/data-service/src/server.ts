@@ -142,6 +142,20 @@ export function createDataServiceServer(
         return handleGetMemoryStats(url, store);
       }
 
+      const runtimeConfigMatch = url.pathname.match(
+        /^\/internal\/bots\/([^/]+)\/runtime-config$/,
+      );
+      if (request.method === "GET" && runtimeConfigMatch) {
+        return handleGetRuntimeConfig(store, runtimeConfigMatch[1]);
+      }
+      if (request.method === "PUT" && runtimeConfigMatch) {
+        return handleUpsertRuntimeConfig(
+          request,
+          store,
+          runtimeConfigMatch[1],
+        );
+      }
+
       const botMatch = url.pathname.match(/^\/v1\/bots\/([^/]+)$/);
       if (request.method === "GET" && botMatch) {
         return handleGetBot(store, botMatch[1]);
@@ -567,6 +581,29 @@ function handleGetMemoryStats(url: URL, store: DataStore): Response {
       scope: optionalMemoryScope(url.searchParams.get("scope")),
       owner_id: optionalSearchParam(url, "owner_id"),
     }));
+  } catch (error) {
+    return errorResponse(error);
+  }
+}
+
+function handleGetRuntimeConfig(
+  store: DataStore,
+  botId: string,
+): Response {
+  try {
+    return jsonResponse(store.getRuntimeConfig(botId));
+  } catch (error) {
+    return errorResponse(error);
+  }
+}
+
+async function handleUpsertRuntimeConfig(
+  request: Request,
+  store: DataStore,
+  botId: string,
+): Promise<Response> {
+  try {
+    return jsonResponse(store.upsertRuntimeConfig(botId, await request.json()));
   } catch (error) {
     return errorResponse(error);
   }
