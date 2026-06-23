@@ -2048,13 +2048,13 @@ describe("bot-host server", () => {
 
     await worker.start();
     const waitForSentText = async (text: string) => {
-      for (let attempt = 0; attempt < 20; attempt += 1) {
+      for (let attempt = 0; attempt < 200; attempt += 1) {
         if (sent.some((message) => message.text.includes(text))) {
           return;
         }
         await new Promise((resolve) => setTimeout(resolve, 0));
       }
-      throw new Error(`timed out waiting for sent text: ${text}`);
+      throw new Error(`timed out waiting for sent text: ${text}; sent=${JSON.stringify(sent)}`);
     };
     await messageHandler?.({
       conversationId: "conversation-a",
@@ -2067,10 +2067,16 @@ describe("bot-host server", () => {
       text: "/claim_admin 123456",
     });
 
+    for (const text of ["1", "2", "2"]) {
+      await messageHandler?.({
+        conversationId: "conversation-a",
+        userId: "admin-a",
+        text,
+      });
+    }
+    await waitForSentText("Agents 引导 1/7");
+
     for (const text of [
-      "1",
-      "2",
-      "2",
       "环信，即时通讯云服务商，提供 IM SDK 和 REST API",
       "1",
       "1",
@@ -2100,8 +2106,14 @@ describe("bot-host server", () => {
     });
     expect(sent[1].text).toContain("管理员认领成功，开始初始化。");
     expect(sent[1].text).toContain("Soul 引导 1/3：");
-    expect(sent.some((message) => message.text.includes("Soul 配置已确认，正在生成 soul。"))).toBe(true);
-    expect(sent.some((message) => message.text.includes("初始化完成，可以开始工作。"))).toBe(true);
+    const soulWaitingIndex = sent.findIndex((message) => message.text.includes("Soul 正在生成，请稍等。"));
+    const soulDoneIndex = sent.findIndex((message) => message.text.includes("Soul 已生成。"));
+    const agentsWaitingIndex = sent.findIndex((message) => message.text.includes("工作方式正在生成，请稍等。"));
+    const initializedIndex = sent.findIndex((message) => message.text.includes("初始化完成，可以开始工作。"));
+    expect(soulWaitingIndex).toBeGreaterThan(-1);
+    expect(soulDoneIndex).toBeGreaterThan(soulWaitingIndex);
+    expect(agentsWaitingIndex).toBeGreaterThan(soulDoneIndex);
+    expect(initializedIndex).toBeGreaterThan(agentsWaitingIndex);
     expect(sent.at(-2)).toEqual({
       conversationId: "conversation-a",
       text: "正在思考...",

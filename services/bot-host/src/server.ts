@@ -93,6 +93,7 @@ interface WizardState {
   phase: "soul" | "agents";
   soulAnswers: string[];
   agentsAnswers: string[];
+  generationInProgress?: "soul" | "agents";
 }
 
 const wizardStatesByConfig = new WeakMap<BotHostConfig, Map<string, WizardState>>();
@@ -221,6 +222,27 @@ export function createBotHostWorker(config: BotHostWorkerConfig): BotHostWorker 
               "初始化文档生成失败，请稍后重试或在 WebUI 重置引导。",
             );
           });
+        return;
+      }
+      const wizardGeneration = beginWizardGenerationIfReady(messageInput, config);
+      if (wizardGeneration) {
+        await config.wecomClient.sendText(message.conversationId, wizardGeneration.notice);
+        if (wizardGeneration.shouldProcess) {
+          void processWeComMessage(messageInput, config)
+            .then(async (asyncResult) => {
+              if ("output" in asyncResult && typeof asyncResult.output === "string") {
+                await config.wecomClient.sendText(message.conversationId, asyncResult.output);
+              }
+            })
+            .catch(async (error) => {
+              clearWizardGenerationInProgress(messageInput, config);
+              console.error("[wecom] async initialization failed", error);
+              await config.wecomClient.sendText(
+                message.conversationId,
+                "初始化文档生成失败，请稍后重试或在 WebUI 重置引导。",
+              );
+            });
+        }
         return;
       }
       if (await shouldStreamReply(config, messageInput)) {
@@ -590,6 +612,49 @@ function findWizardKeyForUser(
   return undefined;
 }
 
+function beginWizardGenerationIfReady(
+  input: WeComMessageInput,
+  config: BotHostConfig,
+): { notice: string; shouldProcess: boolean } | undefined {
+  const key = findWizardKeyForUser(input, config);
+  if (!key) {
+    return undefined;
+  }
+  const state = getWizardStates(config).get(key);
+  if (!state) {
+    return undefined;
+  }
+  if (state.generationInProgress === "soul") {
+    return { notice: "Soul 正在生成，请稍等。", shouldProcess: false };
+  }
+  if (state.generationInProgress === "agents") {
+    return { notice: "工作方式正在生成，请稍等。", shouldProcess: false };
+  }
+  if (state.phase === "soul" && state.soulAnswers.length === SOUL_WIZARD_QUESTIONS.length - 1) {
+    state.generationInProgress = "soul";
+    return { notice: "Soul 正在生成，请稍等。", shouldProcess: true };
+  }
+  if (state.phase === "agents" && state.agentsAnswers.length === AGENTS_WIZARD_QUESTIONS.length - 1) {
+    state.generationInProgress = "agents";
+    return { notice: "工作方式正在生成，请稍等。", shouldProcess: true };
+  }
+  return undefined;
+}
+
+function clearWizardGenerationInProgress(
+  input: WeComMessageInput,
+  config: BotHostConfig,
+): void {
+  const key = findWizardKeyForUser(input, config);
+  if (!key) {
+    return;
+  }
+  const state = getWizardStates(config).get(key);
+  if (state) {
+    delete state.generationInProgress;
+  }
+}
+
 async function handleWizardMessage(
   input: WeComMessageInput,
   config: BotHostConfig,
@@ -617,6 +682,7 @@ async function handleWizardMessage(
     }
     const result = await generateSoulFromWizardAnswers(config, input, conversationId, state.soulAnswers);
     if (result.output.startsWith("初始化文档生成失败：") || result.output.startsWith("Soul 生成失败：")) {
+      delete state.generationInProgress;
       return {
         conversation_id: conversationId,
         run_id: result.run_id,
@@ -624,6 +690,7 @@ async function handleWizardMessage(
       };
     }
     state.phase = "agents";
+    delete state.generationInProgress;
     wizardStates.set(key, state);
     return {
       conversation_id: conversationId,
@@ -660,6 +727,14 @@ async function handleWizardMessage(
     state.soulAnswers,
     state.agentsAnswers,
   );
+  if (result.output.startsWith("工作方式生成失败：") || result.output.startsWith("初始化文档生成失败：")) {
+    delete state.generationInProgress;
+    return {
+      conversation_id: conversationId,
+      run_id: result.run_id,
+      output: result.output,
+    };
+  }
   wizardStates.delete(key);
   return {
     conversation_id: conversationId,
