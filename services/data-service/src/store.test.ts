@@ -142,6 +142,48 @@ describe("data-service store", () => {
       .toThrow("bot not found: missing-bot");
   });
 
+  it("isolates runtime config options from nested caller mutations", () => {
+    const store = createDataStore();
+    store.createBot({ bot_id: "prd-bot", name: "PRD Bot", runtime: "kiro" });
+    const inputOptions = {
+      model: "gpt-5",
+      nested: {
+        temperature: 0.2,
+      },
+    };
+
+    const created = store.upsertRuntimeConfig("prd-bot", {
+      provider: "codex",
+      options: inputOptions,
+    });
+    inputOptions.nested.temperature = 0.8;
+    created.options.nested = { temperature: 1 };
+
+    expect(store.getRuntimeConfig("prd-bot").options).toEqual({
+      model: "gpt-5",
+      nested: {
+        temperature: 0.2,
+      },
+    });
+  });
+
+  it("rejects non-json runtime config options", () => {
+    const store = createDataStore();
+    store.createBot({ bot_id: "prd-bot", name: "PRD Bot", runtime: "kiro" });
+
+    expect(() => store.upsertRuntimeConfig("prd-bot", {
+      provider: "codex",
+      options: ["not-object"] as unknown as Record<string, unknown>,
+    })).toThrow("options must be an object");
+
+    expect(() => store.upsertRuntimeConfig("prd-bot", {
+      provider: "codex",
+      options: {
+        unsupported: undefined,
+      },
+    })).toThrow("options must be JSON-serializable");
+  });
+
   it("upserts and clears active initialization sessions", () => {
     const store = createDataStore();
     store.createBot({ bot_id: "prd-bot", name: "PRD Bot", runtime: "kiro" });

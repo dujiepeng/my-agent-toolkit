@@ -146,13 +146,17 @@ export function createDataServiceServer(
         /^\/internal\/bots\/([^/]+)\/runtime-config$/,
       );
       if (request.method === "GET" && runtimeConfigMatch) {
-        return handleGetRuntimeConfig(store, runtimeConfigMatch[1]);
+        return withDecodedBotId(runtimeConfigMatch[1], (botId) =>
+          handleGetRuntimeConfig(store, botId),
+        );
       }
       if (request.method === "PUT" && runtimeConfigMatch) {
-        return handleUpsertRuntimeConfig(
-          request,
-          store,
-          runtimeConfigMatch[1],
+        return withDecodedBotId(runtimeConfigMatch[1], (botId) =>
+          handleUpsertRuntimeConfig(
+            request,
+            store,
+            botId,
+          ),
         );
       }
 
@@ -594,6 +598,20 @@ function handleGetRuntimeConfig(
     return jsonResponse(store.getRuntimeConfig(botId));
   } catch (error) {
     return errorResponse(error);
+  }
+}
+
+function withDecodedBotId<T extends Response | Promise<Response>>(
+  pathSegment: string,
+  callback: (botId: string) => T,
+): T | Response {
+  try {
+    return callback(decodeURIComponent(pathSegment));
+  } catch (error) {
+    if (error instanceof URIError) {
+      return errorResponse(new Error("bot_id path segment is malformed"));
+    }
+    throw error;
   }
 }
 

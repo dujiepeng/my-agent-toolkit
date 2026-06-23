@@ -1799,7 +1799,7 @@ function mapRuntimeConfigRecord(row: unknown): RuntimeConfigRecord | undefined {
   return {
     bot_id: record.bot_id as string,
     provider: requireText(record.provider as string, "provider"),
-    stream: Boolean(record.stream),
+    stream: record.stream === 1,
     options: normalizeRuntimeConfigOptions(
       JSON.parse(record.options_json as string) as Record<string, unknown>,
     ),

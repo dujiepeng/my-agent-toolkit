@@ -230,6 +230,57 @@ describe("data-service server", () => {
     await expect(getResponse.json()).resolves.toEqual(updated);
   });
 
+  it("decodes bot id for runtime config routes", async () => {
+    const server = createDataServiceServer();
+    await server.fetch(
+      new Request("http://localhost/v1/bots", {
+        method: "POST",
+        body: JSON.stringify({
+          bot_id: "bot:a",
+          name: "Encoded Bot",
+          runtime: "kiro",
+        }),
+      }),
+    );
+
+    const updateResponse = await server.fetch(
+      new Request("http://localhost/internal/bots/bot%3Aa/runtime-config", {
+        method: "PUT",
+        body: JSON.stringify({
+          provider: "codex",
+        }),
+      }),
+    );
+
+    expect(updateResponse.status).toBe(200);
+    await expect(updateResponse.json()).resolves.toMatchObject({
+      bot_id: "bot:a",
+      provider: "codex",
+    });
+
+    const getResponse = await server.fetch(
+      new Request("http://localhost/internal/bots/bot%3Aa/runtime-config"),
+    );
+    expect(getResponse.status).toBe(200);
+    await expect(getResponse.json()).resolves.toMatchObject({
+      bot_id: "bot:a",
+      provider: "codex",
+    });
+  });
+
+  it("returns 400 for malformed runtime config bot id encoding", async () => {
+    const server = createDataServiceServer();
+
+    const response = await server.fetch(
+      new Request("http://localhost/internal/bots/bot%ZZ/runtime-config"),
+    );
+
+    expect(response.status).toBe(400);
+    await expect(response.json()).resolves.toEqual({
+      error: "bot_id path segment is malformed",
+    });
+  });
+
   it("lists internal wecom runtime bot configs with secrets", async () => {
     const server = createDataServiceServer();
     await server.fetch(

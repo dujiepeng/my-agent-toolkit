@@ -710,7 +710,8 @@ export function createDataStore(options: DataStoreOptions = {}): DataStore {
 
     getRuntimeConfig(botId) {
       const bot = getRequiredBot(bots, botId);
-      return runtimeConfigs.get(bot.bot_id) ?? defaultRuntimeConfig(bot);
+      const record = runtimeConfigs.get(bot.bot_id) ?? defaultRuntimeConfig(bot);
+      return cloneRuntimeConfigRecord(record);
     },
 
     upsertRuntimeConfig(botId, input) {
@@ -726,7 +727,7 @@ export function createDataStore(options: DataStoreOptions = {}): DataStore {
         updated_at: now,
       };
       runtimeConfigs.set(record.bot_id, record);
-      return record;
+      return cloneRuntimeConfigRecord(record);
     },
 
     getAdmin(botId) {
@@ -1520,7 +1521,8 @@ export function normalizeRuntimeConfigOptions(
   if (!value || typeof value !== "object" || Array.isArray(value)) {
     throw new Error("options must be an object");
   }
-  return { ...value };
+  assertJsonValue(value);
+  return JSON.parse(JSON.stringify(value)) as Record<string, unknown>;
 }
 
 export function defaultRuntimeConfig(bot: BotRecord): RuntimeConfigRecord {
@@ -1532,6 +1534,42 @@ export function defaultRuntimeConfig(bot: BotRecord): RuntimeConfigRecord {
     created_at: bot.created_at,
     updated_at: bot.updated_at,
   };
+}
+
+export function cloneRuntimeConfigRecord(
+  record: RuntimeConfigRecord,
+): RuntimeConfigRecord {
+  return {
+    ...record,
+    options: normalizeRuntimeConfigOptions(record.options),
+  };
+}
+
+function assertJsonValue(value: unknown): void {
+  if (
+    value === null ||
+    typeof value === "string" ||
+    typeof value === "number" ||
+    typeof value === "boolean"
+  ) {
+    if (typeof value === "number" && !Number.isFinite(value)) {
+      throw new Error("options must be JSON-serializable");
+    }
+    return;
+  }
+  if (Array.isArray(value)) {
+    for (const item of value) {
+      assertJsonValue(item);
+    }
+    return;
+  }
+  if (typeof value === "object") {
+    for (const nested of Object.values(value)) {
+      assertJsonValue(nested);
+    }
+    return;
+  }
+  throw new Error("options must be JSON-serializable");
 }
 
 export function initializationSessionKey(
