@@ -629,7 +629,7 @@ async function processWeComMessage(
 
     if (
       context.reason === "initializing"
-      || input.conversation_id && await hasWizardStateForUser(input, config, context.conversation.conversation_id)
+      || await hasWizardStateForUser(input, config, context.conversation.conversation_id)
     ) {
       return handleWizardMessage(input, config, context.conversation.conversation_id);
     }
@@ -717,6 +717,14 @@ async function beginWizardGenerationIfReady(
   const state = loaded?.state;
   if (!state) {
     return undefined;
+  }
+  if (loaded.conversationId !== conversationId) {
+    await saveWizardState(config, input, conversationId, state);
+    await clearInitializationSession(config, {
+      bot_id: input.bot_id,
+      wecom_user_id: input.wecom_user_id,
+      conversation_id: loaded.conversationId,
+    });
   }
   if (state.generationInProgress === "soul") {
     return { notice: "Soul 正在生成，请稍等。", shouldProcess: false };

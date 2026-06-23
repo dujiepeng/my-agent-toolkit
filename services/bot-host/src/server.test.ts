@@ -213,15 +213,15 @@ describe("bot-host server", () => {
         },
       },
     );
-    expect(calls.slice(1, 7).map((call) => call.url)).toEqual([
+    expect(calls.map((call) => call.url)).toEqual(expect.arrayContaining([
       "http://data-service/v1/bots/prd-bot/config-documents",
       "http://data-service/v1/memory-documents/current?scope=system&owner_id=platform",
       "http://data-service/v1/memory-documents/current?scope=shared&owner_id=platform",
       "http://data-service/v1/memory-documents/current?scope=bot&owner_id=prd-bot",
       "http://data-service/v1/memory-documents/current?scope=user&owner_id=user-a",
       "http://data-service/v1/memory-documents/current?scope=session&owner_id=conv-1",
-    ]);
-    expect(calls[7]).toEqual(
+    ]));
+    expect(calls.find((call) => call.url === "http://llm-runner/v1/chat")).toEqual(
       {
         url: "http://llm-runner/v1/chat",
         body: {
@@ -368,6 +368,10 @@ describe("bot-host server", () => {
           throw new Error("expected Request");
         }
         const body = request.method === "POST" ? await request.json() : undefined;
+        const noActiveInitializationSession = noActiveInitializationSessionResponse(request);
+        if (noActiveInitializationSession) {
+          return noActiveInitializationSession;
+        }
 
         if (request.url === "http://data-service/v1/message-context/resolve") {
           return Response.json({
@@ -437,6 +441,10 @@ describe("bot-host server", () => {
         }
         const body = request.method === "POST" || request.method === "PATCH" ? await request.json() : undefined;
         calls.push({ url: request.url, method: request.method, body });
+        const noActiveInitializationSession = noActiveInitializationSessionResponse(request);
+        if (noActiveInitializationSession) {
+          return noActiveInitializationSession;
+        }
 
         if (request.url === "http://data-service/v1/message-context/resolve") {
           return Response.json({
@@ -548,6 +556,10 @@ describe("bot-host server", () => {
         }
         const body = request.method === "POST" || request.method === "PATCH" ? await request.json() : undefined;
         calls.push({ url: request.url, method: request.method, body });
+        const noActiveInitializationSession = noActiveInitializationSessionResponse(request);
+        if (noActiveInitializationSession) {
+          return noActiveInitializationSession;
+        }
 
         if (request.url === "http://data-service/v1/message-context/resolve") {
           return Response.json({
@@ -1176,6 +1188,62 @@ describe("bot-host server", () => {
       soul_answers: ["产品经理助手", "冷静务实"],
     });
     expect(initializationSessions.has("prd-bot:admin-a:pending")).toBe(false);
+  });
+
+  it("routes ready HTTP messages to active initialization wizard state", async () => {
+    const calls: string[] = [];
+    const initializationSessions = new Map<string, MockInitializationSession>();
+    const server = createBotHostServer({
+      dataServiceUrl: "http://data-service",
+      llmRunnerUrl: "http://llm-runner",
+      fetch: async (request) => {
+        if (!(request instanceof Request)) {
+          throw new Error("expected Request");
+        }
+        calls.push(request.url);
+        const body = request.method === "PUT" ? await request.json().catch(() => undefined) : undefined;
+        const initializationSessionResponse = mockInitializationSessionResponse(request, body, initializationSessions);
+        if (initializationSessionResponse) {
+          return initializationSessionResponse;
+        }
+
+        if (request.url === "http://data-service/v1/message-context/resolve") {
+          return Response.json({
+            allowed: true,
+            reason: "ready",
+            is_admin: true,
+            conversation: { conversation_id: "conv-init", purpose: "normal_chat" },
+          });
+        }
+
+        if (request.url === "http://llm-runner/v1/chat") {
+          return Response.json({ run_id: "run-chat", output: "should not chat" });
+        }
+
+        return Response.json({ error: "unexpected", url: request.url }, { status: 500 });
+      },
+    });
+    initializationSessions.set("prd-bot:admin-a:pending", {
+      session_id: "init-pending",
+      bot_id: "prd-bot",
+      wecom_user_id: "admin-a",
+      conversation_id: "pending",
+      phase: "soul",
+      soul_answers: ["产品经理助手"],
+      agents_answers: [],
+      status: "active",
+    });
+
+    const response = await server.fetch(new Request("http://localhost/v1/messages/wecom", {
+      method: "POST",
+      body: JSON.stringify({ bot_id: "prd-bot", wecom_user_id: "admin-a", text: "冷静务实", runtime: "mock" }),
+    }));
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toMatchObject({
+      output: expect.stringContaining("Soul 引导 3/3"),
+    });
+    expect(calls).not.toContain("http://llm-runner/v1/chat");
   });
 
   it("keeps wizard question numbers separate from option labels", async () => {
@@ -3307,6 +3375,109 @@ describe("bot-host server", () => {
     expect(upsertedAfterClears).toBe(true);
     expect(initializationSessions.get("prd-bot:admin-a:conv-init")).toMatchObject({
       soul_answers: [],
+    });
+    expect(initializationSessions.has("prd-bot:admin-a:pending")).toBe(false);
+  });
+
+  it("promotes pending wizard session before generation starts", async () => {
+    const sent: Array<{ conversationId: string; text: string }> = [];
+    const initializationSessions = new Map<string, MockInitializationSession>();
+    let messageHandler:
+      | ((message: {
+        conversationId: string;
+        userId: string;
+        text: string;
+      }) => Promise<void>)
+      | undefined;
+    const worker = createBotHostWorker({
+      botId: "prd-bot",
+      runtime: "mock",
+      dataServiceUrl: "http://data-service",
+      llmRunnerUrl: "http://llm-runner",
+      fetch: async (request) => {
+        if (!(request instanceof Request)) {
+          throw new Error("expected Request");
+        }
+        const body = request.method === "PUT" || request.method === "POST"
+          ? await request.json().catch(() => undefined)
+          : undefined;
+        const initializationSessionResponse = mockInitializationSessionResponse(request, body, initializationSessions);
+        if (initializationSessionResponse) {
+          return initializationSessionResponse;
+        }
+
+        if (request.url === "http://data-service/v1/message-context/resolve") {
+          return Response.json({
+            allowed: true,
+            reason: "ready",
+            is_admin: true,
+            conversation: {
+              conversation_id: "conv-init",
+              purpose: "normal_chat",
+            },
+          });
+        }
+
+        if (request.url.startsWith("http://data-service/v1/bots/") && request.url.endsWith("/config-documents")) {
+          return Response.json([]);
+        }
+
+        if (request.url.startsWith("http://data-service/v1/memory-documents/current?")) {
+          return Response.json([]);
+        }
+
+        if (request.url === "http://llm-runner/v1/chat") {
+          return Response.json({
+            run_id: "run-soul",
+            output: [
+              "Soul 已生成。",
+              "~document:private/soul.md",
+              "# Soul",
+              "你是产品经理助手。",
+              "~/document",
+            ].join("\n"),
+          });
+        }
+
+        if (request.url === "http://data-service/v1/bot-config-documents") {
+          return Response.json({}, { status: 201 });
+        }
+
+        return Response.json({ error: "unexpected", url: request.url }, { status: 500 });
+      },
+      wecomClient: {
+        async connect() {},
+        disconnect() {},
+        onMessage(handler) {
+          messageHandler = handler;
+        },
+        async sendText(conversationId, text) {
+          sent.push({ conversationId, text });
+        },
+      },
+    });
+    initializationSessions.set("prd-bot:admin-a:pending", {
+      session_id: "init-pending",
+      bot_id: "prd-bot",
+      wecom_user_id: "admin-a",
+      conversation_id: "pending",
+      phase: "soul",
+      soul_answers: ["产品经理助手", "冷静务实"],
+      agents_answers: [],
+      status: "active",
+    });
+
+    await worker.start();
+    await messageHandler?.({
+      conversationId: "admin-a",
+      userId: "admin-a",
+      text: "简洁直接",
+    });
+
+    expect(sent.at(0)?.text).toBe("Soul 正在生成，请稍等。");
+    expect(initializationSessions.get("prd-bot:admin-a:conv-init")).toMatchObject({
+      soul_answers: ["产品经理助手", "冷静务实"],
+      generation_in_progress: "soul",
     });
     expect(initializationSessions.has("prd-bot:admin-a:pending")).toBe(false);
   });
