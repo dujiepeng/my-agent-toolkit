@@ -1261,6 +1261,213 @@ describe("bot-host server", () => {
     ]);
   });
 
+  it("stores bot memory when a user sends a remember command", async () => {
+    const calls: Array<{ url: string; body: unknown }> = [];
+    const server = createBotHostServer({
+      dataServiceUrl: "http://data-service",
+      llmRunnerUrl: "http://llm-runner",
+      fetch: async (request) => {
+        if (!(request instanceof Request)) {
+          throw new Error("expected Request");
+        }
+        const body = request.method === "POST" ? await request.json() : undefined;
+        calls.push({ url: request.url, body });
+
+        if (request.url === "http://data-service/v1/message-context/resolve") {
+          return Response.json({
+            allowed: true,
+            reason: "ready",
+            is_admin: false,
+            conversation: {
+              conversation_id: "conv-chat",
+            },
+          });
+        }
+
+        if (request.url === "http://data-service/v1/memory-documents") {
+          return Response.json({
+            memory_doc_id: "mem-1",
+            scope: "bot",
+            owner_id: "prd-bot",
+            title: "用户记忆",
+            version: 1,
+          }, { status: 201 });
+        }
+
+        return Response.json({ error: "unexpected", url: request.url }, { status: 500 });
+      },
+    });
+
+    const response = await server.fetch(
+      new Request("http://localhost/v1/messages/wecom", {
+        method: "POST",
+        body: JSON.stringify({
+          bot_id: "prd-bot",
+          wecom_user_id: "user-a",
+          text: "记住 PRD 生成前必须确认 Console、IMM、计量计费。",
+          runtime: "mock",
+        }),
+      }),
+    );
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toEqual({
+      remembered: true,
+      scope: "bot",
+      owner_id: "prd-bot",
+      memory_doc_id: "mem-1",
+      output: "已记住：PRD 生成前必须确认 Console、IMM、计量计费。",
+    });
+    expect(calls.map((call) => call.url)).toEqual([
+      "http://data-service/v1/message-context/resolve",
+      "http://data-service/v1/memory-documents",
+    ]);
+    expect(calls[1].body).toMatchObject({
+      scope: "bot",
+      owner_id: "prd-bot",
+      title: "用户记忆",
+      content: "PRD 生成前必须确认 Console、IMM、计量计费。",
+    });
+  });
+
+  it("requires admin permission for shared memory writes", async () => {
+    const server = createBotHostServer({
+      dataServiceUrl: "http://data-service",
+      llmRunnerUrl: "http://llm-runner",
+      fetch: async (request) => {
+        if (!(request instanceof Request)) {
+          throw new Error("expected Request");
+        }
+
+        if (request.url === "http://data-service/v1/message-context/resolve") {
+          return Response.json({
+            allowed: true,
+            reason: "ready",
+            is_admin: false,
+            conversation: {
+              conversation_id: "conv-chat",
+            },
+          });
+        }
+
+        return Response.json({ error: "unexpected", url: request.url }, { status: 500 });
+      },
+    });
+
+    const response = await server.fetch(
+      new Request("http://localhost/v1/messages/wecom", {
+        method: "POST",
+        body: JSON.stringify({
+          bot_id: "prd-bot",
+          wecom_user_id: "user-a",
+          text: "/remember --shared 所有机器人都要先澄清范围。",
+          runtime: "mock",
+        }),
+      }),
+    );
+
+    expect(response.status).toBe(403);
+    await expect(response.json()).resolves.toEqual({
+      blocked: true,
+      reason: "shared_memory_requires_admin",
+      output: "只有管理员可以写入共享记忆。",
+    });
+  });
+
+  it("injects remembered bot memory into the next normal chat", async () => {
+    let rememberedContent = "";
+    const prompts: string[] = [];
+    const server = createBotHostServer({
+      dataServiceUrl: "http://data-service",
+      llmRunnerUrl: "http://llm-runner",
+      fetch: async (request) => {
+        if (!(request instanceof Request)) {
+          throw new Error("expected Request");
+        }
+        const body = request.method === "POST" ? await request.json().catch(() => undefined) : undefined;
+
+        if (request.url === "http://data-service/v1/message-context/resolve") {
+          return Response.json({
+            allowed: true,
+            reason: "ready",
+            is_admin: false,
+            conversation: {
+              conversation_id: "conv-chat",
+            },
+          });
+        }
+
+        if (request.url === "http://data-service/v1/memory-documents") {
+          rememberedContent = (body as { content: string }).content;
+          return Response.json({
+            memory_doc_id: "mem-1",
+            scope: "bot",
+            owner_id: "prd-bot",
+            title: "用户记忆",
+            version: 1,
+          }, { status: 201 });
+        }
+
+        if (request.url.startsWith("http://data-service/v1/bots/") && request.url.endsWith("/config-documents")) {
+          return Response.json([]);
+        }
+
+        if (request.url === "http://data-service/v1/memory-documents/current?scope=bot&owner_id=prd-bot") {
+          return Response.json(rememberedContent
+            ? [{
+              memory_doc_id: "mem-1",
+              title: "用户记忆",
+              version: 1,
+              content: rememberedContent,
+            }]
+            : []);
+        }
+
+        if (request.url.startsWith("http://data-service/v1/memory-documents/current?")) {
+          return Response.json([]);
+        }
+
+        if (request.url === "http://llm-runner/v1/chat") {
+          prompts.push((body as { prompt: string }).prompt);
+          return Response.json({
+            run_id: "run-chat",
+            output: "mock: ok",
+          });
+        }
+
+        return Response.json({ error: "unexpected", url: request.url }, { status: 500 });
+      },
+    });
+
+    await server.fetch(
+      new Request("http://localhost/v1/messages/wecom", {
+        method: "POST",
+        body: JSON.stringify({
+          bot_id: "prd-bot",
+          wecom_user_id: "user-a",
+          text: "/remember PRD 生成前必须确认 Console。",
+          runtime: "mock",
+        }),
+      }),
+    );
+    const response = await server.fetch(
+      new Request("http://localhost/v1/messages/wecom", {
+        method: "POST",
+        body: JSON.stringify({
+          bot_id: "prd-bot",
+          wecom_user_id: "user-a",
+          text: "开始写 PRD",
+          runtime: "mock",
+        }),
+      }),
+    );
+
+    expect(response.status).toBe(200);
+    expect(prompts[0]).toContain("[bot/prd-bot v1] 用户记忆");
+    expect(prompts[0]).toContain("PRD 生成前必须确认 Console。");
+    expect(prompts[0]).toContain("<message>\n开始写 PRD\n</message>");
+  });
+
   it("marks bot ready when initializing admin sends mark_ready command", async () => {
     const calls: Array<{ url: string; body: unknown }> = [];
     const server = createBotHostServer({

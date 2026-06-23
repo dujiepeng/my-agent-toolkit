@@ -89,6 +89,11 @@ interface ConfigDocument {
   content: string;
 }
 
+interface RememberCommand {
+  scope: "bot" | "shared";
+  content: string;
+}
+
 interface WizardState {
   phase: "soul" | "agents";
   soulAnswers: string[];
@@ -532,6 +537,11 @@ async function processWeComMessage(
 
     if (!context.conversation?.conversation_id) {
       throw new Error("conversation_id is required");
+    }
+
+    const rememberCommand = parseRememberCommand(input.text);
+    if (rememberCommand) {
+      return handleRememberCommand(input, config, context, rememberCommand);
     }
 
     if (context.reason === "initializing" || hasWizardStateForUser(input, config)) {
@@ -1234,6 +1244,76 @@ function cleanupVisibleOutput(output: string): string {
 function normalizeWizardAnswer(text: string): string {
   const trimmed = text.trim();
   return trimmed === "" ? "跳过" : trimmed;
+}
+
+function parseRememberCommand(text: string): RememberCommand | undefined {
+  const trimmed = text.trim();
+  const slashMatch = trimmed.match(/^\/remember(?:\s+(--shared))?\s+([\s\S]+)$/);
+  if (slashMatch) {
+    return {
+      scope: slashMatch[1] ? "shared" : "bot",
+      content: slashMatch[2].trim(),
+    };
+  }
+
+  const naturalMatch = trimmed.match(/^记住[：:\s]+([\s\S]+)$/);
+  if (naturalMatch) {
+    return {
+      scope: "bot",
+      content: naturalMatch[1].trim(),
+    };
+  }
+
+  return undefined;
+}
+
+async function handleRememberCommand(
+  input: WeComMessageInput,
+  config: BotHostConfig,
+  context: {
+    is_admin?: boolean;
+  },
+  command: RememberCommand,
+): Promise<Record<string, unknown>> {
+  if (command.content === "") {
+    return {
+      blocked: true,
+      reason: "empty_memory",
+      output: "要记住的内容不能为空。",
+    };
+  }
+  if (command.scope === "shared" && !context.is_admin) {
+    return {
+      blocked: true,
+      reason: "shared_memory_requires_admin",
+      output: "只有管理员可以写入共享记忆。",
+    };
+  }
+
+  const ownerId = command.scope === "shared" ? "platform" : input.bot_id;
+  const memory = await postJson<{
+    memory_doc_id: string;
+    scope: string;
+    owner_id: string;
+    version: number;
+  }>(
+    config,
+    `${config.dataServiceUrl}/v1/memory-documents`,
+    {
+      scope: command.scope,
+      owner_id: ownerId,
+      title: "用户记忆",
+      content: command.content,
+    },
+  );
+
+  return {
+    remembered: true,
+    scope: memory.scope,
+    owner_id: memory.owner_id,
+    memory_doc_id: memory.memory_doc_id,
+    output: `已记住：${command.content}`,
+  };
 }
 
 function isConfirmAnswer(text: string): boolean {
