@@ -149,8 +149,8 @@ export interface PendingGeneratedDocumentRecord {
   title: string;
   content: string;
   status: PendingGeneratedDocumentStatus;
-  created_by_bot_id?: string;
-  created_by_user_id?: string;
+  created_by_bot_id: string;
+  created_by_user_id: string;
   created_at: string;
   updated_at: string;
 }
@@ -162,8 +162,8 @@ export interface CreatePendingGeneratedDocumentInput {
   conversation_id: string;
   title: string;
   content: string;
-  created_by_bot_id?: string;
-  created_by_user_id?: string;
+  created_by_bot_id: string;
+  created_by_user_id: string;
 }
 
 export interface PendingGeneratedDocumentQuery {
@@ -913,12 +913,8 @@ export function createDataStore(options: DataStoreOptions = {}): DataStore {
         title: requireText(input.title, "title"),
         content: requireText(input.content, "content"),
         status: "pending",
-        ...(input.created_by_bot_id
-          ? { created_by_bot_id: requireText(input.created_by_bot_id, "created_by_bot_id") }
-          : {}),
-        ...(input.created_by_user_id
-          ? { created_by_user_id: requireText(input.created_by_user_id, "created_by_user_id") }
-          : {}),
+        created_by_bot_id: requireText(input.created_by_bot_id, "created_by_bot_id"),
+        created_by_user_id: requireText(input.created_by_user_id, "created_by_user_id"),
         created_at: now,
         updated_at: now,
       };

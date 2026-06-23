@@ -1184,8 +1184,8 @@ function migrate(db: Database.Database): void {
       title text not null,
       content text not null,
       status text not null,
-      created_by_bot_id text,
-      created_by_user_id text,
+      created_by_bot_id text not null,
+      created_by_user_id text not null,
       created_at text not null,
       updated_at text not null
     );
@@ -1562,12 +1562,8 @@ function createPendingGeneratedDocument(
     title: requireText(input.title, "title"),
     content: requireText(input.content, "content"),
     status: "pending",
-    ...(input.created_by_bot_id
-      ? { created_by_bot_id: requireText(input.created_by_bot_id, "created_by_bot_id") }
-      : {}),
-    ...(input.created_by_user_id
-      ? { created_by_user_id: requireText(input.created_by_user_id, "created_by_user_id") }
-      : {}),
+    created_by_bot_id: requireText(input.created_by_bot_id, "created_by_bot_id"),
+    created_by_user_id: requireText(input.created_by_user_id, "created_by_user_id"),
     created_at: now,
     updated_at: now,
   };
@@ -1586,8 +1582,8 @@ function createPendingGeneratedDocument(
     record.title,
     record.content,
     record.status,
-    record.created_by_bot_id ?? null,
-    record.created_by_user_id ?? null,
+    record.created_by_bot_id,
+    record.created_by_user_id,
     record.created_at,
     record.updated_at,
   );
@@ -1734,12 +1730,8 @@ function mapPendingGeneratedDocumentRecord(row: unknown): PendingGeneratedDocume
     title: record.title as string,
     content: record.content as string,
     status: record.status as PendingGeneratedDocumentStatus,
-    ...(typeof record.created_by_bot_id === "string"
-      ? { created_by_bot_id: record.created_by_bot_id }
-      : {}),
-    ...(typeof record.created_by_user_id === "string"
-      ? { created_by_user_id: record.created_by_user_id }
-      : {}),
+    created_by_bot_id: record.created_by_bot_id as string,
+    created_by_user_id: record.created_by_user_id as string,
     created_at: record.created_at as string,
     updated_at: record.updated_at as string,
   };

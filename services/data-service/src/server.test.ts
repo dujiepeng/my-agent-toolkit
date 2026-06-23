@@ -972,6 +972,8 @@ describe("data-service server", () => {
           conversation_id: "conv-a",
           title: "Second PRD",
           content: "# second",
+          created_by_bot_id: "prd-bot",
+          created_by_user_id: "admin-a",
         }),
       }),
     );

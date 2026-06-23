@@ -252,6 +252,8 @@ describe("data-service store", () => {
       conversation_id: "conv-a",
       title: "other user",
       content: "not returned",
+      created_by_bot_id: "prd-bot",
+      created_by_user_id: "admin-b",
     });
     store.createPendingGeneratedDocument({
       bot_id: "ops-bot",
@@ -259,6 +261,8 @@ describe("data-service store", () => {
       conversation_id: "conv-a",
       title: "other bot",
       content: "not returned",
+      created_by_bot_id: "ops-bot",
+      created_by_user_id: "admin-a",
     });
 
     expect(created).toMatchObject({
@@ -301,6 +305,32 @@ describe("data-service store", () => {
       wecom_user_id: "admin-a",
       conversation_id: "conv-a",
     })).toEqual([]);
+  });
+
+  it("rejects pending generated documents without creator fields", () => {
+    const store = createDataStore();
+    store.createBot({ bot_id: "prd-bot", name: "PRD Bot", runtime: "kiro" });
+
+    expect(() => store.createPendingGeneratedDocument({
+      bot_id: "prd-bot",
+      wecom_user_id: "admin-a",
+      conversation_id: "conv-a",
+      title: "语音转文字 API PRD",
+      content: "# v1",
+      created_by_user_id: "admin-a",
+    } as Parameters<typeof store.createPendingGeneratedDocument>[0])).toThrow(
+      "created_by_bot_id is required",
+    );
+    expect(() => store.createPendingGeneratedDocument({
+      bot_id: "prd-bot",
+      wecom_user_id: "admin-a",
+      conversation_id: "conv-a",
+      title: "语音转文字 API PRD",
+      content: "# v1",
+      created_by_bot_id: "prd-bot",
+    } as Parameters<typeof store.createPendingGeneratedDocument>[0])).toThrow(
+      "created_by_user_id is required",
+    );
   });
 
   it("creates versioned business documents and rejects bot config document titles", () => {
