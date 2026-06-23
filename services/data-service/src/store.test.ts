@@ -232,6 +232,77 @@ describe("data-service store", () => {
     );
   });
 
+  it("stores and confirms pending generated documents", () => {
+    const store = createDataStore();
+    store.createBot({ bot_id: "prd-bot", name: "PRD Bot", runtime: "kiro" });
+    store.createBot({ bot_id: "ops-bot", name: "Ops Bot", runtime: "mock" });
+
+    const created = store.createPendingGeneratedDocument({
+      bot_id: "prd-bot",
+      wecom_user_id: "admin-a",
+      conversation_id: "conv-a",
+      title: "语音转文字 API PRD",
+      content: "# v1",
+      created_by_bot_id: "prd-bot",
+      created_by_user_id: "admin-a",
+    });
+    store.createPendingGeneratedDocument({
+      bot_id: "prd-bot",
+      wecom_user_id: "admin-b",
+      conversation_id: "conv-a",
+      title: "other user",
+      content: "not returned",
+    });
+    store.createPendingGeneratedDocument({
+      bot_id: "ops-bot",
+      wecom_user_id: "admin-a",
+      conversation_id: "conv-a",
+      title: "other bot",
+      content: "not returned",
+    });
+
+    expect(created).toMatchObject({
+      bot_id: "prd-bot",
+      wecom_user_id: "admin-a",
+      conversation_id: "conv-a",
+      title: "语音转文字 API PRD",
+      content: "# v1",
+      status: "pending",
+      created_by_bot_id: "prd-bot",
+      created_by_user_id: "admin-a",
+    });
+    expect(created.pending_id).toMatch(/^pending_/);
+    expect(store.listPendingGeneratedDocuments({
+      bot_id: "prd-bot",
+      wecom_user_id: "admin-a",
+      conversation_id: "conv-a",
+    })).toEqual([created]);
+
+    const confirmed = store.confirmPendingGeneratedDocuments({
+      bot_id: "prd-bot",
+      wecom_user_id: "admin-a",
+      conversation_id: "conv-a",
+    });
+
+    expect(confirmed).toHaveLength(1);
+    expect(confirmed[0]).toMatchObject({
+      pending_id: created.pending_id,
+      status: "confirmed",
+    });
+    expect(confirmed[0].created_at).toBe(created.created_at);
+    expect(confirmed[0].updated_at).not.toBe(created.updated_at);
+    expect(store.listPendingGeneratedDocuments({
+      bot_id: "prd-bot",
+      wecom_user_id: "admin-a",
+      conversation_id: "conv-a",
+    })).toEqual([]);
+    expect(store.confirmPendingGeneratedDocuments({
+      bot_id: "prd-bot",
+      wecom_user_id: "admin-a",
+      conversation_id: "conv-a",
+    })).toEqual([]);
+  });
+
   it("creates versioned business documents and rejects bot config document titles", () => {
     const store = createDataStore();
 

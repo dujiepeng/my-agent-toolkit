@@ -10,6 +10,7 @@ export type ConversationChannel = "wecom_direct" | "wecom_group";
 export type InitializationPhase = "soul" | "agents";
 export type InitializationSessionStatus = "active" | "completed" | "cancelled";
 export type InitializationGenerationInProgress = "soul" | "agents";
+export type PendingGeneratedDocumentStatus = "pending" | "confirmed" | "cancelled";
 export type MemoryScope = "system" | "shared" | "bot" | "user" | "session";
 export const MEMORY_SCOPES = [
   "system",
@@ -135,6 +136,37 @@ export interface UpsertInitializationSessionInput {
 }
 
 export interface InitializationSessionKeyInput {
+  bot_id: string;
+  wecom_user_id: string;
+  conversation_id: string;
+}
+
+export interface PendingGeneratedDocumentRecord {
+  pending_id: string;
+  bot_id: string;
+  wecom_user_id: string;
+  conversation_id: string;
+  title: string;
+  content: string;
+  status: PendingGeneratedDocumentStatus;
+  created_by_bot_id?: string;
+  created_by_user_id?: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface CreatePendingGeneratedDocumentInput {
+  pending_id?: string;
+  bot_id: string;
+  wecom_user_id: string;
+  conversation_id: string;
+  title: string;
+  content: string;
+  created_by_bot_id?: string;
+  created_by_user_id?: string;
+}
+
+export interface PendingGeneratedDocumentQuery {
   bot_id: string;
   wecom_user_id: string;
   conversation_id: string;
@@ -427,6 +459,18 @@ export interface DataStore {
     input: InitializationSessionKeyInput,
   ): InitializationSessionRecord | undefined;
   clearInitializationSession(input: InitializationSessionKeyInput): void;
+  createPendingGeneratedDocument(
+    input: CreatePendingGeneratedDocumentInput,
+  ): PendingGeneratedDocumentRecord;
+  listPendingGeneratedDocuments(
+    input: PendingGeneratedDocumentQuery,
+  ): PendingGeneratedDocumentRecord[];
+  confirmPendingGeneratedDocuments(
+    input: PendingGeneratedDocumentQuery,
+  ): PendingGeneratedDocumentRecord[];
+  cancelPendingGeneratedDocuments(
+    input: PendingGeneratedDocumentQuery,
+  ): PendingGeneratedDocumentRecord[];
   upsertBotConfigDocument(input: UpsertBotConfigDocumentInput): BotConfigDocumentRecord;
   listBotConfigDocuments(botId: string): BotConfigDocumentRecord[];
   upsertMemoryDocument(input: UpsertMemoryDocumentInput): MemoryDocumentRecord;
@@ -464,6 +508,7 @@ export function createDataStore(options: DataStoreOptions = {}): DataStore {
   const adminClaims = new Map<string, AdminClaimRecord>();
   const conversations = new Map<string, ConversationRecord>();
   const initializationSessions = new Map<string, InitializationSessionRecord>();
+  const pendingGeneratedDocuments = new Map<string, PendingGeneratedDocumentRecord>();
   const memoryDocuments = new Map<string, MemoryDocumentRecord[]>();
   const botConfigDocuments = new Map<string, BotConfigDocumentRecord>();
   const businessDocuments = new Map<string, BusinessDocumentRecord>();
@@ -857,6 +902,55 @@ export function createDataStore(options: DataStoreOptions = {}): DataStore {
       }
     },
 
+    createPendingGeneratedDocument(input) {
+      const bot = getRequiredBot(bots, input.bot_id);
+      const now = new Date().toISOString();
+      const record: PendingGeneratedDocumentRecord = {
+        pending_id: input.pending_id ?? `pending_${crypto.randomUUID()}`,
+        bot_id: bot.bot_id,
+        wecom_user_id: requireText(input.wecom_user_id, "wecom_user_id"),
+        conversation_id: requireText(input.conversation_id, "conversation_id"),
+        title: requireText(input.title, "title"),
+        content: requireText(input.content, "content"),
+        status: "pending",
+        ...(input.created_by_bot_id
+          ? { created_by_bot_id: requireText(input.created_by_bot_id, "created_by_bot_id") }
+          : {}),
+        ...(input.created_by_user_id
+          ? { created_by_user_id: requireText(input.created_by_user_id, "created_by_user_id") }
+          : {}),
+        created_at: now,
+        updated_at: now,
+      };
+      pendingGeneratedDocuments.set(record.pending_id, record);
+      return record;
+    },
+
+    listPendingGeneratedDocuments(input) {
+      const query = normalizePendingGeneratedDocumentQuery(input, bots);
+      return [...pendingGeneratedDocuments.values()]
+        .filter((document) => matchesPendingGeneratedDocumentQuery(document, query))
+        .sort(comparePendingGeneratedDocuments);
+    },
+
+    confirmPendingGeneratedDocuments(input) {
+      const query = normalizePendingGeneratedDocumentQuery(input, bots);
+      return updateMatchingPendingGeneratedDocuments(
+        pendingGeneratedDocuments,
+        query,
+        "confirmed",
+      );
+    },
+
+    cancelPendingGeneratedDocuments(input) {
+      const query = normalizePendingGeneratedDocumentQuery(input, bots);
+      return updateMatchingPendingGeneratedDocuments(
+        pendingGeneratedDocuments,
+        query,
+        "cancelled",
+      );
+    },
+
     upsertBotConfigDocument(input) {
       const bot = getRequiredBot(bots, input.bot_id);
       const title = requireBotConfigDocumentTitle(input.title);
@@ -1157,6 +1251,57 @@ function matchesBusinessDocumentQuery(
     (!input.doc_type || document.doc_type === input.doc_type) &&
     (!input.status || document.status === input.status) &&
     !isBotConfigDocumentTitle(document.title);
+}
+
+function normalizePendingGeneratedDocumentQuery(
+  input: PendingGeneratedDocumentQuery,
+  bots: Map<string, BotRecord>,
+): PendingGeneratedDocumentQuery {
+  const bot = getRequiredBot(bots, input.bot_id);
+  return {
+    bot_id: bot.bot_id,
+    wecom_user_id: requireText(input.wecom_user_id, "wecom_user_id"),
+    conversation_id: requireText(input.conversation_id, "conversation_id"),
+  };
+}
+
+function matchesPendingGeneratedDocumentQuery(
+  document: PendingGeneratedDocumentRecord,
+  input: PendingGeneratedDocumentQuery,
+): boolean {
+  return document.bot_id === input.bot_id &&
+    document.wecom_user_id === input.wecom_user_id &&
+    document.conversation_id === input.conversation_id &&
+    document.status === "pending";
+}
+
+function updateMatchingPendingGeneratedDocuments(
+  documents: Map<string, PendingGeneratedDocumentRecord>,
+  input: PendingGeneratedDocumentQuery,
+  status: Exclude<PendingGeneratedDocumentStatus, "pending">,
+): PendingGeneratedDocumentRecord[] {
+  const updated: PendingGeneratedDocumentRecord[] = [];
+  const matches = [...documents.values()]
+    .filter((document) => matchesPendingGeneratedDocumentQuery(document, input))
+    .sort(comparePendingGeneratedDocuments);
+  for (const document of matches) {
+    const next: PendingGeneratedDocumentRecord = {
+      ...document,
+      status,
+      updated_at: nextIsoTimestamp(document.updated_at),
+    };
+    documents.set(next.pending_id, next);
+    updated.push(next);
+  }
+  return updated;
+}
+
+function comparePendingGeneratedDocuments(
+  left: PendingGeneratedDocumentRecord,
+  right: PendingGeneratedDocumentRecord,
+): number {
+  return left.created_at.localeCompare(right.created_at) ||
+    left.pending_id.localeCompare(right.pending_id);
 }
 
 function matchesMemoryQuery(memory: MemoryRecord, input: ListMemoriesInput): boolean {

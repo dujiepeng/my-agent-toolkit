@@ -144,6 +144,57 @@ describe("sqlite data store", () => {
     second.close?.();
   });
 
+  it("persists pending generated documents across store instances", () => {
+    const dir = mkdtempSync(join(tmpdir(), "data-service-"));
+    dirs.push(dir);
+    const dbPath = join(dir, "data.db");
+
+    const first = createSqliteDataStore(dbPath);
+    first.createBot({ bot_id: "prd-bot", name: "PRD Bot", runtime: "kiro" });
+    const created = first.createPendingGeneratedDocument({
+      bot_id: "prd-bot",
+      wecom_user_id: "admin-a",
+      conversation_id: "conv-a",
+      title: "语音转文字 API PRD",
+      content: "# v1",
+      created_by_bot_id: "prd-bot",
+      created_by_user_id: "admin-a",
+    });
+    first.close?.();
+
+    const second = createSqliteDataStore(dbPath);
+    expect(second.listPendingGeneratedDocuments({
+      bot_id: "prd-bot",
+      wecom_user_id: "admin-a",
+      conversation_id: "conv-a",
+    })).toEqual([created]);
+    const cancelled = second.cancelPendingGeneratedDocuments({
+      bot_id: "prd-bot",
+      wecom_user_id: "admin-a",
+      conversation_id: "conv-a",
+    });
+    expect(cancelled).toMatchObject([
+      {
+        pending_id: created.pending_id,
+        status: "cancelled",
+      },
+    ]);
+    second.close?.();
+
+    const third = createSqliteDataStore(dbPath);
+    expect(third.listPendingGeneratedDocuments({
+      bot_id: "prd-bot",
+      wecom_user_id: "admin-a",
+      conversation_id: "conv-a",
+    })).toEqual([]);
+    expect(third.cancelPendingGeneratedDocuments({
+      bot_id: "prd-bot",
+      wecom_user_id: "admin-a",
+      conversation_id: "conv-a",
+    })).toEqual([]);
+    third.close?.();
+  });
+
   it("rejects duplicate persisted wecom bot bindings", () => {
     const dir = mkdtempSync(join(tmpdir(), "data-service-"));
     dirs.push(dir);

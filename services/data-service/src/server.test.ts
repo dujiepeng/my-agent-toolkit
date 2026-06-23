@@ -879,6 +879,122 @@ describe("data-service server", () => {
     });
   });
 
+  it("stores pending generated documents over HTTP", async () => {
+    const server = createDataServiceServer();
+    await server.fetch(
+      new Request("http://localhost/v1/bots", {
+        method: "POST",
+        body: JSON.stringify({
+          bot_id: "prd-bot",
+          name: "PRD Bot",
+          runtime: "kiro",
+        }),
+      }),
+    );
+
+    const createResponse = await server.fetch(
+      new Request("http://localhost/internal/pending-generated-documents", {
+        method: "POST",
+        body: JSON.stringify({
+          bot_id: "prd-bot",
+          wecom_user_id: "admin-a",
+          conversation_id: "conv-a",
+          title: "语音转文字 API PRD",
+          content: "# v1",
+          created_by_bot_id: "prd-bot",
+          created_by_user_id: "admin-a",
+        }),
+      }),
+    );
+
+    expect(createResponse.status).toBe(201);
+    const created = await createResponse.json() as { pending_id: string };
+    expect(created).toMatchObject({
+      bot_id: "prd-bot",
+      wecom_user_id: "admin-a",
+      conversation_id: "conv-a",
+      title: "语音转文字 API PRD",
+      content: "# v1",
+      status: "pending",
+      created_by_bot_id: "prd-bot",
+      created_by_user_id: "admin-a",
+    });
+
+    const listResponse = await server.fetch(
+      new Request(
+        "http://localhost/internal/pending-generated-documents?bot_id=prd-bot&wecom_user_id=admin-a&conversation_id=conv-a",
+      ),
+    );
+    expect(listResponse.status).toBe(200);
+    await expect(listResponse.json()).resolves.toMatchObject([
+      {
+        pending_id: created.pending_id,
+        status: "pending",
+      },
+    ]);
+
+    const confirmResponse = await server.fetch(
+      new Request("http://localhost/internal/pending-generated-documents/confirm", {
+        method: "POST",
+        body: JSON.stringify({
+          bot_id: "prd-bot",
+          wecom_user_id: "admin-a",
+          conversation_id: "conv-a",
+        }),
+      }),
+    );
+    expect(confirmResponse.status).toBe(200);
+    await expect(confirmResponse.json()).resolves.toMatchObject([
+      {
+        pending_id: created.pending_id,
+        status: "confirmed",
+      },
+    ]);
+
+    const emptyConfirmResponse = await server.fetch(
+      new Request("http://localhost/internal/pending-generated-documents/confirm", {
+        method: "POST",
+        body: JSON.stringify({
+          bot_id: "prd-bot",
+          wecom_user_id: "admin-a",
+          conversation_id: "conv-a",
+        }),
+      }),
+    );
+    await expect(emptyConfirmResponse.json()).resolves.toEqual([]);
+
+    const secondCreateResponse = await server.fetch(
+      new Request("http://localhost/internal/pending-generated-documents", {
+        method: "POST",
+        body: JSON.stringify({
+          bot_id: "prd-bot",
+          wecom_user_id: "admin-a",
+          conversation_id: "conv-a",
+          title: "Second PRD",
+          content: "# second",
+        }),
+      }),
+    );
+    const second = await secondCreateResponse.json() as { pending_id: string };
+    const cancelResponse = await server.fetch(
+      new Request("http://localhost/internal/pending-generated-documents/cancel", {
+        method: "POST",
+        body: JSON.stringify({
+          bot_id: "prd-bot",
+          wecom_user_id: "admin-a",
+          conversation_id: "conv-a",
+        }),
+      }),
+    );
+    expect(cancelResponse.status).toBe(200);
+    await expect(cancelResponse.json()).resolves.toMatchObject([
+      {
+        pending_id: second.pending_id,
+        status: "cancelled",
+      },
+    ]);
+  });
+
   it("resets admin claim and bot initialization state over HTTP", async () => {
     const server = createDataServiceServer();
     await server.fetch(

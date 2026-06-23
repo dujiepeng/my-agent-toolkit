@@ -45,6 +45,10 @@ import {
   type MemoryStats,
   type MemoryStatsInput,
   type MemoryDocumentRecord,
+  type CreatePendingGeneratedDocumentInput,
+  type PendingGeneratedDocumentQuery,
+  type PendingGeneratedDocumentRecord,
+  type PendingGeneratedDocumentStatus,
   type RecordAssetInput,
   type RecordChunksInput,
   type ResolveConversationInput,
@@ -337,6 +341,22 @@ export function createSqliteDataStore(
 
     clearInitializationSession(input) {
       clearInitializationSession(db, input);
+    },
+
+    createPendingGeneratedDocument(input) {
+      return createPendingGeneratedDocument(db, input);
+    },
+
+    listPendingGeneratedDocuments(input) {
+      return listPendingGeneratedDocuments(db, input);
+    },
+
+    confirmPendingGeneratedDocuments(input) {
+      return updatePendingGeneratedDocuments(db, input, "confirmed");
+    },
+
+    cancelPendingGeneratedDocuments(input) {
+      return updatePendingGeneratedDocuments(db, input, "cancelled");
     },
 
     upsertBotConfigDocument(input) {
@@ -1156,6 +1176,20 @@ function migrate(db: Database.Database): void {
       updated_at text not null
     );
 
+    create table if not exists pending_generated_documents (
+      pending_id text primary key,
+      bot_id text not null,
+      wecom_user_id text not null,
+      conversation_id text not null,
+      title text not null,
+      content text not null,
+      status text not null,
+      created_by_bot_id text,
+      created_by_user_id text,
+      created_at text not null,
+      updated_at text not null
+    );
+
     create table if not exists memory_document_versions (
       memory_doc_id text not null,
       version integer not null,
@@ -1514,6 +1548,108 @@ function clearInitializationSession(
   ).run(initializationSessionKey(input));
 }
 
+function createPendingGeneratedDocument(
+  db: Database.Database,
+  input: CreatePendingGeneratedDocumentInput,
+): PendingGeneratedDocumentRecord {
+  const bot = getRequiredBot(db, input.bot_id);
+  const now = new Date().toISOString();
+  const record: PendingGeneratedDocumentRecord = {
+    pending_id: input.pending_id ?? `pending_${crypto.randomUUID()}`,
+    bot_id: bot.bot_id,
+    wecom_user_id: requireText(input.wecom_user_id, "wecom_user_id"),
+    conversation_id: requireText(input.conversation_id, "conversation_id"),
+    title: requireText(input.title, "title"),
+    content: requireText(input.content, "content"),
+    status: "pending",
+    ...(input.created_by_bot_id
+      ? { created_by_bot_id: requireText(input.created_by_bot_id, "created_by_bot_id") }
+      : {}),
+    ...(input.created_by_user_id
+      ? { created_by_user_id: requireText(input.created_by_user_id, "created_by_user_id") }
+      : {}),
+    created_at: now,
+    updated_at: now,
+  };
+  db.prepare(
+    `
+      insert into pending_generated_documents (
+        pending_id, bot_id, wecom_user_id, conversation_id, title, content,
+        status, created_by_bot_id, created_by_user_id, created_at, updated_at
+      ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `,
+  ).run(
+    record.pending_id,
+    record.bot_id,
+    record.wecom_user_id,
+    record.conversation_id,
+    record.title,
+    record.content,
+    record.status,
+    record.created_by_bot_id ?? null,
+    record.created_by_user_id ?? null,
+    record.created_at,
+    record.updated_at,
+  );
+  return record;
+}
+
+function listPendingGeneratedDocuments(
+  db: Database.Database,
+  input: PendingGeneratedDocumentQuery,
+): PendingGeneratedDocumentRecord[] {
+  const query = normalizePendingGeneratedDocumentQuery(db, input);
+  return db.prepare(
+    `
+      select *
+      from pending_generated_documents
+      where bot_id = ?
+        and wecom_user_id = ?
+        and conversation_id = ?
+        and status = 'pending'
+      order by created_at asc, pending_id asc
+    `,
+  ).all(
+    query.bot_id,
+    query.wecom_user_id,
+    query.conversation_id,
+  ).map(mapPendingGeneratedDocumentRecord);
+}
+
+function updatePendingGeneratedDocuments(
+  db: Database.Database,
+  input: PendingGeneratedDocumentQuery,
+  status: Exclude<PendingGeneratedDocumentStatus, "pending">,
+): PendingGeneratedDocumentRecord[] {
+  const pending = listPendingGeneratedDocuments(db, input);
+  const update = db.prepare(
+    "update pending_generated_documents set status = ?, updated_at = ? where pending_id = ?",
+  );
+  const updated = pending.map((document) => ({
+    ...document,
+    status,
+    updated_at: nextIsoTimestamp(document.updated_at),
+  }) satisfies PendingGeneratedDocumentRecord);
+  db.transaction(() => {
+    for (const document of updated) {
+      update.run(document.status, document.updated_at, document.pending_id);
+    }
+  })();
+  return updated;
+}
+
+function normalizePendingGeneratedDocumentQuery(
+  db: Database.Database,
+  input: PendingGeneratedDocumentQuery,
+): PendingGeneratedDocumentQuery {
+  const bot = getRequiredBot(db, input.bot_id);
+  return {
+    bot_id: bot.bot_id,
+    wecom_user_id: requireText(input.wecom_user_id, "wecom_user_id"),
+    conversation_id: requireText(input.conversation_id, "conversation_id"),
+  };
+}
+
 function getRequiredBot(db: Database.Database, botId: string): BotRecord {
   const bot = mapBotRecord(db.prepare("select * from bots where bot_id = ?").get(botId));
   if (!bot) {
@@ -1583,6 +1719,27 @@ function mapInitializationSessionRecord(
       }
       : {}),
     status: requireInitializationSessionStatus(record.status as string),
+    created_at: record.created_at as string,
+    updated_at: record.updated_at as string,
+  };
+}
+
+function mapPendingGeneratedDocumentRecord(row: unknown): PendingGeneratedDocumentRecord {
+  const record = row as Record<string, unknown>;
+  return {
+    pending_id: record.pending_id as string,
+    bot_id: record.bot_id as string,
+    wecom_user_id: record.wecom_user_id as string,
+    conversation_id: record.conversation_id as string,
+    title: record.title as string,
+    content: record.content as string,
+    status: record.status as PendingGeneratedDocumentStatus,
+    ...(typeof record.created_by_bot_id === "string"
+      ? { created_by_bot_id: record.created_by_bot_id }
+      : {}),
+    ...(typeof record.created_by_user_id === "string"
+      ? { created_by_user_id: record.created_by_user_id }
+      : {}),
     created_at: record.created_at as string,
     updated_at: record.updated_at as string,
   };

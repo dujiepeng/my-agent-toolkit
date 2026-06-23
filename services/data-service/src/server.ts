@@ -110,6 +110,34 @@ export function createDataServiceServer(
         return handleClearInitializationSession(url, store);
       }
 
+      if (
+        request.method === "POST" &&
+        url.pathname === "/internal/pending-generated-documents"
+      ) {
+        return handleCreatePendingGeneratedDocument(request, store);
+      }
+
+      if (
+        request.method === "GET" &&
+        url.pathname === "/internal/pending-generated-documents"
+      ) {
+        return handleListPendingGeneratedDocuments(url, store);
+      }
+
+      if (
+        request.method === "POST" &&
+        url.pathname === "/internal/pending-generated-documents/confirm"
+      ) {
+        return handleConfirmPendingGeneratedDocuments(request, store);
+      }
+
+      if (
+        request.method === "POST" &&
+        url.pathname === "/internal/pending-generated-documents/cancel"
+      ) {
+        return handleCancelPendingGeneratedDocuments(request, store);
+      }
+
       if (request.method === "GET" && url.pathname === "/internal/memory-stats") {
         return handleGetMemoryStats(url, store);
       }
@@ -480,6 +508,54 @@ function handleClearInitializationSession(
       conversation_id: url.searchParams.get("conversation_id") ?? "",
     });
     return jsonResponse({ cleared: true });
+  } catch (error) {
+    return errorResponse(error);
+  }
+}
+
+async function handleCreatePendingGeneratedDocument(
+  request: Request,
+  store: DataStore,
+): Promise<Response> {
+  try {
+    return jsonResponse(store.createPendingGeneratedDocument(await request.json()), 201);
+  } catch (error) {
+    return errorResponse(error);
+  }
+}
+
+function handleListPendingGeneratedDocuments(
+  url: URL,
+  store: DataStore,
+): Response {
+  try {
+    return jsonResponse(store.listPendingGeneratedDocuments({
+      bot_id: url.searchParams.get("bot_id") ?? "",
+      wecom_user_id: url.searchParams.get("wecom_user_id") ?? "",
+      conversation_id: url.searchParams.get("conversation_id") ?? "",
+    }));
+  } catch (error) {
+    return errorResponse(error);
+  }
+}
+
+async function handleConfirmPendingGeneratedDocuments(
+  request: Request,
+  store: DataStore,
+): Promise<Response> {
+  try {
+    return jsonResponse(store.confirmPendingGeneratedDocuments(await request.json()));
+  } catch (error) {
+    return errorResponse(error);
+  }
+}
+
+async function handleCancelPendingGeneratedDocuments(
+  request: Request,
+  store: DataStore,
+): Promise<Response> {
+  try {
+    return jsonResponse(store.cancelPendingGeneratedDocuments(await request.json()));
   } catch (error) {
     return errorResponse(error);
   }
