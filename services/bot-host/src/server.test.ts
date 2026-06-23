@@ -21,6 +21,18 @@ interface MockInitializationSession {
   status: "active" | "completed" | "cancelled";
 }
 
+interface MockPendingGeneratedDocument {
+  pending_id: string;
+  bot_id: string;
+  wecom_user_id: string;
+  conversation_id: string;
+  title: string;
+  content: string;
+  status: "pending" | "confirmed" | "cancelled";
+  created_by_bot_id: string;
+  created_by_user_id: string;
+}
+
 function mockInitializationSessionResponse(
   request: Request,
   body: unknown,
@@ -78,6 +90,65 @@ function noActiveInitializationSessionResponse(request: Request): Response | und
   ) {
     return Response.json(null);
   }
+  if (
+    url.origin === "http://data-service"
+    && url.pathname === "/internal/pending-generated-documents"
+    && request.method === "GET"
+  ) {
+    return Response.json([]);
+  }
+  return undefined;
+}
+
+function mockPendingGeneratedDocumentsResponse(
+  request: Request,
+  body: unknown,
+  documents: MockPendingGeneratedDocument[],
+): Response | undefined {
+  const url = new URL(request.url);
+  if (url.origin !== "http://data-service") {
+    return undefined;
+  }
+
+  if (url.pathname === "/internal/pending-generated-documents" && request.method === "POST") {
+    const input = body as Omit<MockPendingGeneratedDocument, "pending_id" | "status">;
+    const record: MockPendingGeneratedDocument = {
+      pending_id: `pending-${documents.length + 1}`,
+      status: "pending",
+      ...input,
+    };
+    documents.push(record);
+    return Response.json(record, { status: 201 });
+  }
+
+  if (url.pathname === "/internal/pending-generated-documents" && request.method === "GET") {
+    return Response.json(documents.filter((document) =>
+      document.bot_id === (url.searchParams.get("bot_id") ?? "")
+      && document.wecom_user_id === (url.searchParams.get("wecom_user_id") ?? "")
+      && document.conversation_id === (url.searchParams.get("conversation_id") ?? "")
+    ));
+  }
+
+  if (url.pathname === "/internal/pending-generated-documents/confirm" && request.method === "POST") {
+    const input = body as {
+      bot_id: string;
+      wecom_user_id: string;
+      conversation_id: string;
+    };
+    const updated = documents
+      .filter((document) =>
+        document.bot_id === input.bot_id
+        && document.wecom_user_id === input.wecom_user_id
+        && document.conversation_id === input.conversation_id
+        && document.status === "pending"
+      )
+      .map((document) => {
+        document.status = "confirmed";
+        return { ...document };
+      });
+    return Response.json(updated);
+  }
+
   return undefined;
 }
 
@@ -432,6 +503,7 @@ describe("bot-host server", () => {
 
   it("asks for confirmation before storing generated non-config markdown documents", async () => {
     const calls: Array<{ url: string; method: string; body: unknown }> = [];
+    const pendingDocuments: MockPendingGeneratedDocument[] = [];
     const server = createBotHostServer({
       dataServiceUrl: "http://data-service",
       llmRunnerUrl: "http://llm-runner",
@@ -441,6 +513,15 @@ describe("bot-host server", () => {
         }
         const body = request.method === "POST" || request.method === "PATCH" ? await request.json() : undefined;
         calls.push({ url: request.url, method: request.method, body });
+        const pendingGeneratedDocuments = mockPendingGeneratedDocumentsResponse(
+          request,
+          body,
+          pendingDocuments,
+        );
+        if (pendingGeneratedDocuments) {
+          return pendingGeneratedDocuments;
+        }
+
         const noActiveInitializationSession = noActiveInitializationSessionResponse(request);
         if (noActiveInitializationSession) {
           return noActiveInitializationSession;
@@ -512,6 +593,12 @@ describe("bot-host server", () => {
     expect(firstPayload.output).toContain("PRD 已生成。");
     expect(firstPayload.output).toContain("# 语音转文字 API PRD");
     expect(firstPayload.output).toContain("回复“确认”后保存到长期文档存储");
+    expect(pendingDocuments).toEqual([
+      expect.objectContaining({
+        title: "prd/asr-api.md",
+        status: "pending",
+      }),
+    ]);
     expect(calls.map((call) => call.url)).not.toContain("http://data-service/internal/documents");
 
     const second = await server.fetch(
@@ -529,6 +616,12 @@ describe("bot-host server", () => {
     expect(second.status).toBe(200);
     const secondPayload = await second.json() as { output: string };
     expect(secondPayload.output).toBe("已保存到长期文档存储：prd/asr-api.md v1。");
+    expect(pendingDocuments).toEqual([
+      expect.objectContaining({
+        title: "prd/asr-api.md",
+        status: "confirmed",
+      }),
+    ]);
     expect(calls.find((call) => call.url === "http://data-service/internal/documents")).toMatchObject({
       method: "POST",
       body: {
@@ -547,6 +640,7 @@ describe("bot-host server", () => {
 
   it("updates an existing generated markdown document version after confirmation", async () => {
     const calls: Array<{ url: string; method: string; body: unknown }> = [];
+    const pendingDocuments: MockPendingGeneratedDocument[] = [];
     const server = createBotHostServer({
       dataServiceUrl: "http://data-service",
       llmRunnerUrl: "http://llm-runner",
@@ -556,6 +650,15 @@ describe("bot-host server", () => {
         }
         const body = request.method === "POST" || request.method === "PATCH" ? await request.json() : undefined;
         calls.push({ url: request.url, method: request.method, body });
+        const pendingGeneratedDocuments = mockPendingGeneratedDocumentsResponse(
+          request,
+          body,
+          pendingDocuments,
+        );
+        if (pendingGeneratedDocuments) {
+          return pendingGeneratedDocuments;
+        }
+
         const noActiveInitializationSession = noActiveInitializationSessionResponse(request);
         if (noActiveInitializationSession) {
           return noActiveInitializationSession;
@@ -625,6 +728,12 @@ describe("bot-host server", () => {
         }),
       }),
     );
+    expect(pendingDocuments).toEqual([
+      expect.objectContaining({
+        title: "prd/asr-api.md",
+        status: "pending",
+      }),
+    ]);
 
     const response = await server.fetch(
       new Request("http://localhost/v1/messages/wecom", {
@@ -641,6 +750,12 @@ describe("bot-host server", () => {
     expect(response.status).toBe(200);
     const payload = await response.json() as { output: string };
     expect(payload.output).toBe("已保存到长期文档存储：prd/asr-api.md v2。");
+    expect(pendingDocuments).toEqual([
+      expect.objectContaining({
+        title: "prd/asr-api.md",
+        status: "confirmed",
+      }),
+    ]);
     expect(calls.find((call) => call.url === "http://data-service/internal/documents/doc-existing")).toMatchObject({
       method: "PATCH",
       body: {
@@ -649,6 +764,130 @@ describe("bot-host server", () => {
       },
     });
     expect(calls.map((call) => call.url)).not.toContain("http://data-service/internal/documents");
+  });
+
+  it("confirms generated markdown documents from data-service state across bot-host instances", async () => {
+    const pendingDocuments: MockPendingGeneratedDocument[] = [];
+    const calls: Array<{ url: string; method: string; body: unknown }> = [];
+    const makeServer = () => createBotHostServer({
+      dataServiceUrl: "http://data-service",
+      llmRunnerUrl: "http://llm-runner",
+      fetch: async (request) => {
+        if (!(request instanceof Request)) {
+          throw new Error("expected Request");
+        }
+        const body = request.method === "POST" || request.method === "PATCH"
+          ? await request.json().catch(() => undefined)
+          : undefined;
+        calls.push({ url: request.url, method: request.method, body });
+        const pendingGeneratedDocuments = mockPendingGeneratedDocumentsResponse(
+          request,
+          body,
+          pendingDocuments,
+        );
+        if (pendingGeneratedDocuments) {
+          return pendingGeneratedDocuments;
+        }
+
+        const noActiveInitializationSession = noActiveInitializationSessionResponse(request);
+        if (noActiveInitializationSession) {
+          return noActiveInitializationSession;
+        }
+
+        if (request.url === "http://data-service/v1/message-context/resolve") {
+          return Response.json({
+            allowed: true,
+            reason: "ready",
+            bot_id: (body as { bot_id: string }).bot_id,
+            wecom_user_id: (body as { wecom_user_id: string }).wecom_user_id,
+            conversation: {
+              conversation_id: "conv-1",
+            },
+          });
+        }
+
+        if (request.url.startsWith("http://data-service/v1/bots/") && request.url.endsWith("/config-documents")) {
+          return Response.json([]);
+        }
+
+        if (request.url.startsWith("http://data-service/v1/memory-documents/current?")) {
+          return Response.json([]);
+        }
+
+        if (request.url === "http://llm-runner/v1/chat") {
+          return Response.json({
+            run_id: "run-doc",
+            output: [
+              "PRD 已生成。",
+              "~document:prd/asr-api.md",
+              "# 跨实例 PRD",
+              "共享待确认内容。",
+              "~/document",
+            ].join("\n"),
+          });
+        }
+
+        if (request.url === "http://data-service/internal/documents?scope=bot&owner_id=prd-bot") {
+          return Response.json([]);
+        }
+
+        if (request.url === "http://data-service/internal/documents") {
+          return Response.json({
+            document_id: "doc-1",
+            version: 1,
+          }, { status: 201 });
+        }
+
+        return Response.json({ error: "unexpected" }, { status: 500 });
+      },
+    });
+
+    const firstServer = makeServer();
+    const secondServer = makeServer();
+
+    const first = await firstServer.fetch(
+      new Request("http://localhost/v1/messages/wecom", {
+        method: "POST",
+        body: JSON.stringify({
+          bot_id: "prd-bot",
+          wecom_user_id: "user-a",
+          text: "生成跨实例 PRD",
+          runtime: "mock",
+        }),
+      }),
+    );
+
+    expect(first.status).toBe(200);
+    await expect(first.json()).resolves.toMatchObject({
+      output: expect.stringContaining("回复“确认”后保存到长期文档存储"),
+    });
+    expect(pendingDocuments).toHaveLength(1);
+    expect(calls.map((call) => call.url)).not.toContain("http://data-service/internal/documents");
+
+    const second = await secondServer.fetch(
+      new Request("http://localhost/v1/messages/wecom", {
+        method: "POST",
+        body: JSON.stringify({
+          bot_id: "prd-bot",
+          wecom_user_id: "user-a",
+          text: "确认",
+          runtime: "mock",
+        }),
+      }),
+    );
+
+    expect(second.status).toBe(200);
+    await expect(second.json()).resolves.toEqual({
+      conversation_id: "conv-1",
+      run_id: expect.stringMatching(/^document_save_/),
+      output: "已保存到长期文档存储：prd/asr-api.md v1。",
+    });
+    expect(pendingDocuments).toEqual([
+      expect.objectContaining({
+        title: "prd/asr-api.md",
+        status: "confirmed",
+      }),
+    ]);
   });
 
   it("records successful chat events with memory refs", async () => {
@@ -2635,6 +2874,7 @@ describe("bot-host server", () => {
   it("asks for confirmation before storing generated markdown documents from streaming workers", async () => {
     const sent: Array<{ conversationId: string; text: string; finish: boolean }> = [];
     const calls: Array<{ url: string; method: string; body: unknown }> = [];
+    const pendingDocuments: MockPendingGeneratedDocument[] = [];
     let messageHandler:
       | ((message: {
         conversationId: string;
@@ -2655,6 +2895,15 @@ describe("bot-host server", () => {
           ? await request.json().catch(() => undefined)
           : undefined;
         calls.push({ url: request.url, method: request.method, body });
+        const pendingGeneratedDocuments = mockPendingGeneratedDocumentsResponse(
+          request,
+          body,
+          pendingDocuments,
+        );
+        if (pendingGeneratedDocuments) {
+          return pendingGeneratedDocuments;
+        }
+
         const noActiveInitializationSession = noActiveInitializationSessionResponse(request);
         if (noActiveInitializationSession) {
           return noActiveInitializationSession;
@@ -2728,6 +2977,12 @@ describe("bot-host server", () => {
 
     expect(sent.at(-1)?.text).toContain("# ASR PRD");
     expect(sent.at(-1)?.text).toContain("回复“确认”后保存到长期文档存储");
+    expect(pendingDocuments).toEqual([
+      expect.objectContaining({
+        title: "prd/asr-api.md",
+        status: "pending",
+      }),
+    ]);
     expect(calls.map((call) => call.url)).not.toContain("http://data-service/internal/documents");
 
     await messageHandler?.({
@@ -2741,6 +2996,12 @@ describe("bot-host server", () => {
       text: "已保存到长期文档存储：prd/asr-api.md v1。",
       finish: true,
     });
+    expect(pendingDocuments).toEqual([
+      expect.objectContaining({
+        title: "prd/asr-api.md",
+        status: "confirmed",
+      }),
+    ]);
     expect(calls.find((call) => call.url === "http://data-service/internal/documents")).toMatchObject({
       method: "POST",
       body: {
@@ -2749,6 +3010,10 @@ describe("bot-host server", () => {
         title: "prd/asr-api.md",
         doc_type: "markdown",
         content: "# ASR PRD\n内容。",
+        created_by_bot_id: "prd-bot",
+        created_by_user_id: "user-a",
+        source_type: "document",
+        tags: ["generated", "pending-confirmed"],
       },
     });
   });

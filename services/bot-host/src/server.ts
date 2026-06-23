@@ -1,7 +1,10 @@
 import {
   clearInitializationSession,
+  confirmPendingGeneratedDocuments,
+  createPendingGeneratedDocument,
   getActiveInitializationSession,
   type InitializationSessionDto,
+  listPendingGeneratedDocuments,
   upsertInitializationSession,
 } from "./botStateClient.js";
 import type { IncomingWeComMessage, WeComClient } from "./wecomClient.js";
@@ -89,7 +92,7 @@ interface ScopedMemoryDocument extends MemoryDocument {
 interface ProcessedOutput {
   visibleOutput: string;
   configDocuments: ConfigDocument[];
-  pendingDocuments?: PendingBusinessDocument[];
+  pendingDocuments?: GeneratedMarkdownDocument[];
 }
 
 interface ConfigDocument {
@@ -97,7 +100,7 @@ interface ConfigDocument {
   content: string;
 }
 
-interface PendingBusinessDocument {
+interface GeneratedMarkdownDocument {
   title: string;
   content: string;
 }
@@ -119,7 +122,6 @@ interface LoadedWizardState {
   conversationId: string;
 }
 
-const pendingBusinessDocumentsByConfig = new WeakMap<BotHostConfig, Map<string, PendingBusinessDocument[]>>();
 const MISSING_GENERATED_DOCUMENTS_MESSAGE = "初始化文档生成失败：没有生成 soul 和 agents.md。请回复“确认”重新生成，或说明需要修改的配置。";
 const MISSING_SOUL_DOCUMENT_MESSAGE = "Soul 生成失败：没有生成 soul。请稍后重试或在 WebUI 重置引导。";
 const MISSING_AGENTS_DOCUMENT_MESSAGE = "工作方式生成失败：没有生成 agents.md。请稍后重试或在 WebUI 重置引导。";
@@ -968,20 +970,6 @@ async function resolveWizardConversationId(
   }
 }
 
-function getPendingBusinessDocuments(config: BotHostConfig): Map<string, PendingBusinessDocument[]> {
-  const existing = pendingBusinessDocumentsByConfig.get(config);
-  if (existing) {
-    return existing;
-  }
-  const created = new Map<string, PendingBusinessDocument[]>();
-  pendingBusinessDocumentsByConfig.set(config, created);
-  return created;
-}
-
-function pendingBusinessDocumentKey(input: WeComMessageInput, conversationId: string): string {
-  return `${input.bot_id}:${input.wecom_user_id}:${conversationId}`;
-}
-
 async function processAllowedWeComMessage(
   input: WeComMessageInput,
   config: BotHostConfig,
@@ -1022,13 +1010,7 @@ async function processAllowedWeComMessage(
     prompt,
   });
 
-  const processed = await processAssistantOutput(config, input, result.output);
-  if (processed.pendingDocuments && processed.pendingDocuments.length > 0) {
-    getPendingBusinessDocuments(config).set(
-      pendingBusinessDocumentKey(input, resolvedConversationId),
-      processed.pendingDocuments,
-    );
-  }
+  const processed = await processAssistantOutput(config, input, result.output, resolvedConversationId);
   const output = selectVisibleAssistantOutput(input.text, result.output, processed);
   await recordChatEvent(
     config,
@@ -1059,22 +1041,28 @@ async function handlePendingBusinessDocumentConfirmation(
 ): Promise<{
   conversation_id: string;
   run_id: string;
-  output: string;
+    output: string;
 } | undefined> {
-  const pendingDocuments = getPendingBusinessDocuments(config);
-  const key = pendingBusinessDocumentKey(input, conversationId);
-  const documents = pendingDocuments.get(key);
-  if (!documents || documents.length === 0) {
-    return undefined;
-  }
-
   if (!isConfirmAnswer(input.text)) {
     return undefined;
   }
 
-  pendingDocuments.delete(key);
+  const documents = await listPendingGeneratedDocuments(config, {
+    bot_id: input.bot_id,
+    wecom_user_id: input.wecom_user_id,
+    conversation_id: conversationId,
+  });
+  if (!documents || documents.length === 0) {
+    return undefined;
+  }
+
+  const confirmedDocuments = await confirmPendingGeneratedDocuments(config, {
+    bot_id: input.bot_id,
+    wecom_user_id: input.wecom_user_id,
+    conversation_id: conversationId,
+  });
   const saved = [];
-  for (const document of documents) {
+  for (const document of confirmedDocuments) {
     saved.push(await saveBusinessDocument(config, input, document));
   }
 
@@ -1090,7 +1078,7 @@ async function handlePendingBusinessDocumentConfirmation(
 async function saveBusinessDocument(
   config: BotHostConfig,
   input: WeComMessageInput,
-  document: PendingBusinessDocument,
+  document: GeneratedMarkdownDocument,
 ): Promise<{ title: string; version: number }> {
   const existing = await findExistingBusinessDocument(config, input.bot_id, document.title);
   if (existing) {
@@ -1279,13 +1267,7 @@ async function streamAllowedWeComMessage(
   }
 
   const rawFinalOutput = sentAnyChunk ? output : INVALID_RUNTIME_OUTPUT_MESSAGE;
-  const processed = await processAssistantOutput(config, input, rawFinalOutput);
-  if (processed.pendingDocuments && processed.pendingDocuments.length > 0) {
-    getPendingBusinessDocuments(config).set(
-      pendingBusinessDocumentKey(input, resolvedConversationId),
-      processed.pendingDocuments,
-    );
-  }
+  const processed = await processAssistantOutput(config, input, rawFinalOutput, resolvedConversationId);
   const finalOutput = selectVisibleAssistantOutput(input.text, rawFinalOutput, processed);
   await presentationStream.finish();
   await config.wecomClient.sendText(wecomConversationId, finalOutput, { finish: true });
@@ -1391,8 +1373,12 @@ async function processAssistantOutput(
   config: BotHostConfig,
   input: WeComMessageInput,
   output: string,
+  conversationId?: string,
 ): Promise<ProcessedOutput> {
   const parsed = extractConfigDocuments(output);
+  if (parsed.pendingDocuments && parsed.pendingDocuments.length > 0) {
+    await persistPendingGeneratedDocuments(config, input, parsed.pendingDocuments, conversationId);
+  }
   if (parsed.configDocuments.length === 0) {
     return parsed;
   }
@@ -1418,6 +1404,26 @@ async function processAssistantOutput(
   }
 
   return parsed;
+}
+
+async function persistPendingGeneratedDocuments(
+  config: BotHostConfig,
+  input: WeComMessageInput,
+  documents: GeneratedMarkdownDocument[],
+  conversationId?: string,
+): Promise<void> {
+  const resolvedConversationId = conversationId ?? input.conversation_id ?? await resolveAllowedConversationId(config, input);
+  for (const document of documents) {
+    await createPendingGeneratedDocument(config, {
+      bot_id: input.bot_id,
+      wecom_user_id: input.wecom_user_id,
+      conversation_id: resolvedConversationId,
+      title: document.title,
+      content: document.content,
+      created_by_bot_id: input.bot_id,
+      created_by_user_id: input.wecom_user_id,
+    });
+  }
 }
 
 async function initializeFromWizardAnswers(
@@ -1525,7 +1531,7 @@ function isValidGeneratedConfigDocument(document: ConfigDocument): boolean {
 
 function extractConfigDocuments(output: string): ProcessedOutput {
   const configDocuments: ConfigDocument[] = [];
-  const pendingDocuments: PendingBusinessDocument[] = [];
+  const pendingDocuments: GeneratedMarkdownDocument[] = [];
   const visibleParts: string[] = [];
   const documentPattern = /~document:(.+?\.md)\s*\n([\s\S]*?)\n?~\/document/g;
   let cursor = 0;
