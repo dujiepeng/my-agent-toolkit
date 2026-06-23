@@ -11,7 +11,7 @@ import {
   startInitializationWizard,
   streamBotMessage,
   type BotHostConfig,
-  type BotHostWorkerConfig,
+  type StreamBotMessageConfig,
   type WeComMessageInput,
 } from "./messageHandler.js";
 import type { IncomingWeComMessage, WeComClient } from "./wecomClient.js";
@@ -48,6 +48,11 @@ export interface BotHostServerConfig extends BotHostConfig {
   runtimeController?: {
     sync(): Promise<void>;
   };
+}
+
+export interface BotHostWorkerConfig extends StreamBotMessageConfig {
+  botId: string;
+  runtime: "mock" | "kiro";
 }
 
 export interface WeComRuntimeBotConfig {

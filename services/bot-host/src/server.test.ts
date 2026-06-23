@@ -3,6 +3,7 @@ import {
   getActiveInitializationSession,
   upsertInitializationSession,
 } from "./botStateClient.js";
+import * as messageHandlerModule from "./messageHandler.js";
 import { handleBotMessage } from "./messageHandler.js";
 import {
   createBotHostServer,
@@ -4650,6 +4651,12 @@ describe("bot-host server", () => {
     expect(workerSessions.get("prd-bot:user-a:conv-chat")).toMatchObject({
       soul_answers: ["产品经理助手", "冷静务实"],
     });
+  });
+
+  it("keeps messageHandler limited to shared handler exports", () => {
+    expect(messageHandlerModule).not.toHaveProperty("createBotHostServer");
+    expect(messageHandlerModule).not.toHaveProperty("createBotHostWorker");
+    expect(messageHandlerModule).not.toHaveProperty("createBotHostSupervisor");
   });
 
   it("supervises wecom workers from data-service runtime config", async () => {
