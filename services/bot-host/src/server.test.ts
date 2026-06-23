@@ -5,6 +5,66 @@ import {
   createBotHostWorker,
 } from "./server.js";
 
+interface MockInitializationSession {
+  session_id: string;
+  bot_id: string;
+  wecom_user_id: string;
+  conversation_id: string;
+  phase: "soul" | "agents";
+  soul_answers: string[];
+  agents_answers: string[];
+  generation_in_progress?: "soul" | "agents";
+  status: "active" | "completed" | "cancelled";
+}
+
+function mockInitializationSessionResponse(
+  request: Request,
+  body: unknown,
+  sessions: Map<string, MockInitializationSession>,
+): Response | undefined {
+  const url = new URL(request.url);
+  if (url.origin !== "http://data-service") {
+    return undefined;
+  }
+
+  if (url.pathname === "/internal/initialization-sessions/active") {
+    const key = initializationSessionKey({
+      bot_id: url.searchParams.get("bot_id") ?? "",
+      wecom_user_id: url.searchParams.get("wecom_user_id") ?? "",
+      conversation_id: url.searchParams.get("conversation_id") ?? "",
+    });
+    if (request.method === "GET") {
+      return Response.json(sessions.get(key) ?? null);
+    }
+    if (request.method === "DELETE") {
+      sessions.delete(key);
+      return Response.json({ cleared: true });
+    }
+  }
+
+  if (url.pathname === "/internal/initialization-sessions" && request.method === "PUT") {
+    const input = body as Omit<MockInitializationSession, "session_id">;
+    const key = initializationSessionKey(input);
+    const existing = sessions.get(key);
+    const session = {
+      session_id: existing?.session_id ?? `init-${sessions.size + 1}`,
+      ...input,
+    };
+    sessions.set(key, session);
+    return Response.json(session);
+  }
+
+  return undefined;
+}
+
+function initializationSessionKey(input: {
+  bot_id: string;
+  wecom_user_id: string;
+  conversation_id: string;
+}): string {
+  return `${input.bot_id}:${input.wecom_user_id}:${input.conversation_id}`;
+}
+
 describe("bot-host server", () => {
   it("responds to health checks", async () => {
     const server = createBotHostServer({
@@ -653,6 +713,7 @@ describe("bot-host server", () => {
 
   it("verifies admin claim commands before normal message routing", async () => {
     const calls: Array<{ url: string; body: unknown }> = [];
+    const initializationSessions = new Map<string, MockInitializationSession>();
     const server = createBotHostServer({
       dataServiceUrl: "http://data-service",
       llmRunnerUrl: "http://llm-runner",
@@ -660,8 +721,12 @@ describe("bot-host server", () => {
         if (!(request instanceof Request)) {
           throw new Error("expected Request");
         }
-        const body = await request.json();
+        const body = await request.json().catch(() => undefined);
         calls.push({ url: request.url, body });
+        const initializationSessionResponse = mockInitializationSessionResponse(request, body, initializationSessions);
+        if (initializationSessionResponse) {
+          return initializationSessionResponse;
+        }
 
         if (request.url === "http://data-service/v1/bots/prd-bot/admin/claim/verify") {
           return Response.json({
@@ -698,19 +763,30 @@ describe("bot-host server", () => {
     expect(payload.output).toContain("Soul 引导 1/3：你希望我扮演什么角色？");
     expect(payload.output).toContain("1. 产品经理助手");
     expect(payload.output).toContain("回复编号或直接输入。");
-    expect(calls).toEqual([
-      {
-        url: "http://data-service/v1/bots/prd-bot/admin/claim/verify",
-        body: {
-          wecom_user_id: "admin-a",
-          code: "123456",
-        },
+    expect(calls[0]).toEqual({
+      url: "http://data-service/v1/bots/prd-bot/admin/claim/verify",
+      body: {
+        wecom_user_id: "admin-a",
+        code: "123456",
       },
-    ]);
+    });
+    expect(calls[1]).toMatchObject({
+      url: "http://data-service/internal/initialization-sessions",
+      body: {
+        bot_id: "prd-bot",
+        wecom_user_id: "admin-a",
+        conversation_id: "pending",
+        phase: "soul",
+        soul_answers: [],
+        agents_answers: [],
+        status: "active",
+      },
+    });
   });
 
   it("starts server-owned initialization wizard immediately after a successful admin claim", async () => {
     const calls: Array<{ url: string; body: unknown }> = [];
+    const initializationSessions = new Map<string, MockInitializationSession>();
     const server = createBotHostServer({
       dataServiceUrl: "http://data-service",
       llmRunnerUrl: "http://llm-runner",
@@ -718,8 +794,12 @@ describe("bot-host server", () => {
         if (!(request instanceof Request)) {
           throw new Error("expected Request");
         }
-        const body = request.method === "POST" ? await request.json() : undefined;
+        const body = request.method === "POST" || request.method === "PUT" ? await request.json() : undefined;
         calls.push({ url: request.url, body });
+        const initializationSessionResponse = mockInitializationSessionResponse(request, body, initializationSessions);
+        if (initializationSessionResponse) {
+          return initializationSessionResponse;
+        }
 
         if (request.url === "http://data-service/v1/bots/prd-bot/admin/claim/verify") {
           return Response.json({
@@ -756,11 +836,12 @@ describe("bot-host server", () => {
     expect(payload.output).toContain("Soul 引导 1/3：你希望我扮演什么角色？");
     expect(payload.output).toContain("1. 产品经理助手");
     expect(payload.output).toContain("回复编号或直接输入。");
-    expect(calls).toHaveLength(1);
+    expect(calls).toHaveLength(2);
   });
 
   it("guides soul first, then agents, before marking the bot ready", async () => {
     const calls: Array<{ url: string; body: unknown }> = [];
+    const initializationSessions = new Map<string, MockInitializationSession>();
     const server = createBotHostServer({
       dataServiceUrl: "http://data-service",
       llmRunnerUrl: "http://llm-runner",
@@ -768,8 +849,12 @@ describe("bot-host server", () => {
         if (!(request instanceof Request)) {
           throw new Error("expected Request");
         }
-        const body = request.method === "POST" ? await request.json().catch(() => undefined) : undefined;
+        const body = request.method === "POST" || request.method === "PUT" ? await request.json().catch(() => undefined) : undefined;
         calls.push({ url: request.url, body });
+        const initializationSessionResponse = mockInitializationSessionResponse(request, body, initializationSessions);
+        if (initializationSessionResponse) {
+          return initializationSessionResponse;
+        }
 
         if (request.url === "http://data-service/v1/message-context/resolve") {
           return Response.json({
@@ -919,13 +1004,83 @@ describe("bot-host server", () => {
     expect(calls.map((call) => call.url)).toContain("http://data-service/v1/bots/prd-bot/ready");
   });
 
+  it("continues initialization wizard from data-service state across bot-api instances", async () => {
+    const sessions = new Map<string, unknown>();
+    const calls: Array<{ url: string; method: string; body: unknown }> = [];
+    const makeServer = () => createBotHostServer({
+      dataServiceUrl: "http://data-service",
+      llmRunnerUrl: "http://llm-runner",
+      fetch: async (request) => {
+        if (!(request instanceof Request)) {
+          throw new Error("expected Request");
+        }
+        const body = request.method === "POST" || request.method === "PUT"
+          ? await request.json().catch(() => undefined)
+          : undefined;
+        calls.push({ url: request.url, method: request.method, body });
+
+        if (request.url === "http://data-service/v1/message-context/resolve") {
+          return Response.json({
+            allowed: true,
+            reason: "initializing",
+            is_admin: true,
+            conversation: { conversation_id: "conv-init", purpose: "init" },
+          });
+        }
+
+        if (request.url === "http://data-service/internal/initialization-sessions/active?bot_id=prd-bot&wecom_user_id=admin-a&conversation_id=conv-init") {
+          return Response.json(sessions.get("session") ?? null);
+        }
+
+        if (request.url === "http://data-service/internal/initialization-sessions") {
+          sessions.set("session", body);
+          return Response.json({ session_id: "init-1", ...(body as object) });
+        }
+
+        if (request.url.startsWith("http://data-service/v1/memory-documents/current?")) {
+          return Response.json([]);
+        }
+
+        if (request.url === "http://data-service/v1/bots/prd-bot/config-documents") {
+          return Response.json([]);
+        }
+
+        return Response.json({ error: "unexpected", url: request.url }, { status: 500 });
+      },
+    });
+
+    const first = makeServer();
+    const start = await first.fetch(new Request("http://localhost/v1/messages/wecom", {
+      method: "POST",
+      body: JSON.stringify({ bot_id: "prd-bot", wecom_user_id: "admin-a", text: "1", runtime: "mock" }),
+    }));
+    await expect(start.json()).resolves.toMatchObject({
+      output: expect.stringContaining("Soul 引导 2/3"),
+    });
+
+    const second = makeServer();
+    const next = await second.fetch(new Request("http://localhost/v1/messages/wecom", {
+      method: "POST",
+      body: JSON.stringify({ bot_id: "prd-bot", wecom_user_id: "admin-a", text: "1", runtime: "mock" }),
+    }));
+    await expect(next.json()).resolves.toMatchObject({
+      output: expect.stringContaining("Soul 引导 3/3"),
+    });
+  });
+
   it("keeps wizard question numbers separate from option labels", async () => {
+    const initializationSessions = new Map<string, MockInitializationSession>();
     const server = createBotHostServer({
       dataServiceUrl: "http://data-service",
       llmRunnerUrl: "http://llm-runner",
       fetch: async (request) => {
         if (!(request instanceof Request)) {
           throw new Error("expected Request");
+        }
+        const body = request.method === "PUT" ? await request.json().catch(() => undefined) : undefined;
+        const initializationSessionResponse = mockInitializationSessionResponse(request, body, initializationSessions);
+        if (initializationSessionResponse) {
+          return initializationSessionResponse;
         }
 
         if (request.url === "http://data-service/v1/message-context/resolve") {
@@ -1074,12 +1229,18 @@ describe("bot-host server", () => {
   });
 
   it("requires a single core work choice during agents guidance", async () => {
+    const initializationSessions = new Map<string, MockInitializationSession>();
     const server = createBotHostServer({
       dataServiceUrl: "http://data-service",
       llmRunnerUrl: "http://llm-runner",
       fetch: async (request) => {
         if (!(request instanceof Request)) {
           throw new Error("expected Request");
+        }
+        const body = request.method === "POST" || request.method === "PUT" ? await request.json().catch(() => undefined) : undefined;
+        const initializationSessionResponse = mockInitializationSessionResponse(request, body, initializationSessions);
+        if (initializationSessionResponse) {
+          return initializationSessionResponse;
         }
 
         if (request.url === "http://data-service/v1/message-context/resolve") {
@@ -1148,12 +1309,18 @@ describe("bot-host server", () => {
 
   it("allows natural core work text that contains a slash", async () => {
     const calls: string[] = [];
+    const initializationSessions = new Map<string, MockInitializationSession>();
     const server = createBotHostServer({
       dataServiceUrl: "http://data-service",
       llmRunnerUrl: "http://llm-runner",
       fetch: async (request) => {
         if (!(request instanceof Request)) {
           throw new Error("expected Request");
+        }
+        const body = request.method === "POST" || request.method === "PUT" ? await request.json().catch(() => undefined) : undefined;
+        const initializationSessionResponse = mockInitializationSessionResponse(request, body, initializationSessions);
+        if (initializationSessionResponse) {
+          return initializationSessionResponse;
         }
         calls.push(request.url);
 
@@ -1222,6 +1389,7 @@ describe("bot-host server", () => {
 
   it("rejects placeholder initialization documents without marking ready", async () => {
     const calls: Array<{ url: string; body: unknown }> = [];
+    const initializationSessions = new Map<string, MockInitializationSession>();
     const server = createBotHostServer({
       dataServiceUrl: "http://data-service",
       llmRunnerUrl: "http://llm-runner",
@@ -1229,8 +1397,12 @@ describe("bot-host server", () => {
         if (!(request instanceof Request)) {
           throw new Error("expected Request");
         }
-        const body = request.method === "POST" ? await request.json().catch(() => undefined) : undefined;
+        const body = request.method === "POST" || request.method === "PUT" ? await request.json().catch(() => undefined) : undefined;
         calls.push({ url: request.url, body });
+        const initializationSessionResponse = mockInitializationSessionResponse(request, body, initializationSessions);
+        if (initializationSessionResponse) {
+          return initializationSessionResponse;
+        }
 
         if (request.url === "http://data-service/v1/message-context/resolve") {
           return Response.json({
@@ -1291,6 +1463,7 @@ describe("bot-host server", () => {
 
   it("falls back to deterministic initialization documents when document generation returns plain text", async () => {
     const calls: Array<{ url: string; body: unknown }> = [];
+    const initializationSessions = new Map<string, MockInitializationSession>();
     const server = createBotHostServer({
       dataServiceUrl: "http://data-service",
       llmRunnerUrl: "http://llm-runner",
@@ -1298,8 +1471,12 @@ describe("bot-host server", () => {
         if (!(request instanceof Request)) {
           throw new Error("expected Request");
         }
-        const body = request.method === "POST" ? await request.json().catch(() => undefined) : undefined;
+        const body = request.method === "POST" || request.method === "PUT" ? await request.json().catch(() => undefined) : undefined;
         calls.push({ url: request.url, body });
+        const initializationSessionResponse = mockInitializationSessionResponse(request, body, initializationSessions);
+        if (initializationSessionResponse) {
+          return initializationSessionResponse;
+        }
 
         if (request.url === "http://data-service/v1/message-context/resolve") {
           return Response.json({
@@ -1434,6 +1611,7 @@ describe("bot-host server", () => {
 
   it("routes allowed initializing admin messages through init conversation", async () => {
     const calls: Array<{ url: string; body: unknown }> = [];
+    const initializationSessions = new Map<string, MockInitializationSession>();
     const server = createBotHostServer({
       dataServiceUrl: "http://data-service",
       llmRunnerUrl: "http://llm-runner",
@@ -1441,8 +1619,12 @@ describe("bot-host server", () => {
         if (!(request instanceof Request)) {
           throw new Error("expected Request");
         }
-        const body = request.method === "POST" ? await request.json() : undefined;
+        const body = request.method === "POST" || request.method === "PUT" ? await request.json() : undefined;
         calls.push({ url: request.url, body });
+        const initializationSessionResponse = mockInitializationSessionResponse(request, body, initializationSessions);
+        if (initializationSessionResponse) {
+          return initializationSessionResponse;
+        }
 
         if (request.url === "http://data-service/v1/message-context/resolve") {
           return Response.json({
@@ -1497,6 +1679,8 @@ describe("bot-host server", () => {
     expect(payload.output).toContain("回复编号或直接输入。");
     expect(calls.map((call) => call.url)).toEqual([
       "http://data-service/v1/message-context/resolve",
+      "http://data-service/internal/initialization-sessions/active?bot_id=prd-bot&wecom_user_id=admin-a&conversation_id=conv-init",
+      "http://data-service/internal/initialization-sessions",
     ]);
   });
 
@@ -2438,6 +2622,7 @@ describe("bot-host server", () => {
   it("runs the full real wecom worker flow from admin claim through initialization and normal chat", async () => {
     const calls: Array<{ url: string; body: unknown }> = [];
     const sent: Array<{ conversationId: string; text: string; finish: boolean }> = [];
+    const initializationSessions = new Map<string, MockInitializationSession>();
     let botStatus: "unclaimed" | "initializing" | "ready" = "unclaimed";
     let configDocumentWrites = 0;
     let messageHandler:
@@ -2458,8 +2643,12 @@ describe("bot-host server", () => {
         if (!(request instanceof Request)) {
           throw new Error("expected Request");
         }
-        const body = request.method === "POST" ? await request.json().catch(() => undefined) : undefined;
+        const body = request.method === "POST" || request.method === "PUT" ? await request.json().catch(() => undefined) : undefined;
         calls.push({ url: request.url, body });
+        const initializationSessionResponse = mockInitializationSessionResponse(request, body, initializationSessions);
+        if (initializationSessionResponse) {
+          return initializationSessionResponse;
+        }
 
         if (request.url === "http://data-service/v1/bots/prd-bot/admin/claim/verify") {
           expect(body).toEqual({
@@ -2707,12 +2896,23 @@ describe("bot-host server", () => {
       text: string;
       options?: { forceActive?: boolean };
     }> = [];
+    const initializationSessions = new Map<string, MockInitializationSession>();
     const worker = createBotHostWorker({
       botId: "prd-bot",
       runtime: "mock",
       dataServiceUrl: "http://data-service",
       llmRunnerUrl: "http://llm-runner",
-      fetch: async () => new Response("not used", { status: 500 }),
+      fetch: async (request) => {
+        if (!(request instanceof Request)) {
+          throw new Error("expected Request");
+        }
+        const body = request.method === "PUT" ? await request.json().catch(() => undefined) : undefined;
+        const initializationSessionResponse = mockInitializationSessionResponse(request, body, initializationSessions);
+        if (initializationSessionResponse) {
+          return initializationSessionResponse;
+        }
+        return Response.json({ error: "unexpected", url: request.url }, { status: 500 });
+      },
       wecomClient: {
         async connect() {},
         disconnect() {},
@@ -2747,6 +2947,7 @@ describe("bot-host server", () => {
 
   it("clears existing wizard progress when initialization is restarted", async () => {
     const sent: Array<{ conversationId: string; text: string }> = [];
+    const initializationSessions = new Map<string, MockInitializationSession>();
     let messageHandler:
       | ((message: {
         conversationId: string;
@@ -2762,6 +2963,11 @@ describe("bot-host server", () => {
       fetch: async (request) => {
         if (!(request instanceof Request)) {
           throw new Error("expected Request");
+        }
+        const body = request.method === "PUT" ? await request.json().catch(() => undefined) : undefined;
+        const initializationSessionResponse = mockInitializationSessionResponse(request, body, initializationSessions);
+        if (initializationSessionResponse) {
+          return initializationSessionResponse;
         }
         if (request.url === "http://data-service/v1/message-context/resolve") {
           return Response.json({
@@ -2812,6 +3018,7 @@ describe("bot-host server", () => {
 
   it("continues an in-memory initialization wizard before ready streaming", async () => {
     const sent: Array<{ conversationId: string; text: string; finish?: boolean }> = [];
+    const initializationSessions = new Map<string, MockInitializationSession>();
     let messageHandler:
       | ((message: {
         conversationId: string;
@@ -2827,6 +3034,11 @@ describe("bot-host server", () => {
       fetch: async (request) => {
         if (!(request instanceof Request)) {
           throw new Error("expected Request");
+        }
+        const body = request.method === "PUT" ? await request.json().catch(() => undefined) : undefined;
+        const initializationSessionResponse = mockInitializationSessionResponse(request, body, initializationSessions);
+        if (initializationSessionResponse) {
+          return initializationSessionResponse;
         }
         if (request.url === "http://data-service/v1/message-context/resolve") {
           return Response.json({

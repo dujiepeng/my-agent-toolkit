@@ -1,3 +1,9 @@
+import {
+  clearInitializationSession,
+  getActiveInitializationSession,
+  type InitializationSessionDto,
+  upsertInitializationSession,
+} from "./botStateClient.js";
 import type { IncomingWeComMessage, WeComClient } from "./wecomClient.js";
 
 export interface BotHostConfig {
@@ -63,6 +69,7 @@ export interface BotHostSupervisorConfig extends BotHostConfig {
 interface WeComMessageInput {
   bot_id: string;
   wecom_user_id: string;
+  conversation_id?: string;
   text: string;
   runtime: "mock" | "kiro";
 }
@@ -107,7 +114,6 @@ interface WizardState {
   generationInProgress?: "soul" | "agents";
 }
 
-const wizardStatesByConfig = new WeakMap<BotHostConfig, Map<string, WizardState>>();
 const pendingBusinessDocumentsByConfig = new WeakMap<BotHostConfig, Map<string, PendingBusinessDocument[]>>();
 const MISSING_GENERATED_DOCUMENTS_MESSAGE = "初始化文档生成失败：没有生成 soul 和 agents.md。请回复“确认”重新生成，或说明需要修改的配置。";
 const MISSING_SOUL_DOCUMENT_MESSAGE = "Soul 生成失败：没有生成 soul。请稍后重试或在 WebUI 重置引导。";
@@ -207,18 +213,25 @@ export function createBotHostWorker(config: BotHostWorkerConfig): BotHostWorker 
     const messageInput = {
       bot_id: config.botId,
       wecom_user_id: input.adminWeComUserId,
+      conversation_id: input.adminWeComUserId,
       text: "",
       runtime: config.runtime,
     };
-    resetWizardStateForUser(messageInput, config);
     let conversationId: string | undefined;
     try {
       const context = await resolveMessageContext(config, messageInput);
       conversationId = context.conversation?.conversation_id;
+      if (conversationId) {
+        await clearInitializationSession(config, {
+          bot_id: messageInput.bot_id,
+          wecom_user_id: messageInput.wecom_user_id,
+          conversation_id: conversationId,
+        });
+      }
     } catch (_error) {
-      conversationId = undefined;
+      conversationId = input.adminWeComUserId;
     }
-    const output = startInitializationWizard(messageInput, config, conversationId);
+    const output = await startInitializationWizard(messageInput, config, conversationId);
     await config.wecomClient.sendText(input.adminWeComUserId, output, { forceActive: true });
     return {
       bot_id: config.botId,
@@ -233,6 +246,7 @@ export function createBotHostWorker(config: BotHostWorkerConfig): BotHostWorker 
       const messageInput = {
         bot_id: config.botId,
         wecom_user_id: message.userId,
+        conversation_id: message.conversationId,
         text: message.text,
         runtime: config.runtime,
       };
@@ -256,7 +270,7 @@ export function createBotHostWorker(config: BotHostWorkerConfig): BotHostWorker 
           });
         return;
       }
-      const wizardGeneration = beginWizardGenerationIfReady(messageInput, config);
+      const wizardGeneration = await beginWizardGenerationIfReady(messageInput, config);
       if (wizardGeneration) {
         await config.wecomClient.sendText(message.conversationId, wizardGeneration.notice);
         if (wizardGeneration.shouldProcess) {
@@ -267,7 +281,7 @@ export function createBotHostWorker(config: BotHostWorkerConfig): BotHostWorker 
               }
             })
             .catch(async (error) => {
-              clearWizardGenerationInProgress(messageInput, config);
+              await clearWizardGenerationInProgress(messageInput, config);
               console.error("[wecom] async initialization failed", error);
               await config.wecomClient.sendText(
                 message.conversationId,
@@ -351,12 +365,15 @@ async function shouldStreamReply(
   if (parseClaimAdminCommand(input.text) || isMarkReadyCommand(input.text)) {
     return false;
   }
-  if (hasWizardStateForUser(input, config)) {
-    return false;
-  }
 
   try {
     const context = await resolveMessageContext(config, input);
+    if (
+      context.reason === "ready"
+      && await hasWizardStateForUser(input, config, context.conversation?.conversation_id).catch(() => false)
+    ) {
+      return false;
+    }
     return context.allowed && context.reason === "ready";
   } catch (_error) {
     return false;
@@ -516,7 +533,7 @@ async function processWeComMessage(
           bot_id: admin.bot_id,
           wecom_user_id: admin.wecom_user_id,
           status: "initializing",
-          output: startInitializationWizard(input, config),
+          output: await startInitializationWizard(input, config),
         };
       } catch (error) {
         return {
@@ -571,7 +588,10 @@ async function processWeComMessage(
       return handleRememberCommand(input, config, context, rememberCommand);
     }
 
-    if (context.reason === "initializing" || hasWizardStateForUser(input, config)) {
+    if (
+      context.reason === "initializing"
+      || input.conversation_id && await hasWizardStateForUser(input, config, context.conversation.conversation_id)
+    ) {
       return handleWizardMessage(input, config, context.conversation.conversation_id);
     }
 
@@ -606,12 +626,12 @@ function buildPrompt(
   ].join("\n");
 }
 
-function startInitializationWizard(
+async function startInitializationWizard(
   input: WeComMessageInput,
   config: BotHostConfig,
   conversationId?: string,
-): string {
-  getWizardStates(config).set(wizardKey(input, conversationId), {
+): Promise<string> {
+  await saveWizardState(config, input, conversationId, {
     phase: "soul",
     soulAnswers: [],
     agentsAnswers: [],
@@ -623,41 +643,34 @@ function startInitializationWizard(
   ].join("\n");
 }
 
-function hasWizardStateForUser(
+async function hasWizardStateForUser(
   input: WeComMessageInput,
   config: BotHostConfig,
-): boolean {
-  const prefix = `${input.bot_id}:${input.wecom_user_id}:`;
-  for (const key of getWizardStates(config).keys()) {
-    if (key.startsWith(prefix)) {
+  conversationId?: string,
+): Promise<boolean> {
+  const candidateIds = wizardConversationCandidates(input, conversationId);
+  if (candidateIds.length === 0) {
+    return false;
+  }
+  for (const candidateId of candidateIds) {
+    if (await loadWizardState(config, input, candidateId)) {
       return true;
     }
   }
   return false;
 }
 
-function findWizardKeyForUser(
+async function beginWizardGenerationIfReady(
   input: WeComMessageInput,
   config: BotHostConfig,
-): string | undefined {
-  const prefix = `${input.bot_id}:${input.wecom_user_id}:`;
-  for (const key of getWizardStates(config).keys()) {
-    if (key.startsWith(prefix)) {
-      return key;
-    }
-  }
-  return undefined;
-}
-
-function beginWizardGenerationIfReady(
-  input: WeComMessageInput,
-  config: BotHostConfig,
-): { notice: string; shouldProcess: boolean } | undefined {
-  const key = findWizardKeyForUser(input, config);
-  if (!key) {
+): Promise<{ notice: string; shouldProcess: boolean } | undefined> {
+  if (parseClaimAdminCommand(input.text) || isMarkReadyCommand(input.text)) {
     return undefined;
   }
-  const state = getWizardStates(config).get(key);
+  const conversationId = await resolveWizardConversationId(config, input);
+  const state = conversationId
+    ? await loadWizardState(config, input, conversationId).catch(() => undefined)
+    : undefined;
   if (!state) {
     return undefined;
   }
@@ -669,26 +682,26 @@ function beginWizardGenerationIfReady(
   }
   if (state.phase === "soul" && state.soulAnswers.length === SOUL_WIZARD_QUESTIONS.length - 1) {
     state.generationInProgress = "soul";
+    await saveWizardState(config, input, conversationId, state);
     return { notice: "Soul 正在生成，请稍等。", shouldProcess: true };
   }
   if (state.phase === "agents" && state.agentsAnswers.length === AGENTS_WIZARD_QUESTIONS.length - 1) {
     state.generationInProgress = "agents";
+    await saveWizardState(config, input, conversationId, state);
     return { notice: "工作方式正在生成，请稍等。", shouldProcess: true };
   }
   return undefined;
 }
 
-function clearWizardGenerationInProgress(
+async function clearWizardGenerationInProgress(
   input: WeComMessageInput,
   config: BotHostConfig,
-): void {
-  const key = findWizardKeyForUser(input, config);
-  if (!key) {
-    return;
-  }
-  const state = getWizardStates(config).get(key);
+): Promise<void> {
+  const conversationId = await resolveWizardConversationId(config, input);
+  const state = conversationId ? await loadWizardState(config, input, conversationId) : undefined;
   if (state) {
     delete state.generationInProgress;
+    await saveWizardState(config, input, conversationId, state);
   }
 }
 
@@ -697,11 +710,7 @@ async function handleWizardMessage(
   config: BotHostConfig,
   conversationId: string,
 ): Promise<Record<string, unknown>> {
-  const wizardStates = getWizardStates(config);
-  const key = wizardStates.has(wizardKey(input, conversationId))
-    ? wizardKey(input, conversationId)
-    : findWizardKeyForUser(input, config) ?? wizardKey(input, conversationId);
-  const state = wizardStates.get(key) ?? {
+  const state = await loadWizardState(config, input, conversationId) ?? {
     phase: "soul" as const,
     soulAnswers: [],
     agentsAnswers: [],
@@ -710,7 +719,7 @@ async function handleWizardMessage(
 
   if (state.phase === "soul") {
     state.soulAnswers.push(normalized);
-    wizardStates.set(key, state);
+    await saveWizardState(config, input, conversationId, state);
     if (state.soulAnswers.length < SOUL_WIZARD_QUESTIONS.length) {
       return {
         conversation_id: conversationId,
@@ -720,6 +729,7 @@ async function handleWizardMessage(
     const result = await generateSoulFromWizardAnswers(config, input, conversationId, state.soulAnswers);
     if (result.output.startsWith("初始化文档生成失败：") || result.output.startsWith("Soul 生成失败：")) {
       delete state.generationInProgress;
+      await saveWizardState(config, input, conversationId, state);
       return {
         conversation_id: conversationId,
         run_id: result.run_id,
@@ -728,7 +738,7 @@ async function handleWizardMessage(
     }
     state.phase = "agents";
     delete state.generationInProgress;
-    wizardStates.set(key, state);
+    await saveWizardState(config, input, conversationId, state);
     return {
       conversation_id: conversationId,
       run_id: result.run_id,
@@ -749,7 +759,7 @@ async function handleWizardMessage(
   }
 
   state.agentsAnswers.push(normalized);
-  wizardStates.set(key, state);
+  await saveWizardState(config, input, conversationId, state);
   if (state.agentsAnswers.length < AGENTS_WIZARD_QUESTIONS.length) {
     return {
       conversation_id: conversationId,
@@ -766,13 +776,14 @@ async function handleWizardMessage(
   );
   if (result.output.startsWith("工作方式生成失败：") || result.output.startsWith("初始化文档生成失败：")) {
     delete state.generationInProgress;
+    await saveWizardState(config, input, conversationId, state);
     return {
       conversation_id: conversationId,
       run_id: result.run_id,
       output: result.output,
     };
   }
-  wizardStates.delete(key);
+  await clearWizardState(config, input, conversationId);
   return {
     conversation_id: conversationId,
     run_id: result.run_id,
@@ -786,28 +797,88 @@ async function handleWizardMessage(
   };
 }
 
-function wizardKey(input: WeComMessageInput, conversationId?: string): string {
-  return `${input.bot_id}:${input.wecom_user_id}:${conversationId ?? "pending"}`;
-}
-
-function resetWizardStateForUser(input: WeComMessageInput, config: BotHostConfig): void {
-  const prefix = `${input.bot_id}:${input.wecom_user_id}:`;
-  const wizardStates = getWizardStates(config);
-  for (const key of wizardStates.keys()) {
-    if (key.startsWith(prefix)) {
-      wizardStates.delete(key);
+async function loadWizardState(
+  config: BotHostConfig,
+  input: WeComMessageInput,
+  conversationId: string,
+): Promise<WizardState | undefined> {
+  const candidateIds = wizardConversationCandidates(input, conversationId);
+  for (const candidateId of candidateIds) {
+    const session = await getActiveInitializationSession(config, {
+      bot_id: input.bot_id,
+      wecom_user_id: input.wecom_user_id,
+      conversation_id: candidateId,
+    });
+    if (session) {
+      return wizardStateFromDto(session);
     }
   }
+  return undefined;
 }
 
-function getWizardStates(config: BotHostConfig): Map<string, WizardState> {
-  const existing = wizardStatesByConfig.get(config);
-  if (existing) {
-    return existing;
+async function saveWizardState(
+  config: BotHostConfig,
+  input: WeComMessageInput,
+  conversationId: string | undefined,
+  state: WizardState,
+): Promise<void> {
+  await upsertInitializationSession(config, {
+    bot_id: input.bot_id,
+    wecom_user_id: input.wecom_user_id,
+    conversation_id: conversationId ?? input.conversation_id ?? "pending",
+    phase: state.phase,
+    soul_answers: state.soulAnswers,
+    agents_answers: state.agentsAnswers,
+    generation_in_progress: state.generationInProgress,
+    status: "active",
+  });
+}
+
+async function clearWizardState(
+  config: BotHostConfig,
+  input: WeComMessageInput,
+  conversationId: string,
+): Promise<void> {
+  for (const candidateId of wizardConversationCandidates(input, conversationId)) {
+    await clearInitializationSession(config, {
+      bot_id: input.bot_id,
+      wecom_user_id: input.wecom_user_id,
+      conversation_id: candidateId,
+    });
   }
-  const created = new Map<string, WizardState>();
-  wizardStatesByConfig.set(config, created);
-  return created;
+}
+
+function wizardConversationCandidates(
+  input: WeComMessageInput,
+  conversationId?: string,
+): string[] {
+  return [
+    conversationId,
+    input.conversation_id,
+  ].filter((candidate, index, candidates): candidate is string =>
+    typeof candidate === "string" && candidate.length > 0 && candidates.indexOf(candidate) === index
+  );
+}
+
+function wizardStateFromDto(session: InitializationSessionDto): WizardState {
+  return {
+    phase: session.phase,
+    soulAnswers: [...session.soul_answers],
+    agentsAnswers: [...session.agents_answers],
+    generationInProgress: session.generation_in_progress,
+  };
+}
+
+async function resolveWizardConversationId(
+  config: BotHostConfig,
+  input: WeComMessageInput,
+): Promise<string | undefined> {
+  try {
+    const context = await resolveMessageContext(config, input);
+    return context.conversation?.conversation_id ?? input.conversation_id;
+  } catch (_error) {
+    return input.conversation_id;
+  }
 }
 
 function getPendingBusinessDocuments(config: BotHostConfig): Map<string, PendingBusinessDocument[]> {
