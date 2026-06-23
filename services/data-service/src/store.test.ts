@@ -177,6 +177,61 @@ describe("data-service store", () => {
     })).toBeUndefined();
   });
 
+  it("does not collide initialization session keys with delimiter-containing ids", () => {
+    const store = createDataStore();
+    store.createBot({ bot_id: "bot:a", name: "Bot A", runtime: "kiro" });
+    store.createBot({ bot_id: "bot", name: "Bot", runtime: "kiro" });
+
+    const first = store.upsertInitializationSession({
+      bot_id: "bot:a",
+      wecom_user_id: "user",
+      conversation_id: "conv",
+      phase: "soul",
+      soul_answers: ["first"],
+      agents_answers: [],
+      status: "active",
+    });
+    const second = store.upsertInitializationSession({
+      bot_id: "bot",
+      wecom_user_id: "a:user",
+      conversation_id: "conv",
+      phase: "agents",
+      soul_answers: ["second"],
+      agents_answers: ["agent"],
+      status: "active",
+    });
+
+    expect(second.session_id).not.toBe(first.session_id);
+    expect(store.getActiveInitializationSession({
+      bot_id: "bot:a",
+      wecom_user_id: "user",
+      conversation_id: "conv",
+    })).toEqual(first);
+    expect(store.getActiveInitializationSession({
+      bot_id: "bot",
+      wecom_user_id: "a:user",
+      conversation_id: "conv",
+    })).toEqual(second);
+  });
+
+  it("rejects invalid initialization generation progress when provided", () => {
+    const store = createDataStore();
+    store.createBot({ bot_id: "prd-bot", name: "PRD Bot", runtime: "kiro" });
+
+    expect(() => store.upsertInitializationSession({
+      bot_id: "prd-bot",
+      wecom_user_id: "admin-a",
+      conversation_id: "conv-a",
+      phase: "soul",
+      soul_answers: [],
+      agents_answers: [],
+      generation_in_progress: "",
+      status: "active",
+    } as unknown as Parameters<typeof store.upsertInitializationSession>[0])).toThrow(
+      "generation_in_progress is invalid",
+    );
+  });
+
   it("creates versioned business documents and rejects bot config document titles", () => {
     const store = createDataStore();
 

@@ -833,7 +833,7 @@ export function createDataStore(options: DataStoreOptions = {}): DataStore {
         phase: requireInitializationPhase(input.phase),
         soul_answers: normalizeAnswerArray(input.soul_answers, "soul_answers"),
         agents_answers: normalizeAnswerArray(input.agents_answers, "agents_answers"),
-        ...(input.generation_in_progress
+        ...(input.generation_in_progress !== undefined
           ? { generation_in_progress: requireInitializationGenerationInProgress(input.generation_in_progress) }
           : {}),
         status: requireInitializationSessionStatus(input.status),
@@ -1332,11 +1332,11 @@ export function normalizeAnswerArray(value: string[], field: string): string[] {
 export function initializationSessionKey(
   input: InitializationSessionKeyInput,
 ): string {
-  return [
+  return JSON.stringify([
     requireText(input.bot_id, "bot_id"),
     requireText(input.wecom_user_id, "wecom_user_id"),
     requireText(input.conversation_id, "conversation_id"),
-  ].join(":");
+  ]);
 }
 
 export function hashClaimCode(code: string): string {

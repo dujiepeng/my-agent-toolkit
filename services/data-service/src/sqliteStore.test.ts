@@ -514,4 +514,48 @@ describe("sqlite data store", () => {
     })).toBeUndefined();
     second.close?.();
   });
+
+  it("does not collide persisted initialization session keys with delimiter-containing ids", () => {
+    const dir = mkdtempSync(join(tmpdir(), "data-service-"));
+    dirs.push(dir);
+    const dbPath = join(dir, "data.db");
+
+    const firstStore = createSqliteDataStore(dbPath);
+    firstStore.createBot({ bot_id: "bot:a", name: "Bot A", runtime: "kiro" });
+    firstStore.createBot({ bot_id: "bot", name: "Bot", runtime: "kiro" });
+    const first = firstStore.upsertInitializationSession({
+      bot_id: "bot:a",
+      wecom_user_id: "user",
+      conversation_id: "conv",
+      phase: "soul",
+      soul_answers: ["first"],
+      agents_answers: [],
+      status: "active",
+    });
+    const second = firstStore.upsertInitializationSession({
+      bot_id: "bot",
+      wecom_user_id: "a:user",
+      conversation_id: "conv",
+      phase: "agents",
+      soul_answers: ["second"],
+      agents_answers: ["agent"],
+      status: "active",
+    });
+    firstStore.close?.();
+
+    expect(second.session_id).not.toBe(first.session_id);
+
+    const secondStore = createSqliteDataStore(dbPath);
+    expect(secondStore.getActiveInitializationSession({
+      bot_id: "bot:a",
+      wecom_user_id: "user",
+      conversation_id: "conv",
+    })).toEqual(first);
+    expect(secondStore.getActiveInitializationSession({
+      bot_id: "bot",
+      wecom_user_id: "a:user",
+      conversation_id: "conv",
+    })).toEqual(second);
+    secondStore.close?.();
+  });
 });

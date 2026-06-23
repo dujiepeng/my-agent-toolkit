@@ -1449,7 +1449,7 @@ function upsertInitializationSession(
     phase: requireInitializationPhase(input.phase),
     soul_answers: normalizeAnswerArray(input.soul_answers, "soul_answers"),
     agents_answers: normalizeAnswerArray(input.agents_answers, "agents_answers"),
-    ...(input.generation_in_progress
+    ...(input.generation_in_progress !== undefined
       ? { generation_in_progress: requireInitializationGenerationInProgress(input.generation_in_progress) }
       : {}),
     status: requireInitializationSessionStatus(input.status),
