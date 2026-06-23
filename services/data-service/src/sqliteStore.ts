@@ -15,6 +15,7 @@ import {
   nextIsoTimestamp,
   normalizeAnswerArray,
   normalizeRuntimeConfigOptions,
+  normalizeRuntimeConfigStream,
   optionalText,
   requireBotConfigDocumentTitle,
   requireBotStatus,
@@ -618,7 +619,7 @@ function upsertRuntimeConfig(
   const record: RuntimeConfigRecord = {
     bot_id: bot.bot_id,
     provider: requireText(input.provider, "provider"),
-    stream: input.stream ?? true,
+    stream: normalizeRuntimeConfigStream(input.stream),
     options: normalizeRuntimeConfigOptions(input.options),
     created_at: existing?.created_at ?? now,
     updated_at: now,

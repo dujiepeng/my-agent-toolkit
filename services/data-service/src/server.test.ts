@@ -281,6 +281,35 @@ describe("data-service server", () => {
     });
   });
 
+  it("rejects non-boolean runtime config stream over HTTP", async () => {
+    const server = createDataServiceServer();
+    await server.fetch(
+      new Request("http://localhost/v1/bots", {
+        method: "POST",
+        body: JSON.stringify({
+          bot_id: "prd-bot",
+          name: "PRD Bot",
+          runtime: "kiro",
+        }),
+      }),
+    );
+
+    const response = await server.fetch(
+      new Request("http://localhost/internal/bots/prd-bot/runtime-config", {
+        method: "PUT",
+        body: JSON.stringify({
+          provider: "codex",
+          stream: "false",
+        }),
+      }),
+    );
+
+    expect(response.status).toBe(400);
+    await expect(response.json()).resolves.toEqual({
+      error: "stream must be a boolean",
+    });
+  });
+
   it("lists internal wecom runtime bot configs with secrets", async () => {
     const server = createDataServiceServer();
     await server.fetch(

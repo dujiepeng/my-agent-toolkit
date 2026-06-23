@@ -721,7 +721,7 @@ export function createDataStore(options: DataStoreOptions = {}): DataStore {
       const record: RuntimeConfigRecord = {
         bot_id: bot.bot_id,
         provider: requireText(input.provider, "provider"),
-        stream: input.stream ?? true,
+        stream: normalizeRuntimeConfigStream(input.stream),
         options: normalizeRuntimeConfigOptions(input.options),
         created_at: existing?.created_at ?? now,
         updated_at: now,
@@ -1523,6 +1523,16 @@ export function normalizeRuntimeConfigOptions(
   }
   assertJsonValue(value);
   return JSON.parse(JSON.stringify(value)) as Record<string, unknown>;
+}
+
+export function normalizeRuntimeConfigStream(value: unknown): boolean {
+  if (value === undefined) {
+    return true;
+  }
+  if (typeof value !== "boolean") {
+    throw new Error("stream must be a boolean");
+  }
+  return value;
 }
 
 export function defaultRuntimeConfig(bot: BotRecord): RuntimeConfigRecord {

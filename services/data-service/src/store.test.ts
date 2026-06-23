@@ -184,6 +184,16 @@ describe("data-service store", () => {
     })).toThrow("options must be JSON-serializable");
   });
 
+  it("rejects non-boolean runtime config stream values", () => {
+    const store = createDataStore();
+    store.createBot({ bot_id: "prd-bot", name: "PRD Bot", runtime: "kiro" });
+
+    expect(() => store.upsertRuntimeConfig("prd-bot", {
+      provider: "codex",
+      stream: "false" as unknown as boolean,
+    })).toThrow("stream must be a boolean");
+  });
+
   it("upserts and clears active initialization sessions", () => {
     const store = createDataStore();
     store.createBot({ bot_id: "prd-bot", name: "PRD Bot", runtime: "kiro" });

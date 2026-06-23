@@ -182,6 +182,21 @@ describe("sqlite data store", () => {
     second.close?.();
   });
 
+  it("rejects non-boolean runtime config stream values", () => {
+    const dir = mkdtempSync(join(tmpdir(), "data-service-"));
+    dirs.push(dir);
+    const dbPath = join(dir, "data.db");
+
+    const store = createSqliteDataStore(dbPath);
+    store.createBot({ bot_id: "prd-bot", name: "PRD Bot", runtime: "kiro" });
+
+    expect(() => store.upsertRuntimeConfig("prd-bot", {
+      provider: "codex",
+      stream: "false" as unknown as boolean,
+    })).toThrow("stream must be a boolean");
+    store.close?.();
+  });
+
   it("persists pending generated documents across store instances", () => {
     const dir = mkdtempSync(join(tmpdir(), "data-service-"));
     dirs.push(dir);
