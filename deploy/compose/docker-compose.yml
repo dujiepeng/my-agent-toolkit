@@ -1,0 +1,179 @@
+services:
+  control-api:
+    build:
+      context: ../..
+      dockerfile: services/control-api/Dockerfile
+    environment:
+      PORT: "8600"
+      DATA_SERVICE_URL: "http://data-service:8300"
+      LOG_SERVICE_URL: "http://log-service:8500"
+      BOT_HOST_URL: "${BOT_HOST_URL:-http://bot-api:8400}"
+    ports:
+      - "8600:8600"
+    depends_on:
+      data-service:
+        condition: service_healthy
+      log-service:
+        condition: service_healthy
+      bot-api:
+        condition: service_healthy
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "node",
+          "-e",
+          "fetch('http://127.0.0.1:8600/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
+        ]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 5s
+
+  bot-api:
+    build:
+      context: ../..
+      dockerfile: services/bot-host/Dockerfile
+    command: ["node", "services/bot-host/dist/botApiMain.js"]
+    environment:
+      PORT: "8400"
+      DATA_SERVICE_URL: "http://data-service:8300"
+      LLM_RUNNER_URL: "http://llm-runner:8200"
+      LOG_SERVICE_URL: "http://log-service:8500"
+    ports:
+      - "8400:8400"
+    depends_on:
+      data-service:
+        condition: service_healthy
+      llm-runner:
+        condition: service_healthy
+      log-service:
+        condition: service_healthy
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "node",
+          "-e",
+          "fetch('http://127.0.0.1:8400/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
+        ]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 5s
+
+  wecom-worker:
+    profiles:
+      - wecom
+    build:
+      context: ../..
+      dockerfile: services/bot-host/Dockerfile
+    command: ["node", "services/bot-host/dist/wecomWorkerMain.js"]
+    environment:
+      PORT: "8401"
+      WECOM_ENABLED: "true"
+      WECOM_RUNTIME_SYNC_INTERVAL_MS: "5000"
+      DATA_SERVICE_URL: "http://data-service:8300"
+      LLM_RUNNER_URL: "http://llm-runner:8200"
+      LOG_SERVICE_URL: "http://log-service:8500"
+    ports:
+      - "8401:8401"
+    depends_on:
+      data-service:
+        condition: service_healthy
+      llm-runner:
+        condition: service_healthy
+      log-service:
+        condition: service_healthy
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "node",
+          "-e",
+          "fetch('http://127.0.0.1:8401/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
+        ]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 5s
+
+  data-service:
+    build:
+      context: ../..
+      dockerfile: services/data-service/Dockerfile
+    environment:
+      PORT: "8300"
+      DATA_SERVICE_DB_PATH: "/data/data-service.db"
+    ports:
+      - "8300:8300"
+    volumes:
+      - data-service-data:/data
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "node",
+          "-e",
+          "fetch('http://127.0.0.1:8300/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
+        ]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 5s
+
+  log-service:
+    build:
+      context: ../..
+      dockerfile: services/log-service/Dockerfile
+    environment:
+      PORT: "8500"
+      LOG_SERVICE_DB_PATH: "/data/log-service.db"
+    ports:
+      - "8500:8500"
+    volumes:
+      - log-service-data:/data
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "node",
+          "-e",
+          "fetch('http://127.0.0.1:8500/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
+        ]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 5s
+
+  llm-runner:
+    build:
+      context: ../..
+      dockerfile: services/llm-runner/Dockerfile
+    environment:
+      PORT: "8200"
+      LLM_RUNNER_ENABLED_RUNTIMES: "mock,kiro"
+      KIRO_COMMAND: "node"
+      KIRO_ARGS: "services/llm-runner/scripts/kiro-relay-cli.mjs chat --no-interactive --trust-all-tools"
+      KIRO_RELAY_URL: "http://host.docker.internal:8210/v1/kiro/chat"
+      KIRO_RELAY_STREAM: "true"
+      KIRO_RELAY_STREAM_URL: "http://host.docker.internal:8210/v1/kiro/chat/stream"
+      KIRO_TIMEOUT_MS: "120000"
+    ports:
+      - "8200:8200"
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "node",
+          "-e",
+          "fetch('http://127.0.0.1:8200/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
+        ]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 5s
+
+volumes:
+  data-service-data:
+  log-service-data:

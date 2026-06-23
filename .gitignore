@@ -1,4 +1,7 @@
 node_modules/
 dist/
+**/dist/
+*.tsbuildinfo
 .DS_Store
 *.log
+deploy/compose/.env.wecom
