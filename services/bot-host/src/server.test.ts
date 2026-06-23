@@ -308,6 +308,219 @@ describe("bot-host server", () => {
     expect(payload.output).not.toContain("我需要一个语音转文字的api");
   });
 
+  it("asks for confirmation before storing generated non-config markdown documents", async () => {
+    const calls: Array<{ url: string; method: string; body: unknown }> = [];
+    const server = createBotHostServer({
+      dataServiceUrl: "http://data-service",
+      llmRunnerUrl: "http://llm-runner",
+      fetch: async (request) => {
+        if (!(request instanceof Request)) {
+          throw new Error("expected Request");
+        }
+        const body = request.method === "POST" || request.method === "PATCH" ? await request.json() : undefined;
+        calls.push({ url: request.url, method: request.method, body });
+
+        if (request.url === "http://data-service/v1/message-context/resolve") {
+          return Response.json({
+            allowed: true,
+            reason: "ready",
+            bot_id: body.bot_id,
+            wecom_user_id: body.wecom_user_id,
+            conversation: {
+              conversation_id: "conv-1",
+            },
+          });
+        }
+
+        if (request.url.startsWith("http://data-service/v1/bots/") && request.url.endsWith("/config-documents")) {
+          return Response.json([]);
+        }
+
+        if (request.url.startsWith("http://data-service/v1/memory-documents/current?")) {
+          return Response.json([]);
+        }
+
+        if (request.url === "http://llm-runner/v1/chat") {
+          return Response.json({
+            run_id: "run-doc",
+            output: [
+              "PRD 已生成。",
+              "~document:prd/asr-api.md",
+              "# 语音转文字 API PRD",
+              "## 背景",
+              "提供 ASR 能力。",
+              "~/document",
+            ].join("\n"),
+          });
+        }
+
+        if (request.url === "http://data-service/internal/documents?scope=bot&owner_id=prd-bot") {
+          return Response.json([]);
+        }
+
+        if (request.url === "http://data-service/internal/documents") {
+          return Response.json({
+            document_id: "doc-1",
+            version: 1,
+          }, { status: 201 });
+        }
+
+        return Response.json({ error: "unexpected" }, { status: 500 });
+      },
+    });
+
+    const first = await server.fetch(
+      new Request("http://localhost/v1/messages/wecom", {
+        method: "POST",
+        body: JSON.stringify({
+          bot_id: "prd-bot",
+          wecom_user_id: "user-a",
+          text: "生成 PRD",
+          runtime: "mock",
+        }),
+      }),
+    );
+
+    expect(first.status).toBe(200);
+    const firstPayload = await first.json() as { output: string };
+    expect(firstPayload.output).toContain("PRD 已生成。");
+    expect(firstPayload.output).toContain("# 语音转文字 API PRD");
+    expect(firstPayload.output).toContain("回复“确认”后保存到长期文档存储");
+    expect(calls.map((call) => call.url)).not.toContain("http://data-service/internal/documents");
+
+    const second = await server.fetch(
+      new Request("http://localhost/v1/messages/wecom", {
+        method: "POST",
+        body: JSON.stringify({
+          bot_id: "prd-bot",
+          wecom_user_id: "user-a",
+          text: "确认",
+          runtime: "mock",
+        }),
+      }),
+    );
+
+    expect(second.status).toBe(200);
+    const secondPayload = await second.json() as { output: string };
+    expect(secondPayload.output).toBe("已保存到长期文档存储：prd/asr-api.md v1。");
+    expect(calls.find((call) => call.url === "http://data-service/internal/documents")).toMatchObject({
+      method: "POST",
+      body: {
+        scope: "bot",
+        owner_id: "prd-bot",
+        title: "prd/asr-api.md",
+        doc_type: "markdown",
+        content: "# 语音转文字 API PRD\n## 背景\n提供 ASR 能力。",
+        created_by_bot_id: "prd-bot",
+        created_by_user_id: "user-a",
+        source_type: "document",
+        tags: ["generated", "pending-confirmed"],
+      },
+    });
+  });
+
+  it("updates an existing generated markdown document version after confirmation", async () => {
+    const calls: Array<{ url: string; method: string; body: unknown }> = [];
+    const server = createBotHostServer({
+      dataServiceUrl: "http://data-service",
+      llmRunnerUrl: "http://llm-runner",
+      fetch: async (request) => {
+        if (!(request instanceof Request)) {
+          throw new Error("expected Request");
+        }
+        const body = request.method === "POST" || request.method === "PATCH" ? await request.json() : undefined;
+        calls.push({ url: request.url, method: request.method, body });
+
+        if (request.url === "http://data-service/v1/message-context/resolve") {
+          return Response.json({
+            allowed: true,
+            reason: "ready",
+            bot_id: body.bot_id,
+            wecom_user_id: body.wecom_user_id,
+            conversation: {
+              conversation_id: "conv-1",
+            },
+          });
+        }
+
+        if (request.url.startsWith("http://data-service/v1/bots/") && request.url.endsWith("/config-documents")) {
+          return Response.json([]);
+        }
+
+        if (request.url.startsWith("http://data-service/v1/memory-documents/current?")) {
+          return Response.json([]);
+        }
+
+        if (request.url === "http://llm-runner/v1/chat") {
+          return Response.json({
+            run_id: "run-doc",
+            output: [
+              "~document:prd/asr-api.md",
+              "# 语音转文字 API PRD",
+              "第二版内容。",
+              "~/document",
+            ].join("\n"),
+          });
+        }
+
+        if (request.url === "http://data-service/internal/documents?scope=bot&owner_id=prd-bot") {
+          return Response.json([
+            {
+              document_id: "doc-existing",
+              title: "prd/asr-api.md",
+              version: 1,
+            },
+          ]);
+        }
+
+        if (request.url === "http://data-service/internal/documents/doc-existing") {
+          return Response.json({
+            document_id: "doc-existing",
+            version: 2,
+          });
+        }
+
+        return Response.json({ error: "unexpected" }, { status: 500 });
+      },
+    });
+
+    await server.fetch(
+      new Request("http://localhost/v1/messages/wecom", {
+        method: "POST",
+        body: JSON.stringify({
+          bot_id: "prd-bot",
+          wecom_user_id: "user-a",
+          text: "更新 PRD",
+          runtime: "mock",
+        }),
+      }),
+    );
+
+    const response = await server.fetch(
+      new Request("http://localhost/v1/messages/wecom", {
+        method: "POST",
+        body: JSON.stringify({
+          bot_id: "prd-bot",
+          wecom_user_id: "user-a",
+          text: "确认",
+          runtime: "mock",
+        }),
+      }),
+    );
+
+    expect(response.status).toBe(200);
+    const payload = await response.json() as { output: string };
+    expect(payload.output).toBe("已保存到长期文档存储：prd/asr-api.md v2。");
+    expect(calls.find((call) => call.url === "http://data-service/internal/documents/doc-existing")).toMatchObject({
+      method: "PATCH",
+      body: {
+        content: "# 语音转文字 API PRD\n第二版内容。",
+        change_summary: "用户确认后更新文档",
+      },
+    });
+    expect(calls.map((call) => call.url)).not.toContain("http://data-service/internal/documents");
+  });
+
   it("records successful chat events with memory refs", async () => {
     const calls: Array<{ url: string; body: unknown }> = [];
     const server = createBotHostServer({
@@ -1768,6 +1981,123 @@ describe("bot-host server", () => {
     expect(sent[0]).toEqual({ conversationId: "conversation-a", text: "正在思考...", finish: false });
     expect(sent.slice(1, -1).map((item) => item.text)).toEqual([]);
     expect(sent.at(-1)).toEqual({ conversationId: "conversation-a", text: "hello", finish: true });
+  });
+
+  it("asks for confirmation before storing generated markdown documents from streaming workers", async () => {
+    const sent: Array<{ conversationId: string; text: string; finish: boolean }> = [];
+    const calls: Array<{ url: string; method: string; body: unknown }> = [];
+    let messageHandler:
+      | ((message: {
+        conversationId: string;
+        userId: string;
+        text: string;
+      }) => Promise<void>)
+      | undefined;
+    const worker = createBotHostWorker({
+      botId: "prd-bot",
+      runtime: "kiro",
+      dataServiceUrl: "http://data-service",
+      llmRunnerUrl: "http://llm-runner",
+      fetch: async (request) => {
+        if (!(request instanceof Request)) {
+          throw new Error("expected Request");
+        }
+        const body = request.method === "POST" || request.method === "PATCH"
+          ? await request.json().catch(() => undefined)
+          : undefined;
+        calls.push({ url: request.url, method: request.method, body });
+
+        if (request.url === "http://data-service/v1/message-context/resolve") {
+          return Response.json({
+            allowed: true,
+            reason: "ready",
+            conversation: {
+              conversation_id: "conv-1",
+            },
+          });
+        }
+
+        if (request.url.startsWith("http://data-service/v1/bots/") && request.url.endsWith("/config-documents")) {
+          return Response.json([]);
+        }
+
+        if (request.url.startsWith("http://data-service/v1/memory-documents/current?")) {
+          return Response.json([]);
+        }
+
+        if (request.url === "http://llm-runner/v1/chat/stream") {
+          return new Response([
+            JSON.stringify({ type: "run", run_id: "run-1" }),
+            JSON.stringify({ type: "chunk", content: "PRD 已生成。\n" }),
+            JSON.stringify({ type: "chunk", content: "~document:prd/asr-api.md\n# ASR PRD\n内容。\n~/document" }),
+            JSON.stringify({ type: "done" }),
+          ].join("\n") + "\n", {
+            headers: { "content-type": "application/x-ndjson" },
+          });
+        }
+
+        if (request.url === "http://data-service/internal/documents?scope=bot&owner_id=prd-bot") {
+          return Response.json([]);
+        }
+
+        if (request.url === "http://data-service/internal/documents") {
+          return Response.json({
+            document_id: "doc-1",
+            version: 1,
+          }, { status: 201 });
+        }
+
+        if (request.url === "http://log-service/v1/chat-events") {
+          return Response.json({ ok: true }, { status: 201 });
+        }
+
+        return Response.json({ error: "unexpected" }, { status: 500 });
+      },
+      logServiceUrl: "http://log-service",
+      wecomClient: {
+        async connect() {},
+        disconnect() {},
+        onMessage(handler) {
+          messageHandler = handler;
+        },
+        async sendText(conversationId, text, options) {
+          sent.push({ conversationId, text, finish: options?.finish ?? true });
+        },
+      },
+    });
+
+    await worker.start();
+    await messageHandler?.({
+      conversationId: "conversation-a",
+      userId: "user-a",
+      text: "生成 PRD",
+    });
+
+    expect(sent.at(-1)?.text).toContain("# ASR PRD");
+    expect(sent.at(-1)?.text).toContain("回复“确认”后保存到长期文档存储");
+    expect(calls.map((call) => call.url)).not.toContain("http://data-service/internal/documents");
+
+    await messageHandler?.({
+      conversationId: "conversation-a",
+      userId: "user-a",
+      text: "确认",
+    });
+
+    expect(sent.at(-1)).toEqual({
+      conversationId: "conversation-a",
+      text: "已保存到长期文档存储：prd/asr-api.md v1。",
+      finish: true,
+    });
+    expect(calls.find((call) => call.url === "http://data-service/internal/documents")).toMatchObject({
+      method: "POST",
+      body: {
+        scope: "bot",
+        owner_id: "prd-bot",
+        title: "prd/asr-api.md",
+        doc_type: "markdown",
+        content: "# ASR PRD\n内容。",
+      },
+    });
   });
 
   it("presentation-streams a single upstream chunk without per-character wecom updates", async () => {

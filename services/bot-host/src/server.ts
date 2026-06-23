@@ -82,10 +82,16 @@ interface ScopedMemoryDocument extends MemoryDocument {
 interface ProcessedOutput {
   visibleOutput: string;
   configDocuments: ConfigDocument[];
+  pendingDocuments?: PendingBusinessDocument[];
 }
 
 interface ConfigDocument {
   title: "soul" | "agents.md";
+  content: string;
+}
+
+interface PendingBusinessDocument {
+  title: string;
   content: string;
 }
 
@@ -102,6 +108,7 @@ interface WizardState {
 }
 
 const wizardStatesByConfig = new WeakMap<BotHostConfig, Map<string, WizardState>>();
+const pendingBusinessDocumentsByConfig = new WeakMap<BotHostConfig, Map<string, PendingBusinessDocument[]>>();
 const MISSING_GENERATED_DOCUMENTS_MESSAGE = "初始化文档生成失败：没有生成 soul 和 agents.md。请回复“确认”重新生成，或说明需要修改的配置。";
 const MISSING_SOUL_DOCUMENT_MESSAGE = "Soul 生成失败：没有生成 soul。请稍后重试或在 WebUI 重置引导。";
 const MISSING_AGENTS_DOCUMENT_MESSAGE = "工作方式生成失败：没有生成 agents.md。请稍后重试或在 WebUI 重置引导。";
@@ -801,6 +808,20 @@ function getWizardStates(config: BotHostConfig): Map<string, WizardState> {
   return created;
 }
 
+function getPendingBusinessDocuments(config: BotHostConfig): Map<string, PendingBusinessDocument[]> {
+  const existing = pendingBusinessDocumentsByConfig.get(config);
+  if (existing) {
+    return existing;
+  }
+  const created = new Map<string, PendingBusinessDocument[]>();
+  pendingBusinessDocumentsByConfig.set(config, created);
+  return created;
+}
+
+function pendingBusinessDocumentKey(input: WeComMessageInput, conversationId: string): string {
+  return `${input.bot_id}:${input.wecom_user_id}:${conversationId}`;
+}
+
 async function processAllowedWeComMessage(
   input: WeComMessageInput,
   config: BotHostConfig,
@@ -814,6 +835,15 @@ async function processAllowedWeComMessage(
   status?: string;
 }> {
   const resolvedConversationId = conversationId ?? await resolveAllowedConversationId(config, input);
+  const pendingDocumentResult = await handlePendingBusinessDocumentConfirmation(
+    config,
+    input,
+    resolvedConversationId,
+  );
+  if (pendingDocumentResult) {
+    return pendingDocumentResult;
+  }
+
   const memoryDocuments = await listPromptMemoryDocuments(
     config,
     input,
@@ -833,6 +863,12 @@ async function processAllowedWeComMessage(
   });
 
   const processed = await processAssistantOutput(config, input, result.output);
+  if (processed.pendingDocuments && processed.pendingDocuments.length > 0) {
+    getPendingBusinessDocuments(config).set(
+      pendingBusinessDocumentKey(input, resolvedConversationId),
+      processed.pendingDocuments,
+    );
+  }
   const output = selectVisibleAssistantOutput(input.text, result.output, processed);
   await recordChatEvent(
     config,
@@ -854,6 +890,96 @@ async function processAllowedWeComMessage(
       }
       : {}),
   };
+}
+
+async function handlePendingBusinessDocumentConfirmation(
+  config: BotHostConfig,
+  input: WeComMessageInput,
+  conversationId: string,
+): Promise<{
+  conversation_id: string;
+  run_id: string;
+  output: string;
+} | undefined> {
+  const pendingDocuments = getPendingBusinessDocuments(config);
+  const key = pendingBusinessDocumentKey(input, conversationId);
+  const documents = pendingDocuments.get(key);
+  if (!documents || documents.length === 0) {
+    return undefined;
+  }
+
+  if (!isConfirmAnswer(input.text)) {
+    return undefined;
+  }
+
+  pendingDocuments.delete(key);
+  const saved = [];
+  for (const document of documents) {
+    saved.push(await saveBusinessDocument(config, input, document));
+  }
+
+  return {
+    conversation_id: conversationId,
+    run_id: `document_save_${crypto.randomUUID()}`,
+    output: saved
+      .map((document) => `已保存到长期文档存储：${document.title} v${document.version}。`)
+      .join("\n"),
+  };
+}
+
+async function saveBusinessDocument(
+  config: BotHostConfig,
+  input: WeComMessageInput,
+  document: PendingBusinessDocument,
+): Promise<{ title: string; version: number }> {
+  const existing = await findExistingBusinessDocument(config, input.bot_id, document.title);
+  if (existing) {
+    const updated = await postJson<{ version: number }>(
+      config,
+      `${config.dataServiceUrl}/internal/documents/${encodeURIComponent(existing.document_id)}`,
+      {
+        content: document.content,
+        change_summary: "用户确认后更新文档",
+      },
+      "PATCH",
+    );
+    return {
+      title: document.title,
+      version: updated.version,
+    };
+  }
+
+  const created = await postJson<{ version: number }>(
+    config,
+    `${config.dataServiceUrl}/internal/documents`,
+    {
+      scope: "bot",
+      owner_id: input.bot_id,
+      title: document.title,
+      doc_type: "markdown",
+      content: document.content,
+      created_by_bot_id: input.bot_id,
+      created_by_user_id: input.wecom_user_id,
+      source_type: "document",
+      tags: ["generated", "pending-confirmed"],
+    },
+  );
+  return {
+    title: document.title,
+    version: created.version,
+  };
+}
+
+async function findExistingBusinessDocument(
+  config: BotHostConfig,
+  botId: string,
+  title: string,
+): Promise<{ document_id: string } | undefined> {
+  const documents = await getJson<Array<{ document_id: string; title: string }>>(
+    config,
+    `${config.dataServiceUrl}/internal/documents?scope=bot&owner_id=${encodeURIComponent(botId)}`,
+  );
+  return documents.find((document) => document.title === title);
 }
 
 async function generateSoulFromWizardAnswers(
@@ -917,6 +1043,16 @@ async function streamAllowedWeComMessage(
   wecomConversationId: string,
 ): Promise<void> {
   const resolvedConversationId = await resolveAllowedConversationId(config, input);
+  const pendingDocumentResult = await handlePendingBusinessDocumentConfirmation(
+    config,
+    input,
+    resolvedConversationId,
+  );
+  if (pendingDocumentResult) {
+    await config.wecomClient.sendText(wecomConversationId, pendingDocumentResult.output, { finish: true });
+    return;
+  }
+
   const memoryDocuments = await listPromptMemoryDocuments(
     config,
     input,
@@ -982,7 +1118,15 @@ async function streamAllowedWeComMessage(
     }
   }
 
-  const finalOutput = sentAnyChunk ? output : INVALID_RUNTIME_OUTPUT_MESSAGE;
+  const rawFinalOutput = sentAnyChunk ? output : INVALID_RUNTIME_OUTPUT_MESSAGE;
+  const processed = await processAssistantOutput(config, input, rawFinalOutput);
+  if (processed.pendingDocuments && processed.pendingDocuments.length > 0) {
+    getPendingBusinessDocuments(config).set(
+      pendingBusinessDocumentKey(input, resolvedConversationId),
+      processed.pendingDocuments,
+    );
+  }
+  const finalOutput = selectVisibleAssistantOutput(input.text, rawFinalOutput, processed);
   await presentationStream.finish();
   await config.wecomClient.sendText(wecomConversationId, finalOutput, { finish: true });
   await recordChatEvent(
@@ -1221,6 +1365,7 @@ function isValidGeneratedConfigDocument(document: ConfigDocument): boolean {
 
 function extractConfigDocuments(output: string): ProcessedOutput {
   const configDocuments: ConfigDocument[] = [];
+  const pendingDocuments: PendingBusinessDocument[] = [];
   const visibleParts: string[] = [];
   const documentPattern = /~document:(.+?\.md)\s*\n([\s\S]*?)\n?~\/document/g;
   let cursor = 0;
@@ -1228,24 +1373,42 @@ function extractConfigDocuments(output: string): ProcessedOutput {
 
   while ((match = documentPattern.exec(output)) !== null) {
     visibleParts.push(output.slice(cursor, match.index));
-    const title = mapConfigDocumentTitle(match[1].trim());
+    const filename = match[1].trim();
+    const content = match[2].trim();
+    const title = mapConfigDocumentTitle(filename);
     if (title) {
       configDocuments.push({
         title,
-        content: match[2].trim(),
+        content,
       });
     } else {
-      visibleParts.push(match[0]);
+      pendingDocuments.push({
+        title: filename,
+        content,
+      });
+      visibleParts.push(content);
     }
     cursor = match.index + match[0].length;
   }
 
   visibleParts.push(output.slice(cursor));
+  const confirmationPrompt = pendingDocuments.length > 0
+    ? [
+      "",
+      pendingDocuments.length === 1
+        ? `已生成 Markdown 文档：${pendingDocuments[0].title}。回复“确认”后保存到长期文档存储；如需修改，请直接说明修改内容。`
+        : `已生成 ${pendingDocuments.length} 个 Markdown 文档。回复“确认”后保存到长期文档存储；如需修改，请直接说明修改内容。`,
+    ].join("\n")
+    : "";
   return {
     visibleOutput: cleanupVisibleOutput(
-      visibleParts.map((part) => part.trim()).filter(Boolean).join("\n"),
+      [
+        visibleParts.map((part) => part.trim()).filter(Boolean).join("\n"),
+        confirmationPrompt,
+      ].filter(Boolean).join("\n"),
     ),
     configDocuments,
+    pendingDocuments,
   };
 }
 
@@ -1840,10 +2003,11 @@ async function postJson<T>(
   config: BotHostConfig,
   url: string,
   body: unknown,
+  method = "POST",
 ): Promise<T> {
   const response = await config.fetch(
     new Request(url, {
-      method: "POST",
+      method,
       headers: {
         "content-type": "application/json",
       },
