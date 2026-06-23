@@ -480,7 +480,7 @@ describe("bot-host server", () => {
       bot_id: "prd-bot",
       wecom_user_id: "admin-a",
       status: "initializing",
-      output: "管理员认领成功，开始初始化。\n\nSoul 引导 1/3：我是谁？选项：1 产品经理助手 / 2 QA 测试助手 / 3 技术文档助手 / 4 项目管理助手 / 5 其他，请直接说明。",
+      output: "管理员认领成功，开始初始化。\n\nSoul 引导 1/3：你希望我扮演什么角色？",
     });
     expect(calls).toEqual([
       {
@@ -535,7 +535,7 @@ describe("bot-host server", () => {
       bot_id: "prd-bot",
       wecom_user_id: "admin-a",
       status: "initializing",
-      output: "管理员认领成功，开始初始化。\n\nSoul 引导 1/3：我是谁？选项：1 产品经理助手 / 2 QA 测试助手 / 3 技术文档助手 / 4 项目管理助手 / 5 其他，请直接说明。",
+      output: "管理员认领成功，开始初始化。\n\nSoul 引导 1/3：你希望我扮演什么角色？",
     });
     expect(calls).toHaveLength(1);
   });
@@ -637,19 +637,19 @@ describe("bot-host server", () => {
           }),
         }),
       );
-      expect(response.status).toBe(200);
       const payload = await response.json() as { output: string };
+      expect(response.status, JSON.stringify(payload)).toBe(200);
       outputs.push(payload.output);
     }
 
     expect(outputs).toEqual([
-      "Soul 引导 2/3：我的性格是什么样的？选项：1 冷静务实 / 2 严谨审慎 / 3 主动推进 / 4 友好耐心 / 5 其他，请直接说明。",
-      "Soul 引导 3/3：我的沟通风格是什么？选项：1 简洁直接 / 2 严谨完整 / 3 先问清楚再回答 / 4 给出选项辅助决策 / 5 其他，请直接说明。",
+      "Soul 引导 2/3：你希望我的性格是什么样的？",
+      "Soul 引导 3/3：你希望我的沟通风格是什么？",
       "Soul 配置已确认，正在生成 soul。\n\nSoul 已生成。\n\n开始配置工作方式。\n\nAgents 引导 1/7：业务背景是什么？公司/团队是做什么的？（可回复“跳过”）",
-      "Agents 引导 2/7：这个机器人只负责一类核心工作，你希望它的核心工作是什么？选项：1 撰写/维护 PRD / 2 竞品分析 / 3 需求评审与拆解 / 4 用户故事编写 / 5 数据指标定义 / 6 QA 测试 / 7 技术文档 / 8 项目管理 / 9 其他，请直接说明。",
-      "Agents 引导 3/7：交互方式是什么？选项：1 逐句引导，一次只问一个问题 / 2 批量引导，一次列出多个待确认项 / 3 先给推荐方案，再让用户确认 / 4 其他，请直接说明。",
-      "Agents 引导 4/7：是否使用长期存储/长期记忆？选项：1 使用，确认后的业务规则和文档需要沉淀 / 2 不使用，只保留当前会话 / 3 待定。",
-      "Agents 引导 5/7：是否需要文档存储？选项：1 需要，生成的 PRD/方案/纪要要保存 / 2 不需要，只在对话中输出 / 3 待定。",
+      "Agents 引导 2/7：这个机器人只负责一类核心工作，你希望它的核心工作是什么？",
+      "Agents 引导 3/7：你希望它用什么方式和用户交互？",
+      "Agents 引导 4/7：是否使用长期存储或长期记忆？",
+      "Agents 引导 5/7：是否需要保存它生成的文档？",
       "Agents 引导 6/7：是否有固定 Skill / MCP / 工具约束？（可回复“跳过”）",
       "Agents 引导 7/7：有没有必须遵守的工作规则？（可回复“跳过”）",
       "工作方式配置已确认，正在生成 agents.md。\n\n初始化完成，可以开始工作。",
@@ -722,9 +722,9 @@ describe("bot-host server", () => {
       outputs.push(((await response.json()) as { output: string }).output);
     }
 
-    expect(outputs[1]).toContain("Soul 引导 3/3：我的沟通风格是什么？");
-    expect(outputs[1]).toContain("1 简洁直接");
-    expect(outputs[1]).toContain("4 给出选项辅助决策");
+    expect(outputs[1]).toContain("Soul 引导 3/3：你希望我的沟通风格是什么？");
+    expect(outputs[1]).not.toContain("1 简洁直接");
+    expect(outputs[1]).not.toContain("4 给出选项辅助决策");
     expect(outputs[1]).not.toContain("（回复 1）");
     expect(outputs[1]).not.toContain("A.");
     expect(outputs[1]).not.toMatch(/\n\d+\./);
@@ -898,13 +898,87 @@ describe("bot-host server", () => {
           }),
         }),
       );
-      expect(response.status).toBe(200);
       const payload = await response.json() as { output: string };
+      expect(response.status, JSON.stringify(payload)).toBe(200);
       outputs.push(payload.output);
     }
 
     expect(outputs[4]).toBe("核心工作只能选择一个。请重新回复一个选项编号，或直接说明一个核心工作。");
-    expect(outputs[5]).toContain("Agents 引导 3/7：交互方式是什么？");
+    expect(outputs[5]).toContain("Agents 引导 3/7：你希望它用什么方式和用户交互？");
+  });
+
+  it("allows natural core work text that contains a slash", async () => {
+    const calls: string[] = [];
+    const server = createBotHostServer({
+      dataServiceUrl: "http://data-service",
+      llmRunnerUrl: "http://llm-runner",
+      fetch: async (request) => {
+        if (!(request instanceof Request)) {
+          throw new Error("expected Request");
+        }
+        calls.push(request.url);
+
+        if (request.url === "http://data-service/v1/message-context/resolve") {
+          return Response.json({
+            allowed: true,
+            reason: "initializing",
+            is_admin: true,
+            conversation: {
+              conversation_id: "conv-init",
+              purpose: "init",
+            },
+          });
+        }
+
+        if (request.url.startsWith("http://data-service/v1/memory-documents/current?")) {
+          return Response.json([]);
+        }
+
+        if (request.url === "http://data-service/v1/bots/prd-bot/config-documents") {
+          return Response.json([]);
+        }
+
+        if (request.url === "http://llm-runner/v1/chat") {
+          return Response.json({
+            run_id: "run-soul",
+            output: [
+              "Soul 已生成。",
+              "~document:private/soul.md",
+              "# Soul",
+              "你是产品经理助手，性格冷静务实，沟通简洁直接。",
+              "~/document",
+            ].join("\n"),
+          });
+        }
+
+        if (request.url === "http://data-service/v1/bot-config-documents") {
+          return Response.json({}, { status: 201 });
+        }
+
+        return Response.json({ error: "unexpected", url: request.url }, { status: 500 });
+      },
+    });
+
+    const messages = ["1", "1", "1", "环信，即时通讯运营商", "撰写/维护 PRD"];
+    const outputs: string[] = [];
+    for (const text of messages) {
+      const response = await server.fetch(
+        new Request("http://localhost/v1/messages/wecom", {
+          method: "POST",
+          body: JSON.stringify({
+            bot_id: "prd-bot",
+            wecom_user_id: "admin-a",
+            text,
+            runtime: "mock",
+          }),
+        }),
+      );
+      const payload = await response.json() as { output: string };
+      expect(response.status, JSON.stringify({ payload, calls })).toBe(200);
+      outputs.push(payload.output);
+    }
+
+    expect(outputs.at(-1)).toContain("Agents 引导 3/7：你希望它用什么方式和用户交互？");
   });
 
   it("rejects placeholder initialization documents without marking ready", async () => {
@@ -1171,7 +1245,7 @@ describe("bot-host server", () => {
     expect(response.status).toBe(200);
     await expect(response.json()).resolves.toEqual({
       conversation_id: "conv-init",
-      output: "Soul 引导 2/3：我的性格是什么样的？选项：1 冷静务实 / 2 严谨审慎 / 3 主动推进 / 4 友好耐心 / 5 其他，请直接说明。",
+      output: "Soul 引导 2/3：你希望我的性格是什么样的？",
     });
     expect(calls.map((call) => call.url)).toEqual([
       "http://data-service/v1/message-context/resolve",
@@ -2075,7 +2149,9 @@ describe("bot-host server", () => {
       bot_id: "prd-bot",
       admin_wecom_user_id: "admin-a",
     });
-    expect(result?.output).toContain("Soul 引导 1/3：我是谁？");
+    expect(result?.output).toContain("Soul 引导 1/3：你希望我扮演什么角色？");
+    expect(result?.output).not.toContain("选项");
+    expect(result?.output).not.toContain(" / ");
     expect(sent).toEqual([
       {
         conversationId: "admin-a",
