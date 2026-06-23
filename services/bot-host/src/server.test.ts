@@ -149,6 +149,26 @@ function mockPendingGeneratedDocumentsResponse(
     return Response.json(updated);
   }
 
+  if (url.pathname === "/internal/pending-generated-documents/cancel" && request.method === "POST") {
+    const input = body as {
+      bot_id: string;
+      wecom_user_id: string;
+      conversation_id: string;
+    };
+    const updated = documents
+      .filter((document) =>
+        document.bot_id === input.bot_id
+        && document.wecom_user_id === input.wecom_user_id
+        && document.conversation_id === input.conversation_id
+        && document.status === "pending"
+      )
+      .map((document) => {
+        document.status = "cancelled";
+        return { ...document };
+      });
+    return Response.json(updated);
+  }
+
   return undefined;
 }
 
@@ -888,6 +908,278 @@ describe("bot-host server", () => {
         status: "confirmed",
       }),
     ]);
+  });
+
+  it("keeps pending generated documents when business document save fails so confirm can retry", async () => {
+    const pendingDocuments: MockPendingGeneratedDocument[] = [];
+    const calls: Array<{ url: string; method: string; body: unknown }> = [];
+    let failCreate = true;
+    const server = createBotHostServer({
+      dataServiceUrl: "http://data-service",
+      llmRunnerUrl: "http://llm-runner",
+      fetch: async (request) => {
+        if (!(request instanceof Request)) {
+          throw new Error("expected Request");
+        }
+        const body = request.method === "POST" || request.method === "PATCH"
+          ? await request.json().catch(() => undefined)
+          : undefined;
+        calls.push({ url: request.url, method: request.method, body });
+        const pendingGeneratedDocuments = mockPendingGeneratedDocumentsResponse(
+          request,
+          body,
+          pendingDocuments,
+        );
+        if (pendingGeneratedDocuments) {
+          return pendingGeneratedDocuments;
+        }
+
+        const noActiveInitializationSession = noActiveInitializationSessionResponse(request);
+        if (noActiveInitializationSession) {
+          return noActiveInitializationSession;
+        }
+
+        if (request.url === "http://data-service/v1/message-context/resolve") {
+          return Response.json({
+            allowed: true,
+            reason: "ready",
+            bot_id: (body as { bot_id: string }).bot_id,
+            wecom_user_id: (body as { wecom_user_id: string }).wecom_user_id,
+            conversation: {
+              conversation_id: "conv-1",
+            },
+          });
+        }
+
+        if (request.url.startsWith("http://data-service/v1/bots/") && request.url.endsWith("/config-documents")) {
+          return Response.json([]);
+        }
+
+        if (request.url.startsWith("http://data-service/v1/memory-documents/current?")) {
+          return Response.json([]);
+        }
+
+        if (request.url === "http://llm-runner/v1/chat") {
+          return Response.json({
+            run_id: "run-doc",
+            output: [
+              "PRD 已生成。",
+              "~document:prd/asr-api.md",
+              "# 可重试 PRD",
+              "第一次确认时模拟保存失败。",
+              "~/document",
+            ].join("\n"),
+          });
+        }
+
+        if (request.url === "http://data-service/internal/documents?scope=bot&owner_id=prd-bot") {
+          return Response.json([]);
+        }
+
+        if (request.url === "http://data-service/internal/documents" && request.method === "POST") {
+          if (failCreate) {
+            return Response.json({ error: "document store unavailable" }, { status: 503 });
+          }
+          return Response.json({
+            document_id: "doc-1",
+            version: 1,
+          }, { status: 201 });
+        }
+
+        return Response.json({ error: `unexpected ${request.url}` }, { status: 500 });
+      },
+    });
+
+    await server.fetch(new Request("http://localhost/v1/messages/wecom", {
+      method: "POST",
+      body: JSON.stringify({
+        bot_id: "prd-bot",
+        wecom_user_id: "user-a",
+        text: "生成可重试 PRD",
+        runtime: "mock",
+      }),
+    }));
+
+    const failedConfirm = await server.fetch(new Request("http://localhost/v1/messages/wecom", {
+      method: "POST",
+      body: JSON.stringify({
+        bot_id: "prd-bot",
+        wecom_user_id: "user-a",
+        text: "确认",
+        runtime: "mock",
+      }),
+    }));
+
+    expect(failedConfirm.status).toBe(400);
+    await expect(failedConfirm.json()).resolves.toEqual({
+      error: "document store unavailable",
+    });
+    expect(pendingDocuments).toEqual([
+      expect.objectContaining({
+        title: "prd/asr-api.md",
+        status: "pending",
+      }),
+    ]);
+
+    failCreate = false;
+
+    const retryConfirm = await server.fetch(new Request("http://localhost/v1/messages/wecom", {
+      method: "POST",
+      body: JSON.stringify({
+        bot_id: "prd-bot",
+        wecom_user_id: "user-a",
+        text: "确认",
+        runtime: "mock",
+      }),
+    }));
+
+    expect(retryConfirm.status).toBe(200);
+    await expect(retryConfirm.json()).resolves.toEqual({
+      conversation_id: "conv-1",
+      run_id: expect.stringMatching(/^document_save_/),
+      output: "已保存到长期文档存储：prd/asr-api.md v1。",
+    });
+    expect(pendingDocuments).toEqual([
+      expect.objectContaining({
+        title: "prd/asr-api.md",
+        status: "confirmed",
+      }),
+    ]);
+    expect(calls.filter((call) => call.url === "http://data-service/internal/pending-generated-documents/confirm")).toHaveLength(1);
+  });
+
+  it("replaces prior pending generated documents in the same conversation before saving new ones", async () => {
+    const pendingDocuments: MockPendingGeneratedDocument[] = [];
+    const calls: Array<{ url: string; method: string; body: unknown }> = [];
+    let generation = 0;
+    const server = createBotHostServer({
+      dataServiceUrl: "http://data-service",
+      llmRunnerUrl: "http://llm-runner",
+      fetch: async (request) => {
+        if (!(request instanceof Request)) {
+          throw new Error("expected Request");
+        }
+        const body = request.method === "POST" || request.method === "PATCH"
+          ? await request.json().catch(() => undefined)
+          : undefined;
+        calls.push({ url: request.url, method: request.method, body });
+        const pendingGeneratedDocuments = mockPendingGeneratedDocumentsResponse(
+          request,
+          body,
+          pendingDocuments,
+        );
+        if (pendingGeneratedDocuments) {
+          return pendingGeneratedDocuments;
+        }
+
+        const noActiveInitializationSession = noActiveInitializationSessionResponse(request);
+        if (noActiveInitializationSession) {
+          return noActiveInitializationSession;
+        }
+
+        if (request.url === "http://data-service/v1/message-context/resolve") {
+          return Response.json({
+            allowed: true,
+            reason: "ready",
+            bot_id: (body as { bot_id: string }).bot_id,
+            wecom_user_id: (body as { wecom_user_id: string }).wecom_user_id,
+            conversation: {
+              conversation_id: "conv-1",
+            },
+          });
+        }
+
+        if (request.url.startsWith("http://data-service/v1/bots/") && request.url.endsWith("/config-documents")) {
+          return Response.json([]);
+        }
+
+        if (request.url.startsWith("http://data-service/v1/memory-documents/current?")) {
+          return Response.json([]);
+        }
+
+        if (request.url === "http://llm-runner/v1/chat") {
+          generation += 1;
+          return Response.json({
+            run_id: `run-doc-${generation}`,
+            output: [
+              `第 ${generation} 次生成。`,
+              "~document:prd/asr-api.md",
+              "# 同标题 PRD",
+              generation === 1 ? "旧内容。" : "新内容。",
+              "~/document",
+            ].join("\n"),
+          });
+        }
+
+        if (request.url === "http://data-service/internal/documents?scope=bot&owner_id=prd-bot") {
+          return Response.json([]);
+        }
+
+        if (request.url === "http://data-service/internal/documents" && request.method === "POST") {
+          return Response.json({
+            document_id: "doc-1",
+            version: 1,
+          }, { status: 201 });
+        }
+
+        if (request.url === "http://data-service/internal/documents/doc-1" && request.method === "PATCH") {
+          return Response.json({
+            document_id: "doc-1",
+            version: 2,
+          });
+        }
+
+        return Response.json({ error: `unexpected ${request.url}` }, { status: 500 });
+      },
+    });
+
+    for (const text of ["第一次生成", "第二次生成"]) {
+      const response = await server.fetch(new Request("http://localhost/v1/messages/wecom", {
+        method: "POST",
+        body: JSON.stringify({
+          bot_id: "prd-bot",
+          wecom_user_id: "user-a",
+          text,
+          runtime: "mock",
+        }),
+      }));
+      expect(response.status).toBe(200);
+    }
+
+    expect(pendingDocuments.filter((document) => document.status === "pending")).toHaveLength(1);
+    expect(pendingDocuments.filter((document) => document.status === "cancelled")).toHaveLength(1);
+
+    const confirm = await server.fetch(new Request("http://localhost/v1/messages/wecom", {
+      method: "POST",
+      body: JSON.stringify({
+        bot_id: "prd-bot",
+        wecom_user_id: "user-a",
+        text: "确认",
+        runtime: "mock",
+      }),
+    }));
+
+    expect(confirm.status).toBe(200);
+    await expect(confirm.json()).resolves.toEqual({
+      conversation_id: "conv-1",
+      run_id: expect.stringMatching(/^document_save_/),
+      output: "已保存到长期文档存储：prd/asr-api.md v1。",
+    });
+    expect(calls.filter((call) => call.url === "http://data-service/internal/documents")).toHaveLength(1);
+    expect(calls.find((call) => call.url === "http://data-service/internal/documents")).toMatchObject({
+      body: expect.objectContaining({
+        title: "prd/asr-api.md",
+        content: "# 同标题 PRD\n新内容。",
+      }),
+    });
+    expect(calls).not.toContain(
+      expect.objectContaining({
+        url: "http://data-service/internal/documents",
+        body: expect.objectContaining({
+          content: "# 同标题 PRD\n旧内容。",
+        }),
+      }),
+    );
   });
 
   it("records successful chat events with memory refs", async () => {

@@ -1,4 +1,5 @@
 import {
+  cancelPendingGeneratedDocuments,
   clearInitializationSession,
   confirmPendingGeneratedDocuments,
   createPendingGeneratedDocument,
@@ -1047,24 +1048,24 @@ async function handlePendingBusinessDocumentConfirmation(
     return undefined;
   }
 
-  const documents = await listPendingGeneratedDocuments(config, {
+  const documents = (await listPendingGeneratedDocuments(config, {
     bot_id: input.bot_id,
     wecom_user_id: input.wecom_user_id,
     conversation_id: conversationId,
-  });
+  })).filter((document) => document.status === "pending");
   if (!documents || documents.length === 0) {
     return undefined;
   }
 
-  const confirmedDocuments = await confirmPendingGeneratedDocuments(config, {
+  const saved = [];
+  for (const document of documents) {
+    saved.push(await saveBusinessDocument(config, input, document));
+  }
+  await confirmPendingGeneratedDocuments(config, {
     bot_id: input.bot_id,
     wecom_user_id: input.wecom_user_id,
     conversation_id: conversationId,
   });
-  const saved = [];
-  for (const document of confirmedDocuments) {
-    saved.push(await saveBusinessDocument(config, input, document));
-  }
 
   return {
     conversation_id: conversationId,
@@ -1413,6 +1414,11 @@ async function persistPendingGeneratedDocuments(
   conversationId?: string,
 ): Promise<void> {
   const resolvedConversationId = conversationId ?? input.conversation_id ?? await resolveAllowedConversationId(config, input);
+  await cancelPendingGeneratedDocuments(config, {
+    bot_id: input.bot_id,
+    wecom_user_id: input.wecom_user_id,
+    conversation_id: resolvedConversationId,
+  });
   for (const document of documents) {
     await createPendingGeneratedDocument(config, {
       bot_id: input.bot_id,
