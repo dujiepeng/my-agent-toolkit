@@ -11,6 +11,20 @@ function jsonResponse(body: unknown, status = 200): Response {
   });
 }
 
+function healthResponse(service: string): {
+  service: string;
+  status: "ok";
+  git_sha: string;
+  build_time: string;
+} {
+  return {
+    service,
+    status: "ok",
+    git_sha: process.env.APP_BUILD_SHA ?? "unknown",
+    build_time: process.env.APP_BUILD_TIME ?? "unknown",
+  };
+}
+
 export function createWeComWorkerApp() {
   const hostConfig = {
     dataServiceUrl: process.env.DATA_SERVICE_URL ?? "http://data-service:8300",
@@ -41,10 +55,7 @@ export function createWeComWorkerApp() {
         const url = new URL(request.url);
 
         if (request.method === "GET" && url.pathname === "/health") {
-          return jsonResponse({
-            service: "wecom-worker",
-            status: "ok",
-          });
+          return jsonResponse(healthResponse("wecom-worker"));
         }
 
         if (request.method === "POST" && url.pathname === "/internal/wecom-runtime/sync") {

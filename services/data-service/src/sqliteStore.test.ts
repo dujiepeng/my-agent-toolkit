@@ -776,6 +776,47 @@ describe("sqlite data store", () => {
     store.close?.();
   });
 
+  it("resetBot clears bot config documents and initialization sessions in sqlite", () => {
+    const dir = mkdtempSync(join(tmpdir(), "data-service-"));
+    dirs.push(dir);
+    const dbPath = join(dir, "data.db");
+
+    const store = createSqliteDataStore(dbPath);
+    store.createBot({ bot_id: "prd-bot", name: "PRD Bot", runtime: "kiro" });
+    store.claimAdmin({ bot_id: "prd-bot", wecom_user_id: "admin-a" });
+    store.upsertInitializationSession({
+      bot_id: "prd-bot",
+      wecom_user_id: "admin-a",
+      conversation_id: "conv-init",
+      phase: "agents",
+      selected_role_id: "role-product-manager",
+      soul_answers: ["旧 bot", "1"],
+      agents_answers: ["interaction_mode=step_by_step"],
+      status: "active",
+    });
+    store.upsertBotConfigDocument({
+      bot_id: "prd-bot",
+      title: "soul",
+      content: "# Soul\n旧内容",
+    });
+    store.upsertBotConfigDocument({
+      bot_id: "prd-bot",
+      title: "agents.md",
+      content: "# AGENTS\n旧内容",
+    });
+
+    const reset = store.resetBot("prd-bot");
+
+    expect(reset.status).toBe("initializing");
+    expect(store.listBotConfigDocuments("prd-bot")).toEqual([]);
+    expect(store.getActiveInitializationSession({
+      bot_id: "prd-bot",
+      wecom_user_id: "admin-a",
+      conversation_id: "conv-init",
+    })).toBeUndefined();
+    store.close?.();
+  });
+
   it("rejects non-boolean runtime config stream values", () => {
     const dir = mkdtempSync(join(tmpdir(), "data-service-"));
     dirs.push(dir);

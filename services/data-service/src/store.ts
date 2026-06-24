@@ -983,6 +983,26 @@ export function createDataStore(options: DataStoreOptions = {}): DataStore {
 
     resetBot(botId) {
       const bot = getRequiredBot(bots, botId);
+      for (const key of [...botConfigDocuments.keys()]) {
+        if (key.startsWith(`${bot.bot_id}:`)) {
+          botConfigDocuments.delete(key);
+        }
+      }
+      for (const [key, session] of [...initializationSessions.entries()]) {
+        if (session.bot_id === bot.bot_id) {
+          initializationSessions.delete(key);
+        }
+      }
+      for (const [pendingId, document] of [...pendingGeneratedDocuments.entries()]) {
+        if (document.bot_id === bot.bot_id) {
+          pendingGeneratedDocuments.delete(pendingId);
+        }
+      }
+      for (const key of [...conversations.keys()]) {
+        if (key.startsWith(`${bot.bot_id}:`)) {
+          conversations.delete(key);
+        }
+      }
       const updated = {
         ...bot,
         status: admins.has(bot.bot_id) ? "initializing" as const : "draft" as const,

@@ -741,6 +741,42 @@ describe("data-service store", () => {
     });
   });
 
+  it("resetBot clears bot config documents and initialization state", () => {
+    const store = createDataStore();
+    store.createBot({ bot_id: "prd-bot", name: "PRD Bot", runtime: "kiro" });
+    store.claimAdmin({ bot_id: "prd-bot", wecom_user_id: "admin-a" });
+    store.upsertInitializationSession({
+      bot_id: "prd-bot",
+      wecom_user_id: "admin-a",
+      conversation_id: "conv-init",
+      phase: "agents",
+      selected_role_id: "role-product-manager",
+      soul_answers: ["旧 bot", "1"],
+      agents_answers: ["interaction_mode=step_by_step"],
+      status: "active",
+    });
+    store.upsertBotConfigDocument({
+      bot_id: "prd-bot",
+      title: "soul",
+      content: "# Soul\n旧内容",
+    });
+    store.upsertBotConfigDocument({
+      bot_id: "prd-bot",
+      title: "agents.md",
+      content: "# AGENTS\n旧内容",
+    });
+
+    const reset = store.resetBot("prd-bot");
+
+    expect(reset.status).toBe("initializing");
+    expect(store.listBotConfigDocuments("prd-bot")).toEqual([]);
+    expect(store.getActiveInitializationSession({
+      bot_id: "prd-bot",
+      wecom_user_id: "admin-a",
+      conversation_id: "conv-init",
+    })).toBeUndefined();
+  });
+
   it("lists and updates bot records", () => {
     const store = createDataStore();
     const prd = store.createBot({

@@ -208,6 +208,10 @@ export function createSqliteDataStore(
       const admin = db.prepare("select * from admins where bot_id = ?").get(bot.bot_id);
       const status = admin ? "initializing" : "draft";
       const updatedAt = nextIsoTimestamp(bot.updated_at);
+      db.prepare("delete from bot_config_documents where bot_id = ?").run(bot.bot_id);
+      db.prepare("delete from initialization_sessions where bot_id = ?").run(bot.bot_id);
+      db.prepare("delete from pending_generated_documents where bot_id = ?").run(bot.bot_id);
+      db.prepare("delete from conversations where bot_id = ?").run(bot.bot_id);
       db.prepare("update bots set status = ?, updated_at = ? where bot_id = ?").run(
         status,
         updatedAt,
