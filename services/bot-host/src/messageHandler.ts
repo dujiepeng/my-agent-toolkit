@@ -2451,11 +2451,7 @@ const AGENTS_WIZARD_FIELDS: Array<{ key: AgentsWizardFieldKey; label: string }> 
 ];
 
 const SOUL_WIZARD_QUESTIONS = [
-  [
-    "我是谁？",
-    "",
-    "请直接输入。",
-  ].join("\n"),
+  "我是谁？",
   withWizardOptions("你希望我的沟通风格是什么？", {
     "1": "简洁直接",
     "2": "严谨完整",

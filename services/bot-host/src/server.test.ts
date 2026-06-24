@@ -1837,7 +1837,6 @@ describe("bot-host server", () => {
       status: "initializing",
     });
     expect(payload.output).toContain("我是谁？");
-    expect(payload.output).toContain("请直接输入。");
     expect(calls[0]).toEqual({
       url: "http://data-service/v1/bots/prd-bot/admin/claim/verify",
       body: {
@@ -1925,7 +1924,6 @@ describe("bot-host server", () => {
       status: "initializing",
     });
     expect(payload.output).toContain("我是谁？");
-    expect(payload.output).toContain("请直接输入。");
     expect(calls).toHaveLength(2);
   });
 
@@ -5864,7 +5862,6 @@ describe("bot-host server", () => {
       admin_wecom_user_id: "admin-a",
     });
     expect(result?.output).toContain("我是谁？");
-    expect(result?.output).toContain("请直接输入。");
     expect(result?.output).not.toContain(" / ");
     expect(sent).toEqual([
       {
