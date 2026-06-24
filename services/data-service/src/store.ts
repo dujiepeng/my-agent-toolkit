@@ -80,6 +80,11 @@ export interface BotChannelDetail {
   channel: BotChannelRecord;
   bot: BotRecord;
   admin?: AdminRecord;
+  pending_admin_claim?: {
+    status: "pending" | "claimed" | "expired";
+    code?: string;
+    expires_at?: string;
+  };
   memory_documents: MemoryDocumentRecord[];
   config_documents: BotConfigDocumentRecord[];
 }
@@ -899,10 +904,25 @@ export function createDataStore(options: DataStoreOptions = {}): DataStore {
 
     getBotChannelDetail(botId) {
       const bot = getRequiredBot(bots, botId);
+      const pendingClaim = adminClaims.get(bot.bot_id);
+      const admin = admins.get(bot.bot_id);
+      const pendingAdminClaim = admin
+        ? { status: "claimed" as const }
+        : pendingClaim
+          ? new Date(pendingClaim.expires_at).getTime() < Date.now()
+            || !pendingClaim.code
+            ? { status: "expired" as const, expires_at: pendingClaim.expires_at }
+            : {
+              status: "pending" as const,
+              code: pendingClaim.code,
+              expires_at: pendingClaim.expires_at,
+            }
+          : undefined;
       return {
         channel: botToChannelRecord(bot),
         bot,
-        ...(admins.get(bot.bot_id) ? { admin: admins.get(bot.bot_id) } : {}),
+        ...(admin ? { admin } : {}),
+        ...(pendingAdminClaim ? { pending_admin_claim: pendingAdminClaim } : {}),
         memory_documents: this.listCurrentMemoryDocuments({
           scope: "bot",
           owner_id: bot.bot_id,
@@ -1585,7 +1605,7 @@ export function createDataStore(options: DataStoreOptions = {}): DataStore {
     upsertRole(input) {
       const name = requireText(input.name, "name");
       const slug = requireText(input.slug, "slug");
-      const description = requireText(input.description, "description");
+      const description = typeof input.description === "string" ? input.description.trim() : "";
       const existing = input.role_id
         ? getRequiredRecordById(roles, input.role_id, "role_id", "role")
         : findRoleBySlug(roles, slug);
@@ -1964,6 +1984,28 @@ export function seedDefaultRoleConfig(store: Pick<
   | "upsertRoleQuestion"
   | "listRoleQuestions"
 >): void {
+  const buildSingleChoiceQuestion = (
+    key: string,
+    title: string,
+    sortOrder: number,
+    optionLabels: string[],
+  ) => ({
+    key,
+    title,
+    description: "",
+    question_type: "single_choice" as const,
+    options_json: [
+      ...optionLabels.map((label, index) => ({
+        value: `option_${index + 1}`,
+        label,
+      })),
+      { value: "other", label: "其他，可直接描述" },
+    ],
+    required: true,
+    enabled: true,
+    sort_order: sortOrder,
+    depends_on_json: [],
+  });
   const defaultPlayground = {
     title: "playground.md",
     slug: "playground",
@@ -1979,73 +2021,247 @@ export function seedDefaultRoleConfig(store: Pick<
     enabled: true,
     sort_order: 10,
   } satisfies UpsertGlobalDocumentInput;
-  const defaultProductManager = {
-    name: "产品经理助手",
-    slug: "product-manager",
-    description: "产品经理角色",
-    enabled: true,
-    sort_order: 10,
-  } satisfies UpsertRoleInput;
-  const defaultProductManagerDocument = {
-    title: "role.md",
-    content: [
-      "# Role: Product Manager",
-      "",
-      "- 生成 PRD 前默认补齐背景、目标用户、核心问题。",
-      "- 生成 PRD 前默认补齐范围、非范围、限制条件、依赖条件和风险点。",
-      "- 涉及环信需求时默认检查 Console、IMM、计量计费、集群范围、开关灰度兼容性。",
-    ].join("\n"),
-    enabled: true,
-  } satisfies Omit<UpsertRoleDocumentInput, "role_id">;
-  const defaultProductManagerQuestions = [
+  const standardRoles = [
     {
-      key: "interaction_mode",
-      title: "你希望它用什么方式和你交互？",
-      description: "",
-      question_type: "single_choice" as const,
-      options_json: [
-        { value: "step_by_step", label: "逐句引导，一次只问一个问题" },
-        { value: "batch", label: "批量引导，一次列出多个待确认项" },
-        { value: "recommend_first", label: "先给推荐方案，再让用户确认" },
-        { value: "other", label: "其他，请直接说明" },
-      ],
-      required: true,
-      enabled: true,
+      name: "产品经理",
+      slug: "product-manager",
+      description: "产品经理角色",
       sort_order: 10,
-      depends_on_json: [],
+      document: [
+        "# Role: Product Manager",
+        "",
+        "## 角色定位",
+        "你是产品经理，负责把模糊需求澄清为可评审、可落地、可协作的结构化输出。",
+        "",
+        "## 默认工作规则",
+        "- 默认先补齐背景、目标用户、核心问题和业务价值。",
+        "- 默认补齐范围、非范围、限制条件、依赖条件和风险点。",
+        "- 涉及环信需求时默认检查 Console、IMM、计量计费、集群、开关灰度兼容性。",
+        "- 输出偏评审与落地，不写空泛 PRD。",
+      ].join("\n"),
+      questions: [
+        buildSingleChoiceQuestion("interaction_mode", "你希望它用什么方式和你交互？", 10, [
+          "逐句引导",
+          "批量确认",
+          "先给推荐方案，再确认",
+        ]),
+        buildSingleChoiceQuestion("memory_storage", "是否需要长期沉淀规则和文档？", 20, [
+          "需要",
+          "不需要",
+        ]),
+        buildSingleChoiceQuestion("output_shape", "默认输出更偏向哪类内容？", 30, [
+          "PRD",
+          "需求评审",
+          "用户故事",
+          "拆解清单",
+        ]),
+        buildSingleChoiceQuestion("structured_conclusion", "是否强调结构化结论？", 40, [
+          "是，先给结论再展开",
+          "否，按过程展开即可",
+        ]),
+        buildSingleChoiceQuestion("recommendation_first", "是否需要优先给推荐方案？", 50, [
+          "需要",
+          "不需要",
+        ]),
+        buildSingleChoiceQuestion("work_rules", "是否有额外工作规则？", 60, [
+          "没有",
+          "有，需要补充",
+        ]),
+      ],
     },
     {
-      key: "memory_storage",
-      title: "是否需要长期沉淀规则和保存生成的文档？",
-      description: "",
-      question_type: "single_choice" as const,
-      options_json: [
-        { value: "yes", label: "需要，确认后的业务规则和生成的 PRD / 方案 / 纪要都要保存" },
-        { value: "no", label: "不需要，只保留当前会话输出" },
-        { value: "pending", label: "待定" },
-      ],
-      required: true,
-      enabled: true,
+      name: "测试工程师",
+      slug: "qa-engineer",
+      description: "测试工程师角色",
       sort_order: 20,
-      depends_on_json: [],
+      document: [
+        "# Role: QA Engineer",
+        "",
+        "## 角色定位",
+        "你是测试工程师，负责从范围、异常流、兼容性、回归风险等角度构建可靠测试输出。",
+        "",
+        "## 默认工作规则",
+        "- 默认补齐测试范围、非测试范围、前置条件和风险说明。",
+        "- 优先从边界、异常流、兼容性、回归风险切入。",
+        "- 输出测试用例时强调步骤、预期结果、边界覆盖和回归覆盖。",
+      ].join("\n"),
+      questions: [
+        buildSingleChoiceQuestion("interaction_mode", "你希望它用什么方式和你交互？", 10, [
+          "逐句引导",
+          "批量确认",
+          "先给结论再展开",
+        ]),
+        buildSingleChoiceQuestion("memory_storage", "是否需要长期沉淀规则和测试资产？", 20, [
+          "需要",
+          "不需要",
+        ]),
+        buildSingleChoiceQuestion("output_shape", "默认输出更偏向哪类内容？", 30, [
+          "测试方案",
+          "测试用例",
+          "回归清单",
+          "缺陷分析",
+        ]),
+        buildSingleChoiceQuestion("exception_priority", "是否优先关注异常场景？", 40, [
+          "是",
+          "否",
+        ]),
+        buildSingleChoiceQuestion("compatibility_priority", "是否强调兼容性与回归？", 50, [
+          "是",
+          "否",
+        ]),
+        buildSingleChoiceQuestion("work_rules", "是否有额外工作规则？", 60, [
+          "没有",
+          "有，需要补充",
+        ]),
+      ],
     },
     {
-      key: "work_rules",
-      title: "有没有必须遵守的工作规则？",
-      description: "",
-      question_type: "single_choice" as const,
-      options_json: [
-        { value: "skip", label: "跳过，暂无额外规则" },
-        { value: "input", label: "直接输入必须遵守的工作规则" },
-      ],
-      required: true,
-      enabled: true,
+      name: "研发工程师",
+      slug: "engineer",
+      description: "研发工程师角色",
       sort_order: 30,
-      depends_on_json: [
-        { key: "interaction_mode", equals: "step_by_step" },
+      document: [
+        "# Role: Engineer",
+        "",
+        "## 角色定位",
+        "你是研发工程师，负责把需求转成可实现方案、接口设计、任务拆解和排障思路。",
+        "",
+        "## 默认工作规则",
+        "- 默认先澄清目标、输入输出、约束和依赖。",
+        "- 优先给可实现方案，关注兼容性、回滚、灰度与边界。",
+        "- 输出方案时强调模块边界、接口、数据流和异常处理。",
+      ].join("\n"),
+      questions: [
+        buildSingleChoiceQuestion("interaction_mode", "你希望它用什么方式和你交互？", 10, [
+          "逐句引导",
+          "批量确认",
+          "先给方案，再补细节",
+        ]),
+        buildSingleChoiceQuestion("memory_storage", "是否需要长期沉淀规则和技术文档？", 20, [
+          "需要",
+          "不需要",
+        ]),
+        buildSingleChoiceQuestion("output_shape", "默认输出更偏向哪类内容？", 30, [
+          "技术方案",
+          "接口设计",
+          "任务拆解",
+          "排障分析",
+        ]),
+        buildSingleChoiceQuestion("compatibility_priority", "是否强调兼容性与回滚？", 40, [
+          "是",
+          "否",
+        ]),
+        buildSingleChoiceQuestion("implementation_steps", "是否默认给实现步骤？", 50, [
+          "需要",
+          "不需要",
+        ]),
+        buildSingleChoiceQuestion("work_rules", "是否有额外工作规则？", 60, [
+          "没有",
+          "有，需要补充",
+        ]),
       ],
     },
-  ] satisfies Array<Omit<UpsertRoleQuestionInput, "role_id">>;
+    {
+      name: "市场人员",
+      slug: "marketing",
+      description: "市场人员角色",
+      sort_order: 40,
+      document: [
+        "# Role: Marketing",
+        "",
+        "## 角色定位",
+        "你是市场人员，负责围绕用户价值、竞品差异、卖点表达和传播角度组织内容。",
+        "",
+        "## 默认工作规则",
+        "- 强调结论清晰、信息可传播，避免技术表达过重。",
+        "- 输出分析时突出结论、支撑信息与建议动作。",
+        "- 默认围绕用户价值、卖点和外部表达口径展开。",
+      ].join("\n"),
+      questions: [
+        buildSingleChoiceQuestion("interaction_mode", "你希望它用什么方式和你交互？", 10, [
+          "逐句引导",
+          "批量确认",
+          "先给结论再展开",
+        ]),
+        buildSingleChoiceQuestion("memory_storage", "是否需要长期沉淀规则和市场文档？", 20, [
+          "需要",
+          "不需要",
+        ]),
+        buildSingleChoiceQuestion("output_shape", "默认输出更偏向哪类内容？", 30, [
+          "竞品分析",
+          "卖点整理",
+          "活动文案",
+          "市场调研摘要",
+        ]),
+        buildSingleChoiceQuestion("conclusion_first", "是否强调结论先行？", 40, [
+          "是",
+          "否",
+        ]),
+        buildSingleChoiceQuestion("external_tone", "是否偏外部表达口径？", 50, [
+          "是",
+          "否",
+        ]),
+        buildSingleChoiceQuestion("work_rules", "是否有额外工作规则？", 60, [
+          "没有",
+          "有，需要补充",
+        ]),
+      ],
+    },
+    {
+      name: "运营人员",
+      slug: "operations",
+      description: "运营人员角色",
+      sort_order: 50,
+      document: [
+        "# Role: Operations",
+        "",
+        "## 角色定位",
+        "你是运营人员，负责围绕执行流程、资源协调、状态跟踪、异常处理与复盘组织输出。",
+        "",
+        "## 默认工作规则",
+        "- 强调明确动作、责任、时间点和风险项。",
+        "- 输出内容服务于日常推进与跨团队协作。",
+        "- 默认关注执行流程、异常处理和复盘。",
+      ].join("\n"),
+      questions: [
+        buildSingleChoiceQuestion("interaction_mode", "你希望它用什么方式和你交互？", 10, [
+          "逐句引导",
+          "批量确认",
+          "先给执行框架再展开",
+        ]),
+        buildSingleChoiceQuestion("memory_storage", "是否需要长期沉淀规则和运营文档？", 20, [
+          "需要",
+          "不需要",
+        ]),
+        buildSingleChoiceQuestion("output_shape", "默认输出更偏向哪类内容？", 30, [
+          "执行方案",
+          "SOP",
+          "活动排期",
+          "复盘纪要",
+        ]),
+        buildSingleChoiceQuestion("followup_priority", "是否强调任务跟进与风险提醒？", 40, [
+          "是",
+          "否",
+        ]),
+        buildSingleChoiceQuestion("list_style", "是否偏列表化和行动项？", 50, [
+          "是",
+          "否",
+        ]),
+        buildSingleChoiceQuestion("work_rules", "是否有额外工作规则？", 60, [
+          "没有",
+          "有，需要补充",
+        ]),
+      ],
+    },
+  ] satisfies Array<{
+    name: string;
+    slug: string;
+    description: string;
+    enabled?: boolean;
+    sort_order: number;
+    document: string;
+    questions: Array<Omit<UpsertRoleQuestionInput, "role_id">>;
+  }>;
 
   const existingGlobalDocuments = store.listGlobalDocuments({ includeDisabled: true });
   if (!existingGlobalDocuments.some((document) => document.slug === defaultPlayground.slug)) {
@@ -2053,29 +2269,39 @@ export function seedDefaultRoleConfig(store: Pick<
   }
 
   const existingRoles = store.listRoles({ includeDisabled: true });
-  let productManager = existingRoles.find((role) => role.slug === defaultProductManager.slug);
-  if (!productManager) {
-    productManager = store.upsertRole(defaultProductManager);
-  }
-
-  const existingRoleDocuments = store.listRoleDocuments(productManager.role_id, { includeDisabled: true });
-  if (!existingRoleDocuments.some((document) => document.title === defaultProductManagerDocument.title)) {
-    store.upsertRoleDocument({
-      role_id: productManager.role_id,
-      ...defaultProductManagerDocument,
-    });
-  }
-
-  const existingRoleQuestions = store.listRoleQuestions(productManager.role_id, { includeDisabled: true });
-  const existingQuestionKeys = new Set(existingRoleQuestions.map((question) => question.key));
-  for (const question of defaultProductManagerQuestions) {
-    if (existingQuestionKeys.has(question.key)) {
-      continue;
+  for (const standardRole of standardRoles) {
+    let role = existingRoles.find((existing) => existing.slug === standardRole.slug);
+    if (!role) {
+      role = store.upsertRole({
+        name: standardRole.name,
+        slug: standardRole.slug,
+        description: standardRole.description,
+        enabled: true,
+        sort_order: standardRole.sort_order,
+      });
     }
-    store.upsertRoleQuestion({
-      role_id: productManager.role_id,
-      ...question,
-    });
+
+    const existingRoleDocuments = store.listRoleDocuments(role.role_id, { includeDisabled: true });
+    if (!existingRoleDocuments.some((document) => document.title === "role.md")) {
+      store.upsertRoleDocument({
+        role_id: role.role_id,
+        title: "role.md",
+        content: standardRole.document,
+        enabled: true,
+      });
+    }
+
+    const existingRoleQuestions = store.listRoleQuestions(role.role_id, { includeDisabled: true });
+    const existingQuestionKeys = new Set(existingRoleQuestions.map((question) => question.key));
+    for (const question of standardRole.questions) {
+      if (existingQuestionKeys.has(question.key)) {
+        continue;
+      }
+      store.upsertRoleQuestion({
+        role_id: role.role_id,
+        ...question,
+      });
+    }
   }
 }
 

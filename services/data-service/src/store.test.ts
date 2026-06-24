@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { buildDefaultMcpCapabilityConfig } from "@my-agent-toolkit/contracts";
-import { ADMIN_CLAIM_TTL_MS, createDataStore } from "./store.js";
+import { ADMIN_CLAIM_TTL_MS, createDataStore, seedDefaultRoleConfig } from "./store.js";
 
 describe("data-service store", () => {
   it("creates and reads bot records", () => {
@@ -1232,6 +1232,32 @@ describe("data-service store", () => {
       slug: "playground",
       content: "# Playground",
     })).toThrow("global document not found: global_doc_missing");
+  });
+
+  it("seeds the five standard roles with documents and question sets", () => {
+    const store = createDataStore();
+
+    seedDefaultRoleConfig(store);
+
+    expect(store.listRoles().map((role) => role.name)).toEqual([
+      "产品经理",
+      "测试工程师",
+      "研发工程师",
+      "市场人员",
+      "运营人员",
+    ]);
+
+    const productManager = store.listRoles().find((role) => role.slug === "product-manager");
+    expect(productManager).toBeDefined();
+
+    const documents = store.listRoleDocuments(productManager!.role_id);
+    expect(documents).toHaveLength(1);
+    expect(documents[0]?.title).toBe("role.md");
+    expect(String(documents[0]?.content ?? "")).toContain("角色定位");
+
+    const questions = store.listRoleQuestions(productManager!.role_id);
+    expect(questions.length).toBeGreaterThanOrEqual(5);
+    expect(questions.map((question) => question.title)).toContain("你希望它用什么方式和你交互？");
   });
 
   it("stores roles with enabled filtering and sort order", () => {
