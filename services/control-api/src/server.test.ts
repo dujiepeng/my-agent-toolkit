@@ -3,6 +3,10 @@ import { createControlApiServer } from "./server.js";
 
 describe("control-api server", () => {
   it("responds to health checks", async () => {
+    const previousSha = process.env.APP_BUILD_SHA;
+    const previousBuildTime = process.env.APP_BUILD_TIME;
+    process.env.APP_BUILD_SHA = "sha-control";
+    process.env.APP_BUILD_TIME = "2026-06-24T12:00:00.000Z";
     const server = createControlApiServer({
       dataServiceUrl: "http://data-service",
       logServiceUrl: "http://log-service",
@@ -15,7 +19,11 @@ describe("control-api server", () => {
     await expect(response.json()).resolves.toEqual({
       service: "control-api",
       status: "ok",
+      git_sha: "sha-control",
+      build_time: "2026-06-24T12:00:00.000Z",
     });
+    process.env.APP_BUILD_SHA = previousSha;
+    process.env.APP_BUILD_TIME = previousBuildTime;
   });
 
   it("serves the setup page", async () => {
@@ -47,6 +55,7 @@ describe("control-api server", () => {
     expect(html).toContain("编辑配置");
     expect(html).toContain("生命周期");
     expect(html).toContain("复制认领命令");
+    expect(html).toContain("renderClaimCard");
     expect(html).toContain("已同步");
     expect(html).toContain("机器人配置");
     expect(html).toContain("能力状态");
@@ -86,6 +95,260 @@ describe("control-api server", () => {
     expect(html).not.toContain('response.ok ? "完成"');
     expect(html).not.toContain("查询审计日志");
     expect(html).not.toContain("写入 Memory 文档");
+  });
+
+  it("renders pending admin claim from channel detail data", async () => {
+    const server = createControlApiServer({
+      dataServiceUrl: "http://data-service",
+      logServiceUrl: "http://log-service",
+      fetch: async () => new Response("not used", { status: 500 }),
+    });
+
+    const response = await server.fetch(new Request("http://localhost/"));
+    const html = await response.text();
+
+    expect(response.status).toBe(200);
+    expect(html).toContain("pending_admin_claim");
+    expect(html).toContain("function renderClaimCard(claim)");
+    expect(html).toContain("renderClaimCard(detail.pending_admin_claim)");
+    expect(html).toContain("认领码已被使用");
+    expect(html).toContain("认领码已过期");
+    expect(html).toContain("点击刷新");
+  });
+
+  it("renders global documents admin page", async () => {
+    const server = createControlApiServer({
+      dataServiceUrl: "http://data-service",
+      logServiceUrl: "http://log-service",
+      fetch: async (request) => {
+        if (!(request instanceof Request)) {
+          throw new Error("expected Request");
+        }
+        if (request.url === "http://data-service/v1/global-documents") {
+          return Response.json([
+            {
+              document_id: "global_doc_1",
+              title: "playground.md",
+              slug: "playground",
+              content: "# Playground",
+              enabled: true,
+              sort_order: 10,
+            },
+          ]);
+        }
+        return Response.json({ error: "unexpected", url: request.url }, { status: 500 });
+      },
+    });
+
+    const response = await server.fetch(new Request("http://localhost/admin/global-documents"));
+
+    expect(response.status).toBe(200);
+    const html = await response.text();
+    expect(html).toContain("全局配置");
+    expect(html).toContain("playground.md");
+    expect(html).toContain("/v1/global-documents");
+    expect(html).toContain("/admin/global-documents/save");
+    expect(html).toContain("保存");
+    expect(html).not.toContain("/admin/global-documents/delete");
+    expect(html).not.toContain('name="slug"');
+    expect(html).not.toContain('name="sort_order"');
+    expect(html).not.toContain('name="enabled"');
+  });
+
+  it("renders roles admin page", async () => {
+    const server = createControlApiServer({
+      dataServiceUrl: "http://data-service",
+      logServiceUrl: "http://log-service",
+      fetch: async (request) => {
+        if (!(request instanceof Request)) {
+          throw new Error("expected Request");
+        }
+        if (request.url === "http://data-service/v1/roles") {
+          return Response.json([
+            {
+              role_id: "role_1",
+              name: "产品经理",
+              slug: "product-manager",
+              description: "产品经理角色",
+              enabled: true,
+              sort_order: 10,
+            },
+          ]);
+        }
+        return Response.json({ error: "unexpected", url: request.url }, { status: 500 });
+      },
+    });
+
+    const response = await server.fetch(new Request("http://localhost/admin/roles"));
+
+    expect(response.status).toBe(200);
+    const html = await response.text();
+    expect(html).toContain("角色管理");
+    expect(html).toContain("产品经理");
+    expect(html).toContain("/admin/roles/role_1");
+    expect(html).toContain("/admin/roles/save");
+    expect(html).toContain("/admin/roles/delete");
+    expect(html).toContain("保存");
+    expect(html).toContain("删除");
+    expect(html).toContain("新增角色");
+    expect(html).toContain('data-role-create');
+    expect(html).toContain('data-role-card');
+    expect(html).toContain("创建角色");
+    expect(html).toContain("角色基础信息");
+    expect(html).not.toContain('name="description"');
+    expect(html).not.toContain('name="slug"');
+    expect(html).not.toContain('name="sort_order"');
+    expect(html).toContain('type="radio" name="enabled" value="true"');
+    expect(html).toContain('type="radio" name="enabled" value="false"');
+  });
+
+  it("saves global documents through admin forms", async () => {
+    const calls: Array<{ url: string; method: string; body?: unknown }> = [];
+    const server = createControlApiServer({
+      dataServiceUrl: "http://data-service",
+      logServiceUrl: "http://log-service",
+      fetch: async (request) => {
+        if (!(request instanceof Request)) {
+          throw new Error("expected Request");
+        }
+        const bodyText = request.method === "POST" || request.method === "PUT"
+          ? await request.text()
+          : "";
+        const body = bodyText ? JSON.parse(bodyText) : undefined;
+        calls.push({ url: request.url, method: request.method, body });
+        if (request.url === "http://data-service/v1/global-documents/global_doc_1" && request.method === "PUT") {
+          return Response.json({ document_id: "global_doc_1", slug: "playground" });
+        }
+        if (request.url === "http://log-service/v1/audit-events" && request.method === "POST") {
+          return Response.json({ ok: true }, { status: 201 });
+        }
+        return Response.json({ error: "unexpected", url: request.url, method: request.method }, { status: 500 });
+      },
+    });
+
+    const response = await server.fetch(new Request("http://localhost/admin/global-documents/save", {
+      method: "POST",
+      body: new URLSearchParams({
+        actor_id: "admin-a",
+        document_id: "global_doc_1",
+        title: "playground.md",
+        slug: "playground",
+        content: "# Playground",
+        enabled: "true",
+        sort_order: "10",
+      }),
+    }));
+
+    expect(response.status).toBe(303);
+    expect(response.headers.get("location")).toBe("/admin/global-documents");
+
+    expect(calls.map((call) => `${call.method} ${call.url}`)).toEqual(expect.arrayContaining([
+      "PUT http://data-service/v1/global-documents/global_doc_1",
+    ]));
+  });
+
+  it("saves and deletes roles through admin forms", async () => {
+    const calls: Array<{ url: string; method: string; body?: unknown }> = [];
+    const server = createControlApiServer({
+      dataServiceUrl: "http://data-service",
+      logServiceUrl: "http://log-service",
+      fetch: async (request) => {
+        if (!(request instanceof Request)) {
+          throw new Error("expected Request");
+        }
+        const bodyText = request.method === "POST" || request.method === "PUT"
+          ? await request.text()
+          : "";
+        const body = bodyText ? JSON.parse(bodyText) : undefined;
+        calls.push({ url: request.url, method: request.method, body });
+        if (request.url === "http://data-service/v1/roles" && request.method === "POST") {
+          return Response.json({ role_id: "role_new", slug: "new-role" }, { status: 201 });
+        }
+        if (request.url === "http://data-service/v1/roles/role_1" && request.method === "GET") {
+          return Response.json({
+            role_id: "role_1",
+            name: "产品经理",
+            slug: "product-manager",
+            description: "产品经理角色",
+            enabled: true,
+            sort_order: 10,
+          });
+        }
+        if (request.url === "http://data-service/v1/roles/role_1" && request.method === "PUT") {
+          return Response.json({ role_id: "role_1", slug: "product-manager" });
+        }
+        if (request.url === "http://data-service/v1/roles/role_1" && request.method === "DELETE") {
+          return new Response(null, { status: 204 });
+        }
+        if (request.url === "http://log-service/v1/audit-events" && request.method === "POST") {
+          return Response.json({ ok: true }, { status: 201 });
+        }
+        return Response.json({ error: "unexpected", url: request.url, method: request.method }, { status: 500 });
+      },
+    });
+
+    const responses = await Promise.all([
+      server.fetch(new Request("http://localhost/admin/roles/save", {
+        method: "POST",
+        body: new URLSearchParams({
+          actor_id: "admin-a",
+          name: "新角色",
+        }),
+      })),
+      server.fetch(new Request("http://localhost/admin/roles/save", {
+        method: "POST",
+        body: new URLSearchParams({
+          actor_id: "admin-a",
+          role_id: "role_1",
+          name: "产品经理",
+          enabled: "true",
+        }),
+      })),
+      server.fetch(new Request("http://localhost/admin/roles/delete", {
+        method: "POST",
+        body: new URLSearchParams({
+          actor_id: "admin-a",
+          role_id: "role_1",
+        }),
+      })),
+    ]);
+
+    expect(responses[0].status).toBe(303);
+    expect(responses[0].headers.get("location")).toBe("/admin/roles/role_new");
+    expect(responses[1].status).toBe(303);
+    expect(responses[1].headers.get("location")).toBe("/admin/roles");
+    expect(responses[2].status).toBe(303);
+    expect(responses[2].headers.get("location")).toBe("/admin/roles");
+
+    expect(calls.map((call) => `${call.method} ${call.url}`)).toEqual(expect.arrayContaining([
+      "POST http://data-service/v1/roles",
+      "PUT http://data-service/v1/roles/role_1",
+      "DELETE http://data-service/v1/roles/role_1",
+    ]));
+    expect(calls.find((call) => call.url === "http://data-service/v1/roles" && call.method === "POST")).toEqual({
+      url: "http://data-service/v1/roles",
+      method: "POST",
+      body: {
+        actor_id: "admin-a",
+        name: "新角色",
+        slug: expect.any(String),
+        description: "",
+        enabled: true,
+        sort_order: expect.any(Number),
+      },
+    });
+    expect(calls.find((call) => call.url === "http://data-service/v1/roles/role_1" && call.method === "PUT")).toEqual({
+      url: "http://data-service/v1/roles/role_1",
+      method: "PUT",
+      body: {
+        actor_id: "admin-a",
+        name: "产品经理",
+        slug: "product-manager",
+        description: "产品经理角色",
+        enabled: true,
+        sort_order: 10,
+      },
+    });
   });
 
   it("creates bots through data-service", async () => {
@@ -1498,6 +1761,67 @@ describe("control-api server", () => {
     ]);
   });
 
+  it("does not crash when channel deletion succeeds but wecom runtime sync fails", async () => {
+    const calls: Array<{ url: string; method: string; body?: unknown }> = [];
+    const server = createControlApiServer({
+      dataServiceUrl: "http://data-service",
+      logServiceUrl: "http://log-service",
+      botHostUrl: "http://bot-api",
+      fetch: async (request) => {
+        if (!(request instanceof Request)) {
+          throw new Error("expected Request");
+        }
+        const bodyText = request.method === "POST" ? await request.text() : "";
+        const body = bodyText ? JSON.parse(bodyText) : undefined;
+        calls.push({ url: request.url, method: request.method, body });
+
+        if (request.url === "http://data-service/v1/bots/prd-bot") {
+          return Response.json({
+            bot_id: "prd-bot",
+            name: "PRD Bot",
+            runtime: "kiro",
+            status: "ready",
+            wecom_bot_id: "wecom-a",
+            wecom_secret_configured: false,
+            wecom_connection_status: "unchecked",
+          });
+        }
+        if (request.url === "http://data-service/v1/bot-channels/wecom:prd-bot" && request.method === "DELETE") {
+          return Response.json({
+            channel_id: "wecom:prd-bot",
+            bot_id: "prd-bot",
+            runtime_status: "missing_secret",
+            runtime_enabled: false,
+          });
+        }
+        if (request.url === "http://bot-api/internal/wecom-runtime/sync" && request.method === "POST") {
+          return Response.json({ error: "sync failed" }, { status: 500 });
+        }
+        if (request.url === "http://log-service/v1/audit-events" && request.method === "POST") {
+          return Response.json({ ok: true }, { status: 201 });
+        }
+        return Response.json({ error: "unexpected", url: request.url, method: request.method }, { status: 500 });
+      },
+    });
+
+    const response = await server.fetch(
+      new Request("http://localhost/v1/bot-channels/wecom:prd-bot", {
+        method: "DELETE",
+      }),
+    );
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toMatchObject({
+      bot_id: "prd-bot",
+      runtime_status: "missing_secret",
+    });
+    expect(calls.map((call) => `${call.method} ${call.url}`)).toEqual(expect.arrayContaining([
+      "DELETE http://data-service/v1/bot-channels/wecom:prd-bot",
+      "POST http://bot-api/internal/wecom-runtime/sync",
+      "POST http://log-service/v1/audit-events",
+    ]));
+  });
+
   it("renders links for global configuration and role management", async () => {
     const server = createControlApiServer({
       dataServiceUrl: "http://data-service",
@@ -1632,7 +1956,7 @@ describe("control-api server", () => {
           return Response.json([
             {
               role_id: "role-product-manager",
-              name: "产品经理助手",
+              name: "产品经理",
               slug: "product-manager",
               description: "产品经理角色",
               enabled: true,
@@ -1643,7 +1967,7 @@ describe("control-api server", () => {
         if (request.url === "http://data-service/v1/roles" && request.method === "POST") {
           return Response.json({
             role_id: "role-product-manager",
-            name: "产品经理助手",
+            name: "产品经理",
             slug: "product-manager",
             description: "产品经理角色",
             enabled: true,
@@ -1667,7 +1991,7 @@ describe("control-api server", () => {
       method: "POST",
       body: JSON.stringify({
         actor_id: "admin-a",
-        name: "产品经理助手",
+        name: "产品经理",
         slug: "product-manager",
         description: "产品经理角色",
         enabled: true,
@@ -1691,7 +2015,7 @@ describe("control-api server", () => {
         method: "POST",
         body: {
           actor_id: "admin-a",
-          name: "产品经理助手",
+          name: "产品经理",
           slug: "product-manager",
           description: "产品经理角色",
           enabled: true,
@@ -1708,7 +2032,7 @@ describe("control-api server", () => {
           target_id: "role-product-manager",
           metadata: {
             slug: "product-manager",
-            name: "产品经理助手",
+            name: "产品经理",
             enabled: true,
             sort_order: 10,
           },
@@ -2005,7 +2329,7 @@ describe("control-api server", () => {
         if (request.url === "http://data-service/v1/roles/role-product-manager") {
           return Response.json({
             role_id: "role-product-manager",
-            name: "产品经理助手",
+            name: "产品经理",
             slug: "product-manager",
             description: "产品经理角色",
             enabled: true,
@@ -2031,7 +2355,11 @@ describe("control-api server", () => {
               key: "interaction_mode",
               title: "你希望它用什么方式和你交互？",
               question_type: "single_choice",
-              options_json: [],
+              options_json: [
+                { value: "step", label: "逐句引导" },
+                { value: "batch", label: "批量引导" },
+                { value: "recommend", label: "推荐优先" },
+                              ],
               enabled: true,
               sort_order: 10,
             },
@@ -2046,11 +2374,41 @@ describe("control-api server", () => {
 
     expect(response.status).toBe(200);
     expect(html).toContain("角色详情");
-    expect(html).toContain("产品经理助手");
+    expect(html).toContain("产品经理");
+    expect(html).toContain("基础信息");
+    expect(html).toContain("角色规则");
+    expect(html).toContain("引导问题");
+    expect(html).toContain("初始化时会逐题询问管理员");
     expect(html).toContain("# Role: Product Manager");
     expect(html).toContain("你希望它用什么方式和你交互？");
     expect(html).toContain("/v1/roles/role-product-manager/documents");
     expect(html).toContain("/v1/roles/role-product-manager/questions");
+    expect(html).toContain("/admin/roles/role-product-manager/documents/save");
+    expect(html).toContain("/admin/roles/role-product-manager/questions/save");
+    expect(html).toContain("/admin/roles/role-product-manager/questions/delete");
+    expect(html).toContain('data-add-question');
+    expect(html).toContain("添加问题");
+    expect(html).toContain("新增选项");
+    expect(html).toContain('data-add-option');
+    expect(html).toContain("question-list");
+    expect(html).toContain("question-options");
+    expect(html).toContain("是否默认添加其他");
+    expect(html).toContain("删除问题");
+    expect(html).not.toContain("选项 JSON");
+    expect(html).not.toContain("条件 JSON");
+    expect(html).toContain('name="option_label_0"');
+    expect(html).toContain('name="option_label_2"');
+    expect(html).not.toContain('name="option_value_0"');
+    expect(html).not.toContain('name="option_value_2"');
+    expect(html).not.toContain('name="key"');
+    expect(html).not.toContain('name="description"');
+    expect(html).not.toContain('name="question_type"');
+    expect(html).not.toContain('name="sort_order"');
+    expect(html).not.toContain('name="depends_on_question_key"');
+    expect(html).not.toContain('name="depends_on_option_value"');
+    expect(html).not.toContain('name="required"');
+    expect(html).toContain('type="radio" name="enabled" value="true"');
+    expect(html).toContain('type="radio" name="enabled" value="false"');
     expect(calls).toEqual([
       "http://data-service/v1/roles/role-product-manager",
       "http://data-service/v1/roles/role-product-manager/documents",
@@ -2175,6 +2533,78 @@ describe("control-api server", () => {
     ]);
   });
 
+  it("updates role documents from the admin role page when role_document_id is present", async () => {
+    const calls: Array<{ url: string; method: string; body?: unknown }> = [];
+    const server = createControlApiServer({
+      dataServiceUrl: "http://data-service",
+      logServiceUrl: "http://log-service",
+      fetch: async (request) => {
+        if (!(request instanceof Request)) {
+          throw new Error("expected Request");
+        }
+        const bodyText = request.method === "POST" || request.method === "PUT" ? await request.text() : "";
+        const body = bodyText ? JSON.parse(bodyText) : undefined;
+        calls.push({ url: request.url, method: request.method, body });
+        if (request.url === "http://data-service/v1/roles/role-product-manager/documents/role-doc-1") {
+          return Response.json({
+            role_document_id: "role-doc-1",
+            role_id: "role-product-manager",
+            title: "role.md",
+            content: "# Updated Role",
+            enabled: true,
+          }, { status: 200 });
+        }
+        if (request.url === "http://log-service/v1/audit-events") {
+          return Response.json({ event_id: "audit-1" }, { status: 201 });
+        }
+        return Response.json({ error: "unexpected" }, { status: 500 });
+      },
+    });
+
+    const response = await server.fetch(new Request("http://localhost/admin/roles/role-product-manager/documents/save", {
+      method: "POST",
+      headers: {
+        "content-type": "application/x-www-form-urlencoded",
+      },
+      body: new URLSearchParams({
+        actor_id: "admin-a",
+        role_document_id: "role-doc-1",
+        title: "role.md",
+        content: "# Updated Role",
+        enabled: "true",
+      }),
+    }));
+
+    expect(response.status).toBe(303);
+    expect(calls).toEqual([
+      {
+        url: "http://data-service/v1/roles/role-product-manager/documents/role-doc-1",
+        method: "PUT",
+        body: {
+          actor_id: "admin-a",
+          title: "role.md",
+          content: "# Updated Role",
+          enabled: true,
+        },
+      },
+      {
+        url: "http://log-service/v1/audit-events",
+        method: "POST",
+        body: {
+          actor_id: "admin-a",
+          action: "role_document.upsert",
+          target_type: "role",
+          target_id: "role-product-manager",
+          metadata: {
+            role_document_id: "role-doc-1",
+            title: "role.md",
+            enabled: true,
+          },
+        },
+      },
+    ]);
+  });
+
   it("saves role questions from the admin role page", async () => {
     const calls: Array<{ url: string; method: string; body?: unknown }> = [];
     const server = createControlApiServer({
@@ -2184,10 +2614,13 @@ describe("control-api server", () => {
         if (!(request instanceof Request)) {
           throw new Error("expected Request");
         }
-        const bodyText = request.method === "POST" ? await request.text() : "";
+        const bodyText = request.method === "POST" || request.method === "PUT" ? await request.text() : "";
         const body = bodyText ? JSON.parse(bodyText) : undefined;
         calls.push({ url: request.url, method: request.method, body });
-        if (request.url === "http://data-service/v1/roles/role-product-manager/questions") {
+        if (request.url === "http://data-service/v1/roles/role-product-manager/questions" && request.method === "GET") {
+          return Response.json([]);
+        }
+        if (request.url === "http://data-service/v1/roles/role-product-manager/questions" && request.method === "POST") {
           return Response.json({
             question_id: "q-1",
             role_id: "role-product-manager",
@@ -2195,7 +2628,10 @@ describe("control-api server", () => {
             title: "你希望它用什么方式和你交互？",
             description: "",
             question_type: "single_choice",
-            options_json: [],
+            options_json: [
+              { value: "step", label: "逐句引导" },
+              { value: "batch", label: "批量引导" },
+            ],
             required: true,
             enabled: true,
             sort_order: 10,
@@ -2216,15 +2652,10 @@ describe("control-api server", () => {
       },
       body: new URLSearchParams({
         actor_id: "admin-a",
-        key: "interaction_mode",
         title: "你希望它用什么方式和你交互？",
-        description: "",
-        question_type: "single_choice",
-        options_json: "[]",
-        required: "true",
-        enabled: "true",
-        sort_order: "10",
-        depends_on_json: "[]",
+        option_label_0: "逐句引导",
+        option_label_1: "批量引导",
+        append_other_option: "true",
       }),
     }));
 
@@ -2233,14 +2664,23 @@ describe("control-api server", () => {
     expect(calls).toEqual([
       {
         url: "http://data-service/v1/roles/role-product-manager/questions",
+        method: "GET",
+        body: undefined,
+      },
+      {
+        url: "http://data-service/v1/roles/role-product-manager/questions",
         method: "POST",
         body: {
           actor_id: "admin-a",
-          key: "interaction_mode",
+          key: expect.any(String),
           title: "你希望它用什么方式和你交互？",
           description: "",
           question_type: "single_choice",
-          options_json: [],
+          options_json: [
+            { value: "option_1", label: "逐句引导" },
+            { value: "option_2", label: "批量引导" },
+            { value: "other", label: "其他，可直接描述" },
+          ],
           required: true,
           enabled: true,
           sort_order: 10,
@@ -2260,6 +2700,181 @@ describe("control-api server", () => {
             key: "interaction_mode",
             enabled: true,
             sort_order: 10,
+          },
+        },
+      },
+    ]);
+  });
+
+  it("updates role questions from the admin role page when question_id is present", async () => {
+    const calls: Array<{ url: string; method: string; body?: unknown }> = [];
+    const server = createControlApiServer({
+      dataServiceUrl: "http://data-service",
+      logServiceUrl: "http://log-service",
+      fetch: async (request) => {
+        if (!(request instanceof Request)) {
+          throw new Error("expected Request");
+        }
+        const bodyText = request.method === "POST" || request.method === "PUT" ? await request.text() : "";
+        const body = bodyText ? JSON.parse(bodyText) : undefined;
+        calls.push({ url: request.url, method: request.method, body });
+        if (request.url === "http://data-service/v1/roles/role-product-manager/questions" && request.method === "GET") {
+          return Response.json([
+            {
+              question_id: "q-1",
+              role_id: "role-product-manager",
+              key: "interaction_mode",
+              title: "旧问题",
+              description: "",
+              question_type: "single_choice",
+              options_json: [
+                { value: "step", label: "逐句引导" },
+                { value: "batch", label: "批量引导" },
+              ],
+              required: true,
+              enabled: true,
+              sort_order: 10,
+              depends_on_json: [{ question_key: "role_type", option_value: "pm" }],
+            },
+          ]);
+        }
+        if (request.url === "http://data-service/v1/roles/role-product-manager/questions/q-1") {
+          return Response.json({
+            question_id: "q-1",
+            role_id: "role-product-manager",
+            key: "interaction_mode",
+            title: "更新后的问题",
+            description: "",
+            question_type: "single_choice",
+            options_json: [
+              { value: "step", label: "逐句引导" },
+              { value: "batch", label: "批量引导" },
+            ],
+            required: true,
+            enabled: true,
+            sort_order: 10,
+            depends_on_json: [{ question_key: "role_type", option_value: "pm" }],
+          }, { status: 200 });
+        }
+        if (request.url === "http://log-service/v1/audit-events") {
+          return Response.json({ event_id: "audit-1" }, { status: 201 });
+        }
+        return Response.json({ error: "unexpected" }, { status: 500 });
+      },
+    });
+
+    const response = await server.fetch(new Request("http://localhost/admin/roles/role-product-manager/questions/save", {
+      method: "POST",
+      headers: {
+        "content-type": "application/x-www-form-urlencoded",
+      },
+      body: new URLSearchParams({
+        actor_id: "admin-a",
+        question_id: "q-1",
+        title: "更新后的问题",
+        option_label_0: "逐句引导",
+        option_label_1: "批量引导",
+        append_other_option: "true",
+      }),
+    }));
+
+    expect(response.status).toBe(303);
+    expect(calls).toEqual([
+      {
+        url: "http://data-service/v1/roles/role-product-manager/questions",
+        method: "GET",
+        body: undefined,
+      },
+      {
+        url: "http://data-service/v1/roles/role-product-manager/questions/q-1",
+        method: "PUT",
+        body: {
+          actor_id: "admin-a",
+          key: "interaction_mode",
+          title: "更新后的问题",
+          description: "",
+          question_type: "single_choice",
+          options_json: [
+            { value: "option_1", label: "逐句引导" },
+            { value: "option_2", label: "批量引导" },
+            { value: "other", label: "其他，可直接描述" },
+          ],
+          required: true,
+          enabled: true,
+          sort_order: 10,
+          depends_on_json: [{ question_key: "role_type", option_value: "pm" }],
+        },
+      },
+      {
+        url: "http://log-service/v1/audit-events",
+        method: "POST",
+        body: {
+          actor_id: "admin-a",
+          action: "role_question.upsert",
+          target_type: "role",
+          target_id: "role-product-manager",
+          metadata: {
+            question_id: "q-1",
+            key: "interaction_mode",
+            enabled: true,
+            sort_order: 10,
+          },
+        },
+      },
+    ]);
+  });
+
+  it("deletes role questions from the admin role page", async () => {
+    const calls: Array<{ url: string; method: string; body?: unknown }> = [];
+    const server = createControlApiServer({
+      dataServiceUrl: "http://data-service",
+      logServiceUrl: "http://log-service",
+      fetch: async (request) => {
+        if (!(request instanceof Request)) {
+          throw new Error("expected Request");
+        }
+        const bodyText = request.method === "POST" ? await request.text() : "";
+        const body = bodyText ? JSON.parse(bodyText) : undefined;
+        calls.push({ url: request.url, method: request.method, body });
+        if (request.url === "http://data-service/v1/roles/role-product-manager/questions/q-1" && request.method === "DELETE") {
+          return new Response(null, { status: 204 });
+        }
+        if (request.url === "http://log-service/v1/audit-events") {
+          return Response.json({ event_id: "audit-1" }, { status: 201 });
+        }
+        return Response.json({ error: "unexpected" }, { status: 500 });
+      },
+    });
+
+    const response = await server.fetch(new Request("http://localhost/admin/roles/role-product-manager/questions/delete", {
+      method: "POST",
+      headers: {
+        "content-type": "application/x-www-form-urlencoded",
+      },
+      body: new URLSearchParams({
+        actor_id: "admin-a",
+        question_id: "q-1",
+      }),
+    }));
+
+    expect(response.status).toBe(303);
+    expect(response.headers.get("location")).toBe("/admin/roles/role-product-manager");
+    expect(calls).toEqual([
+      {
+        url: "http://data-service/v1/roles/role-product-manager/questions/q-1",
+        method: "DELETE",
+        body: undefined,
+      },
+      {
+        url: "http://log-service/v1/audit-events",
+        method: "POST",
+        body: {
+          actor_id: "admin-a",
+          action: "role_question.delete",
+          target_type: "role",
+          target_id: "role-product-manager",
+          metadata: {
+            question_id: "q-1",
           },
         },
       },
