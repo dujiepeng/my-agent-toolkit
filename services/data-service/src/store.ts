@@ -2057,13 +2057,10 @@ export function seedDefaultRoleConfig(store: Pick<
     title,
     description: "",
     question_type: "single_choice" as const,
-    options_json: [
-      ...optionLabels.map((label, index) => ({
-        value: `option_${index + 1}`,
-        label,
-      })),
-      { value: "other", label: "其他，可直接描述" },
-    ],
+    options_json: optionLabels.map((label, index) => ({
+      value: `option_${index + 1}`,
+      label,
+    })),
     required: true,
     enabled: true,
     sort_order: sortOrder,
