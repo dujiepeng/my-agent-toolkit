@@ -688,6 +688,7 @@ export interface DataStore {
   listBots(): BotRecord[];
   getBot(botId: string): BotRecord | undefined;
   updateBot(botId: string, input: UpdateBotInput): BotRecord;
+  resetToStandardRoleConfig(): void;
   getBotMcpCapabilityConfig(botId: string): McpCapabilityConfig;
   updateBotMcpCapabilityConfig(
     botId: string,
@@ -881,6 +882,48 @@ export function createDataStore(options: DataStoreOptions = {}): DataStore {
         wecomSecrets.set(bot.bot_id, wecomSecret);
       }
       return updated;
+    },
+
+    resetToStandardRoleConfig() {
+      const playground = this.listGlobalDocuments({ includeDisabled: true }).find((document) =>
+        document.slug === "playground"
+      );
+
+      bots.clear();
+      wecomSecrets.clear();
+      conversations.clear();
+      admins.clear();
+      adminClaims.clear();
+      initializationSessions.clear();
+      pendingGeneratedDocuments.clear();
+      runtimeConfigs.clear();
+      businessDocuments.clear();
+      businessDocumentVersions.clear();
+      memoryDocuments.clear();
+      botConfigDocuments.clear();
+      roleDocuments.clear();
+      roleQuestions.clear();
+      roles.clear();
+      memories.clear();
+      chunks.clear();
+      assets.clear();
+      mcpCapabilityConfigs.clear();
+      botRuntimePolicies.clear();
+      botEnvVars.clear();
+      botSkills.clear();
+      botMcps.clear();
+      botCapabilityAuditLogs.clear();
+
+      if (playground) {
+        globalDocuments.clear();
+        globalDocuments.set(playground.document_id, {
+          ...playground,
+        });
+      } else {
+        globalDocuments.clear();
+      }
+
+      seedDefaultRoleConfig(this);
     },
 
     getBotMcpCapabilityConfig(botId) {

@@ -101,6 +101,53 @@ describe("sqlite data store", () => {
     second.close?.();
   });
 
+  it("persists pending and claimed admin claim detail states across store instances", () => {
+    const dir = mkdtempSync(join(tmpdir(), "data-service-"));
+    dirs.push(dir);
+    const dbPath = join(dir, "data.db");
+
+    const first = createSqliteDataStore(dbPath);
+    first.createBot({
+      bot_id: "prd-bot",
+      name: "PRD Bot",
+      runtime: "kiro",
+      wecom_bot_id: "wecom-bot-a",
+      wecom_secret: "secret-a",
+    });
+    const claim = first.createAdminClaim("prd-bot");
+    expect(first.getBotChannelDetail("prd-bot")).toMatchObject({
+      pending_admin_claim: {
+        status: "pending",
+        code: claim.code,
+        expires_at: claim.expires_at,
+      },
+    });
+    first.close?.();
+
+    const second = createSqliteDataStore(dbPath);
+    expect(second.getBotChannelDetail("prd-bot")).toMatchObject({
+      pending_admin_claim: {
+        status: "pending",
+        code: claim.code,
+        expires_at: claim.expires_at,
+      },
+    });
+    second.verifyAdminClaim({
+      bot_id: "prd-bot",
+      wecom_user_id: "admin-a",
+      code: claim.code,
+    });
+    expect(second.getBotChannelDetail("prd-bot")).toMatchObject({
+      admin: {
+        wecom_user_id: "admin-a",
+      },
+      pending_admin_claim: {
+        status: "claimed",
+      },
+    });
+    second.close?.();
+  });
+
   it("persists listed and updated bot records across store instances", () => {
     const dir = mkdtempSync(join(tmpdir(), "data-service-"));
     dirs.push(dir);
@@ -617,8 +664,13 @@ describe("sqlite data store", () => {
       }),
       expect.objectContaining({
         role_id: productManager.role_id,
+        key: "output_shape",
+        title: "默认输出更偏向哪类内容？",
+      }),
+      expect.objectContaining({
+        role_id: productManager.role_id,
         key: "work_rules",
-        title: "有没有必须遵守的工作规则？",
+        title: "是否有额外工作规则？",
       }),
       existingQuestion,
     ]);
@@ -650,8 +702,38 @@ describe("sqlite data store", () => {
     ]);
     expect(store.listRoles({ includeDisabled: true })).toEqual([
       existingRole,
-      expect.objectContaining({ slug: "product-manager", name: "产品经理助手" }),
+      expect.objectContaining({ slug: "product-manager", name: "产品经理" }),
+      expect.objectContaining({ slug: "qa-engineer", name: "测试工程师" }),
+      expect.objectContaining({ slug: "engineer", name: "研发工程师" }),
+      expect.objectContaining({ slug: "marketing", name: "市场人员" }),
+      expect.objectContaining({ slug: "operations", name: "运营人员" }),
     ]);
+    store.close?.();
+  });
+
+  it("resets bot and role data but preserves playground", () => {
+    const dir = mkdtempSync(join(tmpdir(), "data-service-"));
+    dirs.push(dir);
+    const dbPath = join(dir, "data.db");
+
+    const store = createSqliteDataStore(dbPath);
+    seedDefaultRoleConfig(store);
+    const playgroundBefore = store.listGlobalDocuments().find((doc) => doc.slug === "playground");
+    store.createBot({ bot_id: "bot-1", name: "old bot", runtime: "kiro" });
+
+    store.resetToStandardRoleConfig();
+
+    expect(store.listBots()).toEqual([]);
+    expect(store.listRoles().map((role) => role.name)).toEqual([
+      "产品经理",
+      "测试工程师",
+      "研发工程师",
+      "市场人员",
+      "运营人员",
+    ]);
+    expect(store.listGlobalDocuments().find((doc) => doc.slug === "playground")?.document_id).toBe(
+      playgroundBefore?.document_id,
+    );
     store.close?.();
   });
 

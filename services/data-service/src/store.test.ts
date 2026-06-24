@@ -1260,6 +1260,27 @@ describe("data-service store", () => {
     expect(questions.map((question) => question.title)).toContain("你希望它用什么方式和你交互？");
   });
 
+  it("resets bot and role data but preserves playground", () => {
+    const store = createDataStore();
+    seedDefaultRoleConfig(store);
+    const playgroundBefore = store.listGlobalDocuments().find((doc) => doc.slug === "playground");
+
+    store.createBot({ bot_id: "bot-1", name: "old bot", runtime: "kiro" });
+    store.resetToStandardRoleConfig();
+
+    expect(store.listBots()).toEqual([]);
+    expect(store.listRoles().map((role) => role.name)).toEqual([
+      "产品经理",
+      "测试工程师",
+      "研发工程师",
+      "市场人员",
+      "运营人员",
+    ]);
+    expect(store.listGlobalDocuments().find((doc) => doc.slug === "playground")?.document_id).toBe(
+      playgroundBefore?.document_id,
+    );
+  });
+
   it("stores roles with enabled filtering and sort order", () => {
     const store = createDataStore();
 

@@ -166,6 +166,11 @@ export function createSqliteDataStore(
       return updateBot(db, botId, input);
     },
 
+    resetToStandardRoleConfig() {
+      resetToStandardRoleConfigInSqlite(db);
+      seedDefaultRoleConfig(this);
+    },
+
     getBotMcpCapabilityConfig(botId) {
       return getBotMcpCapabilityConfig(db, botId);
     },
@@ -332,8 +337,8 @@ export function createSqliteDataStore(
       };
 
       db.prepare(
-        "insert or replace into admin_claims (bot_id, code_hash, created_at, expires_at) values (?, ?, ?, ?)",
-      ).run(claim.bot_id, claim.code_hash, claim.created_at, claim.expires_at);
+        "insert or replace into admin_claims (bot_id, code, code_hash, created_at, expires_at) values (?, ?, ?, ?, ?)",
+      ).run(claim.bot_id, claim.code, claim.code_hash, claim.created_at, claim.expires_at);
       return claim;
     },
 
@@ -637,6 +642,58 @@ export function seedDefaultRoleConfig(store: Pick<
   seedDefaultRoleConfigInMemory(store);
 }
 
+function resetToStandardRoleConfigInSqlite(
+  db: Database.Database,
+): void {
+  const playground = db.prepare(
+    "select * from global_documents where slug = ?",
+  ).get("playground") as GlobalDocumentRecord | undefined;
+
+  db.transaction(() => {
+    db.prepare("delete from initialization_sessions").run();
+    db.prepare("delete from pending_generated_documents").run();
+    db.prepare("delete from conversations").run();
+    db.prepare("delete from admin_claims").run();
+    db.prepare("delete from admins").run();
+    db.prepare("delete from runtime_configs").run();
+    db.prepare("delete from bot_mcp_capability_configs").run();
+    db.prepare("delete from bot_runtime_policies").run();
+    db.prepare("delete from bot_env_vars").run();
+    db.prepare("delete from bot_skills").run();
+    db.prepare("delete from bot_mcps").run();
+    db.prepare("delete from bot_capability_audit_logs").run();
+    db.prepare("delete from business_document_versions").run();
+    db.prepare("delete from business_documents").run();
+    db.prepare("delete from bot_config_document_versions").run();
+    db.prepare("delete from bot_config_documents").run();
+    db.prepare("delete from memory_document_versions").run();
+    db.prepare("delete from memory_tags").run();
+    db.prepare("delete from memories").run();
+    db.prepare("delete from chunks").run();
+    db.prepare("delete from assets").run();
+    db.prepare("delete from role_documents").run();
+    db.prepare("delete from role_questions").run();
+    db.prepare("delete from roles").run();
+    db.prepare("delete from bots").run();
+    db.prepare("delete from global_documents").run();
+  })();
+
+  if (playground) {
+    db.prepare(
+      "insert into global_documents (document_id, title, slug, content, enabled, sort_order, created_at, updated_at) values (?, ?, ?, ?, ?, ?, ?, ?)",
+    ).run(
+      playground.document_id,
+      playground.title,
+      playground.slug,
+      playground.content,
+      playground.enabled ? 1 : 0,
+      playground.sort_order,
+      playground.created_at,
+      playground.updated_at,
+    );
+  }
+}
+
 function botToChannelRecord(bot: BotRecord): BotChannelRecord {
   const secretConfigured = bot.wecom_secret_configured;
   const hasWeComBotId = Boolean(bot.wecom_bot_id);
@@ -677,10 +734,31 @@ function getBotChannelDetail(
     scope: "bot",
     owner_id: bot.bot_id,
   });
+  const pendingClaim = db
+    .prepare("select code, code_hash, created_at, expires_at from admin_claims where bot_id = ?")
+    .get(bot.bot_id) as {
+      code: string;
+      code_hash: string;
+      created_at: string;
+      expires_at: string;
+    } | undefined;
+  const pendingAdminClaim = admin
+    ? { status: "claimed" as const }
+    : pendingClaim
+      ? new Date(pendingClaim.expires_at).getTime() < Date.now()
+        || !pendingClaim.code
+        ? { status: "expired" as const, expires_at: pendingClaim.expires_at }
+        : {
+          status: "pending" as const,
+          code: pendingClaim.code,
+          expires_at: pendingClaim.expires_at,
+        }
+      : undefined;
   return {
     channel: botToChannelRecord(bot),
     bot,
     ...(admin ? { admin } : {}),
+    ...(pendingAdminClaim ? { pending_admin_claim: pendingAdminClaim } : {}),
     memory_documents: memoryDocuments,
     config_documents: listBotConfigDocuments(db, bot.bot_id),
   };
@@ -1189,7 +1267,7 @@ function upsertRole(
 ): RoleRecord {
   const name = requireText(input.name, "name");
   const slug = requireText(input.slug, "slug");
-  const description = requireText(input.description, "description");
+  const description = typeof input.description === "string" ? input.description.trim() : "";
   const existing = input.role_id ? getRequiredRole(db, input.role_id) : findRoleBySlug(db, slug);
   const duplicate = findRoleBySlug(db, slug, existing?.role_id);
   if (duplicate) {
@@ -2031,6 +2109,7 @@ function migrate(db: Database.Database): void {
 
     create table if not exists admin_claims (
       bot_id text primary key,
+      code text not null default '',
       code_hash text not null,
       created_at text not null,
       expires_at text not null
@@ -2328,6 +2407,7 @@ function migrate(db: Database.Database): void {
   );
   addColumnIfMissing(db, "bots", "last_wecom_check_at", "text");
   addColumnIfMissing(db, "bots", "last_wecom_error", "text");
+  addColumnIfMissing(db, "admin_claims", "code", "text not null default ''");
   addColumnIfMissing(db, "initialization_sessions", "selected_role_id", "text");
   db.prepare(
     "create unique index if not exists idx_bots_wecom_bot_id_unique on bots (wecom_bot_id) where wecom_bot_id is not null",
