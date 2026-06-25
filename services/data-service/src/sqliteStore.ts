@@ -54,6 +54,9 @@ import {
   type ClaimAdminInput,
   type ChunkRecord,
   type CreateBusinessDocumentInput,
+  type ConversationChannel,
+  type ConversationPurpose,
+  type CreateConversationInput,
   type ConversationRecord,
   type CreateMemoryRecordInput,
   type DataStore,
@@ -62,6 +65,7 @@ import {
   type InitializationSessionKeyInput,
   type GlobalDocumentRecord,
   type ListBusinessDocumentsInput,
+  type ListConversationsInput,
   type ListCurrentMemoryDocumentsInput,
   type ListEnabledRecordsOptions,
   type ListMemoriesInput,
@@ -88,6 +92,8 @@ import {
   type TransferAdminInput,
   type UpdateBusinessDocumentInput,
   type UpdateBotRuntimePolicyInput,
+  type OpenConversationInput,
+  type RenameConversationInput,
   type UpsertBotEnvVarInput,
   type UpsertBotMcpInput,
   type UpsertBotSkillInput,
@@ -444,6 +450,22 @@ export function createSqliteDataStore(
       return resolveConversation(db, input);
     },
 
+    listConversations(input) {
+      return listConversations(db, input);
+    },
+
+    createConversation(input) {
+      return createConversation(db, input);
+    },
+
+    openConversation(input) {
+      return openConversation(db, input);
+    },
+
+    renameConversation(input) {
+      return renameConversation(db, input);
+    },
+
     upsertInitializationSession(input) {
       return upsertInitializationSession(db, input);
     },
@@ -657,6 +679,7 @@ function resetToStandardRoleConfigInSqlite(
     db.prepare("delete from initialization_sessions").run();
     db.prepare("delete from pending_generated_documents").run();
     db.prepare("delete from conversations").run();
+    db.prepare("delete from conversation_scope_states").run();
     db.prepare("delete from admin_claims").run();
     db.prepare("delete from admins").run();
     db.prepare("delete from runtime_configs").run();
@@ -2120,13 +2143,25 @@ function migrate(db: Database.Database): void {
     );
 
     create table if not exists conversations (
-      conversation_key text primary key,
-      conversation_id text not null,
+      conversation_id text primary key,
+      conversation_key text not null,
+      scope_key text not null,
       bot_id text not null,
       wecom_user_id text not null,
       channel text not null,
       purpose text not null,
+      display_name text,
+      is_active integer not null,
       created_at text not null,
+      updated_at text not null
+    );
+
+    create index if not exists idx_conversations_scope_key on conversations(scope_key, updated_at desc, created_at desc);
+    create index if not exists idx_conversations_bot_scope on conversations(bot_id, wecom_user_id, channel, purpose, updated_at desc, created_at desc);
+
+    create table if not exists conversation_scope_states (
+      scope_key text primary key,
+      conversation_id text not null,
       updated_at text not null
     );
 
@@ -2509,44 +2544,196 @@ function resolveConversation(
   input: ResolveConversationInput,
 ): ConversationRecord {
   getRequiredBot(db, input.bot_id);
-  const key = [
-    input.bot_id,
-    input.wecom_user_id,
-    input.channel,
-    input.purpose,
-  ].join(":");
-  const existing = db
-    .prepare(
-      "select conversation_id, bot_id, wecom_user_id, channel, purpose, created_at, updated_at from conversations where conversation_key = ?",
-    )
-    .get(key) as ConversationRecord | undefined;
+  const existing = getActiveConversationForScope(db, input);
   if (existing) {
     return existing;
   }
 
+  return createConversation(db, {
+    ...input,
+    display_name: undefined,
+  });
+}
+
+function getActiveConversationForScope(
+  db: Database.Database,
+  input: ResolveConversationInput,
+): ConversationRecord | undefined {
+  const scopeKey = conversationScopeKey(
+    input.bot_id,
+    input.wecom_user_id,
+    input.channel,
+    input.purpose,
+  );
+  const state = db
+    .prepare("select scope_key, conversation_id, updated_at from conversation_scope_states where scope_key = ?")
+    .get(scopeKey) as { scope_key: string; conversation_id: string; updated_at: string } | undefined;
+  if (!state) {
+    return undefined;
+  }
+  return mapConversationRecord(
+    db
+      .prepare(
+        "select conversation_id, bot_id, wecom_user_id, channel, purpose, display_name, is_active, created_at, updated_at from conversations where conversation_id = ?",
+      )
+      .get(state.conversation_id),
+  );
+}
+
+function listConversations(
+  db: Database.Database,
+  input: ListConversationsInput,
+): ConversationRecord[] {
+  getRequiredBot(db, input.bot_id);
+  return db
+    .prepare(
+      "select conversation_id, bot_id, wecom_user_id, channel, purpose, display_name, is_active, created_at, updated_at from conversations where bot_id = ? and wecom_user_id = ? and channel = ? and purpose = ? order by updated_at desc, created_at desc",
+    )
+    .all(
+      input.bot_id,
+      input.wecom_user_id,
+      input.channel,
+      input.purpose,
+    )
+    .map(mapConversationRecord)
+    .filter((conversation): conversation is ConversationRecord => Boolean(conversation));
+}
+
+function createConversation(
+  db: Database.Database,
+  input: CreateConversationInput,
+): ConversationRecord {
+  const bot = getRequiredBot(db, input.bot_id);
+  const scopeKey = conversationScopeKey(
+    bot.bot_id,
+    requireText(input.wecom_user_id, "wecom_user_id"),
+    input.channel,
+    input.purpose,
+  );
   const now = new Date().toISOString();
   const conversation: ConversationRecord = {
     conversation_id: `conv_${crypto.randomUUID()}`,
-    bot_id: input.bot_id,
-    wecom_user_id: input.wecom_user_id,
+    bot_id: bot.bot_id,
+    wecom_user_id: requireText(input.wecom_user_id, "wecom_user_id"),
     channel: input.channel,
     purpose: input.purpose,
+    ...(optionalText(input.display_name) ? { display_name: optionalText(input.display_name) } : {}),
+    is_active: true,
     created_at: now,
     updated_at: now,
   };
-  db.prepare(
-    "insert into conversations (conversation_key, conversation_id, bot_id, wecom_user_id, channel, purpose, created_at, updated_at) values (?, ?, ?, ?, ?, ?, ?, ?)",
-  ).run(
-    key,
-    conversation.conversation_id,
+  db.transaction(() => {
+    db.prepare(
+      "update conversations set is_active = 0, updated_at = ? where bot_id = ? and wecom_user_id = ? and channel = ? and purpose = ?",
+    ).run(
+      nextIsoTimestamp(now),
+      conversation.bot_id,
+      conversation.wecom_user_id,
+      conversation.channel,
+      conversation.purpose,
+    );
+    db.prepare(
+      "insert into conversations (conversation_id, conversation_key, scope_key, bot_id, wecom_user_id, channel, purpose, display_name, is_active, created_at, updated_at) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+    ).run(
+      conversation.conversation_id,
+      scopeKey,
+      scopeKey,
+      conversation.bot_id,
+      conversation.wecom_user_id,
+      conversation.channel,
+      conversation.purpose,
+      conversation.display_name ?? null,
+      conversation.is_active ? 1 : 0,
+      conversation.created_at,
+      conversation.updated_at,
+    );
+    db.prepare(
+      "insert into conversation_scope_states (scope_key, conversation_id, updated_at) values (?, ?, ?) on conflict(scope_key) do update set conversation_id = excluded.conversation_id, updated_at = excluded.updated_at",
+    ).run(
+      scopeKey,
+      conversation.conversation_id,
+      conversation.updated_at,
+    );
+  })();
+  return {
+    ...conversation,
+    is_active: true,
+  };
+}
+
+function openConversation(
+  db: Database.Database,
+  input: OpenConversationInput,
+): ConversationRecord {
+  getRequiredBot(db, input.bot_id);
+  const conversation = mapConversationRecord(
+    db
+      .prepare(
+        "select conversation_id, bot_id, wecom_user_id, channel, purpose, display_name, is_active, created_at, updated_at from conversations where conversation_id = ?",
+      )
+      .get(requireText(input.conversation_id, "conversation_id")),
+  );
+  if (!conversation || conversation.bot_id !== input.bot_id || conversation.wecom_user_id !== input.wecom_user_id) {
+    throw new Error(`conversation not found: ${input.conversation_id}`);
+  }
+
+  const key = conversationScopeKey(
     conversation.bot_id,
     conversation.wecom_user_id,
     conversation.channel,
     conversation.purpose,
-    conversation.created_at,
-    conversation.updated_at,
   );
-  return conversation;
+  const updatedAt = nextIsoTimestamp(conversation.updated_at);
+  db.transaction(() => {
+    db.prepare(
+      "update conversations set is_active = 0, updated_at = ? where bot_id = ? and wecom_user_id = ? and channel = ? and purpose = ? and conversation_id != ?",
+    ).run(
+      updatedAt,
+      conversation.bot_id,
+      conversation.wecom_user_id,
+      conversation.channel,
+      conversation.purpose,
+      conversation.conversation_id,
+    );
+    db.prepare(
+      "update conversations set is_active = 1, updated_at = ? where conversation_id = ?",
+    ).run(
+      updatedAt,
+      conversation.conversation_id,
+    );
+    db.prepare(
+      "insert into conversation_scope_states (scope_key, conversation_id, updated_at) values (?, ?, ?) on conflict(scope_key) do update set conversation_id = excluded.conversation_id, updated_at = excluded.updated_at",
+    ).run(
+      key,
+      conversation.conversation_id,
+      updatedAt,
+    );
+  })();
+  return {
+    ...conversation,
+    is_active: true,
+    updated_at: updatedAt,
+  };
+}
+
+function renameConversation(
+  db: Database.Database,
+  input: RenameConversationInput,
+): ConversationRecord {
+  const conversation = openConversation(db, input);
+  const updatedAt = nextIsoTimestamp(conversation.updated_at);
+  db.prepare(
+    "update conversations set display_name = ?, updated_at = ? where conversation_id = ?",
+  ).run(
+    requireText(input.display_name, "display_name"),
+    updatedAt,
+    conversation.conversation_id,
+  );
+  return {
+    ...conversation,
+    display_name: requireText(input.display_name, "display_name"),
+    updated_at: updatedAt,
+  };
 }
 
 function upsertInitializationSession(
@@ -3223,6 +3410,33 @@ function mapBotCapabilityAuditLogRecord(row: unknown): BotCapabilityAuditLogReco
     ...(typeof record.error_message === "string" ? { error_message: record.error_message } : {}),
     created_at: record.created_at as string,
   };
+}
+
+function mapConversationRecord(row: unknown): ConversationRecord | undefined {
+  if (!row || typeof row !== "object") {
+    return undefined;
+  }
+  const record = row as Record<string, unknown>;
+  return {
+    conversation_id: record.conversation_id as string,
+    bot_id: record.bot_id as string,
+    wecom_user_id: record.wecom_user_id as string,
+    channel: record.channel as ConversationChannel,
+    purpose: record.purpose as ConversationPurpose,
+    ...(typeof record.display_name === "string" ? { display_name: record.display_name } : {}),
+    is_active: Boolean(record.is_active),
+    created_at: record.created_at as string,
+    updated_at: record.updated_at as string,
+  };
+}
+
+function conversationScopeKey(
+  botId: string,
+  wecomUserId: string,
+  channel: ConversationChannel,
+  purpose: ConversationPurpose,
+): string {
+  return [botId, wecomUserId, channel, purpose].join(":");
 }
 
 function mapGlobalDocumentRecord(row: unknown): GlobalDocumentRecord | undefined {

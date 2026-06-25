@@ -111,6 +111,8 @@ export interface ConversationRecord {
   wecom_user_id: string;
   channel: ConversationChannel;
   purpose: ConversationPurpose;
+  display_name?: string;
+  is_active: boolean;
   created_at: string;
   updated_at: string;
 }
@@ -327,6 +329,22 @@ export interface ResolveConversationInput {
   wecom_user_id: string;
   channel: ConversationChannel;
   purpose: ConversationPurpose;
+}
+
+export interface ListConversationsInput extends ResolveConversationInput {}
+
+export interface CreateConversationInput extends ResolveConversationInput {
+  display_name?: string;
+}
+
+export interface OpenConversationInput {
+  bot_id: string;
+  wecom_user_id: string;
+  conversation_id: string;
+}
+
+export interface RenameConversationInput extends OpenConversationInput {
+  display_name: string;
 }
 
 export interface MemoryDocumentRecord {
@@ -730,6 +748,10 @@ export interface DataStore {
   markBotReady(botId: string): BotRecord;
   resolveMessageContext(input: ResolveConversationInput): MessageContext;
   resolveConversation(input: ResolveConversationInput): ConversationRecord;
+  listConversations(input: ListConversationsInput): ConversationRecord[];
+  createConversation(input: CreateConversationInput): ConversationRecord;
+  openConversation(input: OpenConversationInput): ConversationRecord;
+  renameConversation(input: RenameConversationInput): ConversationRecord;
   upsertInitializationSession(input: UpsertInitializationSessionInput): InitializationSessionRecord;
   getActiveInitializationSession(
     input: InitializationSessionKeyInput,
@@ -797,7 +819,8 @@ export function createDataStore(options: DataStoreOptions = {}): DataStore {
   const bots = new Map<string, BotRecord>();
   const admins = new Map<string, AdminRecord>();
   const adminClaims = new Map<string, AdminClaimRecord>();
-  const conversations = new Map<string, ConversationRecord>();
+  const conversationHistory = new Map<string, ConversationRecord>();
+  const activeConversationIds = new Map<string, string>();
   const initializationSessions = new Map<string, InitializationSessionRecord>();
   const pendingGeneratedDocuments = new Map<string, PendingGeneratedDocumentRecord>();
   const runtimeConfigs = new Map<string, RuntimeConfigRecord>();
@@ -891,7 +914,9 @@ export function createDataStore(options: DataStoreOptions = {}): DataStore {
 
       bots.clear();
       wecomSecrets.clear();
-      conversations.clear();
+      conversationHistory.clear();
+      activeConversationIds.clear();
+      conversationHistory.clear();
       admins.clear();
       adminClaims.clear();
       initializationSessions.clear();
@@ -998,9 +1023,16 @@ export function createDataStore(options: DataStoreOptions = {}): DataStore {
           pendingGeneratedDocuments.delete(pendingId);
         }
       }
-      for (const key of [...conversations.keys()]) {
-        if (key.startsWith(`${bot.bot_id}:`)) {
-          conversations.delete(key);
+      for (const [scopeKey, conversationId] of [...activeConversationIds.entries()]) {
+        const record = conversationHistory.get(conversationId);
+        if (!record || record.bot_id === bot.bot_id) {
+          activeConversationIds.delete(scopeKey);
+        }
+      }
+      for (const key of [...conversationHistory.keys()]) {
+        const record = conversationHistory.get(key);
+        if (record?.bot_id === bot.bot_id) {
+          conversationHistory.delete(key);
         }
       }
       const updated = {
@@ -1405,31 +1437,87 @@ export function createDataStore(options: DataStoreOptions = {}): DataStore {
     },
 
     resolveConversation(input) {
-      getRequiredBot(bots, input.bot_id);
-
-      const key = [
+      const key = conversationScopeKey(
         input.bot_id,
         input.wecom_user_id,
         input.channel,
         input.purpose,
-      ].join(":");
-      const existing = conversations.get(key);
-      if (existing) {
-        return existing;
-      }
+      );
+      const activeConversationId = activeConversationIds.get(key);
+      const active = activeConversationId ? conversationHistory.get(activeConversationId) : undefined;
+      return active ? cloneConversationRecord(active) : createConversationForScope(conversationHistory, activeConversationIds, input);
+    },
 
-      const now = new Date().toISOString();
-      const conversation: ConversationRecord = {
-        conversation_id: `conv_${crypto.randomUUID()}`,
-        bot_id: requireText(input.bot_id, "bot_id"),
-        wecom_user_id: requireText(input.wecom_user_id, "wecom_user_id"),
-        channel: input.channel,
-        purpose: input.purpose,
-        created_at: now,
-        updated_at: now,
+    listConversations(input) {
+      getRequiredBot(bots, input.bot_id);
+      return [...conversationHistory.values()]
+        .filter((conversation) =>
+          conversation.bot_id === input.bot_id
+          && conversation.wecom_user_id === input.wecom_user_id
+          && conversation.channel === input.channel
+          && conversation.purpose === input.purpose
+        )
+        .sort((left, right) =>
+          Number(right.is_active) - Number(left.is_active)
+          || right.updated_at.localeCompare(left.updated_at)
+          || right.created_at.localeCompare(left.created_at)
+        )
+        .map((conversation) => cloneConversationRecord(conversation));
+    },
+
+    createConversation(input) {
+      return createConversationForScope(conversationHistory, activeConversationIds, input);
+    },
+
+    openConversation(input) {
+      getRequiredBot(bots, input.bot_id);
+      const conversation = conversationHistory.get(input.conversation_id);
+      if (!conversation || conversation.bot_id !== input.bot_id || conversation.wecom_user_id !== input.wecom_user_id) {
+        throw new Error(`conversation not found: ${input.conversation_id}`);
+      }
+      const key = conversationScopeKey(conversation.bot_id, conversation.wecom_user_id, conversation.channel, conversation.purpose);
+      const previousConversationId = activeConversationIds.get(key);
+      if (previousConversationId && previousConversationId !== conversation.conversation_id) {
+        const previous = conversationHistory.get(previousConversationId);
+        if (previous) {
+          conversationHistory.set(previous.conversation_id, {
+            ...previous,
+            is_active: false,
+            updated_at: nextIsoTimestamp(previous.updated_at),
+          });
+        }
+      }
+      const activated = {
+        ...conversation,
+        is_active: true,
+        updated_at: nextIsoTimestamp(conversation.updated_at),
       };
-      conversations.set(key, conversation);
-      return conversation;
+      activeConversationIds.set(key, activated.conversation_id);
+      conversationHistory.set(activated.conversation_id, activated);
+      return cloneConversationRecord(activated);
+    },
+
+    renameConversation(input) {
+      getRequiredBot(bots, input.bot_id);
+      const conversation = conversationHistory.get(input.conversation_id);
+      if (!conversation || conversation.bot_id !== input.bot_id || conversation.wecom_user_id !== input.wecom_user_id) {
+        throw new Error(`conversation not found: ${input.conversation_id}`);
+      }
+      const updated = {
+        ...conversation,
+        display_name: requireText(input.display_name, "display_name"),
+        updated_at: nextIsoTimestamp(conversation.updated_at),
+      };
+      conversationHistory.set(updated.conversation_id, updated);
+      const key = conversationScopeKey(updated.bot_id, updated.wecom_user_id, updated.channel, updated.purpose);
+      const activeConversationId = activeConversationIds.get(key);
+      if (activeConversationId === updated.conversation_id) {
+        conversationHistory.set(updated.conversation_id, {
+          ...updated,
+          is_active: true,
+        });
+      }
+      return cloneConversationRecord(updated);
     },
 
     upsertInitializationSession(input) {
@@ -3011,6 +3099,14 @@ export function cloneInitializationSessionRecord(
   };
 }
 
+export function cloneConversationRecord(
+  record: ConversationRecord,
+): ConversationRecord {
+  return {
+    ...record,
+  };
+}
+
 export function cloneRuntimeConfigRecord(
   record: RuntimeConfigRecord,
 ): RuntimeConfigRecord {
@@ -3070,4 +3166,86 @@ export function nextIsoTimestamp(previous: string): string {
   const now = Date.now();
   const previousTime = new Date(previous).getTime();
   return new Date(Math.max(now, previousTime + 1)).toISOString();
+}
+
+function conversationScopeKey(
+  botId: string,
+  wecomUserId: string,
+  channel: ConversationChannel,
+  purpose: ConversationPurpose,
+): string {
+  return [botId, wecomUserId, channel, purpose].join(":");
+}
+
+function createConversationRecord(input: CreateConversationInput): ConversationRecord {
+  const now = new Date().toISOString();
+  return {
+    conversation_id: `conv_${crypto.randomUUID()}`,
+    bot_id: requireText(input.bot_id, "bot_id"),
+    wecom_user_id: requireText(input.wecom_user_id, "wecom_user_id"),
+    channel: input.channel,
+    purpose: input.purpose,
+    ...(optionalText(input.display_name) ? { display_name: optionalText(input.display_name) } : {}),
+    is_active: true,
+    created_at: now,
+    updated_at: now,
+  };
+}
+
+function getActiveConversationForScope(
+  conversationHistory: Map<string, ConversationRecord>,
+  activeConversationIds: Map<string, string>,
+  input: ResolveConversationInput,
+): ConversationRecord | undefined {
+  const key = conversationScopeKey(
+    input.bot_id,
+    input.wecom_user_id,
+    input.channel,
+    input.purpose,
+  );
+  const conversationId = activeConversationIds.get(key);
+  if (!conversationId) {
+    return undefined;
+  }
+  const conversation = conversationHistory.get(conversationId);
+  if (!conversation) {
+    activeConversationIds.delete(key);
+    return undefined;
+  }
+  return conversation;
+}
+
+function createConversationForScope(
+  conversationHistory: Map<string, ConversationRecord>,
+  activeConversationIds: Map<string, string>,
+  input: CreateConversationInput,
+): ConversationRecord {
+  const conversation = createConversationRecord(input);
+  conversationHistory.set(conversation.conversation_id, conversation);
+  activeConversationIds.set(
+    conversationScopeKey(
+      conversation.bot_id,
+      conversation.wecom_user_id,
+      conversation.channel,
+      conversation.purpose,
+    ),
+    conversation.conversation_id,
+  );
+  for (const [id, record] of conversationHistory.entries()) {
+    if (
+      id !== conversation.conversation_id
+      && record.bot_id === conversation.bot_id
+      && record.wecom_user_id === conversation.wecom_user_id
+      && record.channel === conversation.channel
+      && record.purpose === conversation.purpose
+      && record.is_active
+    ) {
+      conversationHistory.set(id, {
+        ...record,
+        is_active: false,
+        updated_at: nextIsoTimestamp(record.updated_at),
+      });
+    }
+  }
+  return cloneConversationRecord(conversation);
 }

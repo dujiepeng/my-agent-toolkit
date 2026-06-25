@@ -68,6 +68,18 @@ export interface BotCapabilityAuditLogDto {
   created_at: string;
 }
 
+export interface ConversationDto {
+  conversation_id: string;
+  bot_id: string;
+  wecom_user_id: string;
+  channel: "wecom_direct" | "wecom_group";
+  purpose: "normal_chat" | "init" | "doc_generation";
+  display_name?: string;
+  is_active: boolean;
+  created_at: string;
+  updated_at: string;
+}
+
 export async function getActiveInitializationSession(
   config: BotHostConfig,
   input: { bot_id: string; wecom_user_id: string; conversation_id: string },
@@ -303,6 +315,99 @@ export async function listBotCapabilityAuditLogs(
     throw new Error(buildCapabilityError("list bot capability audit logs", response, errorPayload(payload)));
   }
   return await response.json() as BotCapabilityAuditLogDto[];
+}
+
+export async function listConversations(
+  config: BotHostConfig,
+  input: {
+    bot_id: string;
+    wecom_user_id: string;
+    channel: "wecom_direct" | "wecom_group";
+    purpose: "normal_chat" | "init" | "doc_generation";
+  },
+): Promise<ConversationDto[]> {
+  const query = [
+    `bot_id=${encodeURIComponent(input.bot_id)}`,
+    `wecom_user_id=${encodeURIComponent(input.wecom_user_id)}`,
+    `channel=${encodeURIComponent(input.channel)}`,
+    `purpose=${encodeURIComponent(input.purpose)}`,
+  ].join("&");
+  const response = await config.fetch(new Request(`${config.dataServiceUrl}/v1/conversations?${query}`));
+  if (!response.ok) {
+    const payload = await response.json().catch(() => undefined);
+    throw new Error(buildCapabilityError("list conversations", response, errorPayload(payload)));
+  }
+  const payload = await response.json() as { items?: ConversationDto[] } | ConversationDto[];
+  return Array.isArray(payload) ? payload : (Array.isArray(payload.items) ? payload.items : []);
+}
+
+export async function createConversation(
+  config: BotHostConfig,
+  input: {
+    bot_id: string;
+    wecom_user_id: string;
+    channel: "wecom_direct" | "wecom_group";
+    purpose: "normal_chat" | "init" | "doc_generation";
+    display_name?: string;
+  },
+): Promise<ConversationDto> {
+  const response = await config.fetch(
+    new Request(`${config.dataServiceUrl}/v1/conversations`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(input),
+    }),
+  );
+  if (!response.ok) {
+    const payload = await response.json().catch(() => undefined);
+    throw new Error(buildCapabilityError("create conversation", response, errorPayload(payload)));
+  }
+  return await response.json() as ConversationDto;
+}
+
+export async function openConversation(
+  config: BotHostConfig,
+  input: {
+    bot_id: string;
+    wecom_user_id: string;
+    conversation_id: string;
+  },
+): Promise<ConversationDto> {
+  const response = await config.fetch(
+    new Request(`${config.dataServiceUrl}/v1/conversations/open`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(input),
+    }),
+  );
+  if (!response.ok) {
+    const payload = await response.json().catch(() => undefined);
+    throw new Error(buildCapabilityError("open conversation", response, errorPayload(payload)));
+  }
+  return await response.json() as ConversationDto;
+}
+
+export async function renameConversation(
+  config: BotHostConfig,
+  input: {
+    bot_id: string;
+    wecom_user_id: string;
+    conversation_id: string;
+    display_name: string;
+  },
+): Promise<ConversationDto> {
+  const response = await config.fetch(
+    new Request(`${config.dataServiceUrl}/v1/conversations/name`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(input),
+    }),
+  );
+  if (!response.ok) {
+    const payload = await response.json().catch(() => undefined);
+    throw new Error(buildCapabilityError("rename conversation", response, errorPayload(payload)));
+  }
+  return await response.json() as ConversationDto;
 }
 
 export async function requestInstallBotSkill(

@@ -1,5 +1,6 @@
 import {
   applyAndConfirmPendingGeneratedDocuments,
+  createConversation,
   getBotRuntimePolicy,
   cancelPendingGeneratedDocuments,
   clearInitializationSession,
@@ -12,6 +13,7 @@ import {
   listBotMcps,
   listPendingGeneratedDocuments,
   listBotSkills,
+  listConversations,
   requestDeleteBotMcp,
   requestDeleteBotSkill,
   requestInstallBotMcp,
@@ -21,6 +23,8 @@ import {
   type BotMcpDto,
   type BotRuntimePolicyDto,
   type BotSkillDto,
+  openConversation,
+  renameConversation,
   upsertBotEnvVar,
   updateBotRuntimePolicy,
   upsertInitializationSession,
@@ -89,6 +93,12 @@ interface InstallSkillIntent {
   skillName: string;
   sourceRef?: string;
   sourceType?: string;
+}
+
+interface ConversationCommand {
+  kind: "history" | "new" | "open" | "name";
+  index?: number;
+  displayName?: string;
 }
 
 interface WizardState {
@@ -204,11 +214,21 @@ export async function shouldHandleWizardConfirmationAsync(
   return false;
 }
 
+export function isCapabilityQuery(text: string): boolean {
+  return parseCapabilityCommand(text) !== undefined;
+}
+
 export async function shouldStreamReply(
   config: BotHostConfig,
   input: WeComMessageInput,
 ): Promise<boolean> {
   if (parseClaimAdminCommand(input.text) || isMarkReadyCommand(input.text)) {
+    return false;
+  }
+  if (parseCapabilityCommand(input.text)) {
+    return false;
+  }
+  if (parseConversationCommand(input.text)) {
     return false;
   }
 
@@ -225,6 +245,12 @@ export async function shouldDeferStreamingForWizardState(
   input: WeComMessageInput,
 ): Promise<{ failed: boolean; hasWizardState: boolean }> {
   if (parseClaimAdminCommand(input.text) || isMarkReadyCommand(input.text)) {
+    return { failed: false, hasWizardState: false };
+  }
+  if (parseCapabilityCommand(input.text)) {
+    return { failed: false, hasWizardState: false };
+  }
+  if (parseConversationCommand(input.text)) {
     return { failed: false, hasWizardState: false };
   }
 
@@ -315,6 +341,11 @@ async function processWeComMessage(
     const capabilityCommand = parseCapabilityCommand(input.text);
     if (capabilityCommand) {
       return handleCapabilityCommand(input, config, context, capabilityCommand);
+    }
+
+    const conversationCommand = parseConversationCommand(input.text);
+    if (conversationCommand) {
+      return handleConversationCommand(input, config, context, conversationCommand);
     }
 
     if (!context.conversation?.conversation_id) {
@@ -1390,9 +1421,29 @@ function parseRememberCommand(text: string): RememberCommand | undefined {
   return undefined;
 }
 
+function parseConversationCommand(text: string): ConversationCommand | undefined {
+  const trimmed = text.trim();
+  if (trimmed === "/history") {
+    return { kind: "history" };
+  }
+  if (trimmed === "/new") {
+    return { kind: "new" };
+  }
+  const openMatch = trimmed.match(/^\/open\s+(\d+)$/);
+  if (openMatch) {
+    return { kind: "open", index: Number(openMatch[1]) };
+  }
+  const nameMatch = trimmed.match(/^\/name\s+([\s\S]+)$/);
+  if (nameMatch) {
+    return { kind: "name", displayName: nameMatch[1].trim() };
+  }
+  return undefined;
+}
+
 function parseCapabilityCommand(
   text: string,
 ):
+  | { kind: "help" }
   | { kind: "env" }
   | { kind: "env_set"; key: string; valueCiphertext: string }
   | { kind: "env_delete"; key: string }
@@ -1407,6 +1458,9 @@ function parseCapabilityCommand(
   | { kind: "install_skill"; intent: InstallSkillIntent }
   | undefined {
   const trimmed = text.trim();
+  if (trimmed === "/help") {
+    return { kind: "help" };
+  }
   if (trimmed === "/env") {
     return { kind: "env" };
   }
@@ -1428,6 +1482,12 @@ function parseCapabilityCommand(
   if (trimmed === "/skill") {
     return { kind: "skills_summary" };
   }
+  if (
+    /(skill|skills|技能)/i.test(trimmed)
+    && /(掌握|拥有|支持|安装了|已安装|有哪些|有什么|当前|现在|可用|看到|没看到)/i.test(trimmed)
+  ) {
+    return { kind: "skills_summary" };
+  }
   const skillInstallMatch = trimmed.match(/^\/skill\s+install\s+([A-Za-z0-9._-]+)$/);
   if (skillInstallMatch) {
     return {
@@ -1445,6 +1505,12 @@ function parseCapabilityCommand(
     };
   }
   if (trimmed === "/mcp") {
+    return { kind: "mcps_summary" };
+  }
+  if (
+    /(mcp|mcps)/i.test(trimmed)
+    && /(掌握|拥有|支持|安装了|已安装|有哪些|有什么|当前|现在|可用|看到|没看到)/i.test(trimmed)
+  ) {
     return { kind: "mcps_summary" };
   }
   const mcpInstallMatch = trimmed.match(/^\/mcp\s+install\s+([A-Za-z0-9._-]+)$/);
@@ -1510,6 +1576,7 @@ async function handleCapabilityCommand(
     is_admin?: boolean;
   },
   command:
+    | { kind: "help" }
     | { kind: "env" }
     | { kind: "env_set"; key: string; valueCiphertext: string }
     | { kind: "env_delete"; key: string }
@@ -1523,6 +1590,12 @@ async function handleCapabilityCommand(
     | { kind: "capability_summary" }
     | { kind: "install_skill"; intent: InstallSkillIntent },
 ): Promise<Record<string, unknown>> {
+  if (command.kind === "help") {
+    return {
+      output: buildHelpTable(),
+    };
+  }
+
   if (
     command.kind === "env"
     || command.kind === "env_set"
@@ -1678,6 +1751,134 @@ async function handleCapabilityCommand(
   };
 }
 
+async function handleConversationCommand(
+  input: WeComMessageInput,
+  config: BotHostConfig,
+  context: {
+    allowed?: boolean;
+    reason?: string;
+    conversation?: {
+      conversation_id: string;
+    };
+  },
+  command: ConversationCommand,
+): Promise<Record<string, unknown>> {
+  if (!context.allowed || !context.conversation?.conversation_id) {
+    return {
+      blocked: true,
+      reason: context.reason ?? "conversation_unavailable",
+      output: "当前没有可用会话。",
+    };
+  }
+
+  const baseInput = {
+    bot_id: input.bot_id,
+    wecom_user_id: input.wecom_user_id,
+    channel: "wecom_direct" as const,
+    purpose: "normal_chat" as const,
+  };
+
+  if (command.kind === "history") {
+    const conversations = await listConversations(config, baseInput);
+    return {
+      output: buildConversationHistoryTable(conversations),
+    };
+  }
+
+  if (command.kind === "new") {
+    const created = await createConversation(config, {
+      ...baseInput,
+      display_name: undefined,
+    });
+    return {
+      output: [
+        `已创建并切换到新会话：${formatConversationLabel(created, 1)}`,
+        `会话 ID：${created.conversation_id}`,
+      ].join("\n"),
+    };
+  }
+
+  if (command.kind === "open") {
+    const conversations = await listConversations(config, baseInput);
+    const target = conversations[command.index ? command.index - 1 : -1];
+    if (!target) {
+      return {
+        blocked: true,
+        reason: "conversation_not_found",
+        output: `找不到第 ${command.index} 个会话。`,
+      };
+    }
+    const opened = await openConversation(config, {
+      bot_id: input.bot_id,
+      wecom_user_id: input.wecom_user_id,
+      conversation_id: target.conversation_id,
+    });
+    return {
+      output: `已切换到会话：${formatConversationLabel(opened, command.index ?? 1)}。`,
+    };
+  }
+
+  const renamed = await renameConversation(config, {
+    bot_id: input.bot_id,
+    wecom_user_id: input.wecom_user_id,
+    conversation_id: context.conversation.conversation_id,
+    display_name: command.displayName ?? "",
+  });
+  return {
+    output: `已将当前会话命名为：${formatConversationLabel(renamed)}。`,
+  };
+}
+
+function buildHelpTable(): string {
+  return [
+    "| 指令 | 功能 |",
+    "| --- | --- |",
+    "| `/stop` | 中断当前任务 |",
+    "| `/new` | 开始新会话 |",
+    "| `/history` | 历史会话列表 |",
+    "| `/open N` | 恢复第 N 个会话 |",
+    "| `/name <名称>` | 命名当前会话 |",
+    "| `/skill` | 查看当前已安装的技能 |",
+    "| `/skill_list` | 已装技能列表 |",
+    "| `/skill_add <git_url>` | 安装技能 |",
+    "| `/skill_remove <name>` | 卸载技能 |",
+    "| `/claim_admin <认领码>` | 认领管理员身份 |",
+    "| `/help` | 显示本帮助 |",
+  ].join("\n");
+}
+
+function buildConversationHistoryTable(conversations: {
+  conversation_id: string;
+  display_name?: string;
+  is_active: boolean;
+  created_at: string;
+  updated_at: string;
+}[]): string {
+  if (conversations.length === 0) {
+    return "当前没有历史会话。";
+  }
+  return [
+    "历史会话：",
+    "",
+    "| 序号 | 会话 | 状态 | 更新时间 |",
+    "| --- | --- | --- | --- |",
+    ...conversations.map((conversation, index) => [
+      `${index + 1}`,
+      formatConversationLabel(conversation, index + 1),
+      conversation.is_active ? "当前" : "历史",
+      conversation.updated_at,
+    ].join(" | ")),
+  ].join("\n");
+}
+
+function formatConversationLabel(
+  conversation: { conversation_id: string; display_name?: string },
+  fallbackIndex?: number,
+): string {
+  return conversation.display_name?.trim()
+    || (fallbackIndex ? `会话 ${fallbackIndex}` : conversation.conversation_id);
+}
+
 function buildEnvSummary(items: BotEnvVarMetadataDto[]): string {
   if (items.length === 0) {
     return "当前没有已配置的环境变量。";
@@ -1693,7 +1894,7 @@ function buildSkillSummary(skills: BotSkillDto[]): string {
     return "当前没有已安装的 skill。";
   }
   return [
-    "Skills：",
+    "当前 bot 已安装的 Skills：",
     ...skills.map((skill) => `- ${skill.name}（${skill.source_type}，${skill.status}）`),
   ].join("\n");
 }
@@ -1703,7 +1904,7 @@ function buildMcpSummary(mcps: BotMcpDto[]): string {
     return "当前没有已配置的 MCP。";
   }
   return [
-    "MCPs：",
+    "当前 bot 已配置的 MCP：",
     ...mcps.map((mcp) => `- ${mcp.name}（${mcp.mode}，${mcp.status}）`),
   ].join("\n");
 }

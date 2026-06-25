@@ -572,6 +572,182 @@ describe("bot-host server", () => {
     );
   });
 
+  it("lists conversations without calling llm-runner", async () => {
+    const calls: Array<{ url: string; body: unknown }> = [];
+    const server = createBotHostServer({
+      dataServiceUrl: "http://data-service",
+      llmRunnerUrl: "http://llm-runner",
+      fetch: async (request) => {
+        if (!(request instanceof Request)) {
+          throw new Error("expected Request");
+        }
+        const body = request.method === "POST" ? await request.json().catch(() => undefined) : undefined;
+        calls.push({ url: request.url, body });
+        const noActiveInitializationSession = noActiveInitializationSessionResponse(request);
+        if (noActiveInitializationSession) {
+          return noActiveInitializationSession;
+        }
+
+        if (request.url === "http://data-service/v1/message-context/resolve") {
+          return Response.json({
+            allowed: true,
+            reason: "ready",
+            bot_id: body.bot_id,
+            wecom_user_id: body.wecom_user_id,
+            conversation: {
+              conversation_id: "conv-2",
+              bot_id: body.bot_id,
+              wecom_user_id: body.wecom_user_id,
+              channel: body.channel,
+              purpose: body.purpose,
+            },
+          });
+        }
+
+        if (request.url === "http://data-service/v1/conversations?bot_id=prd-bot&wecom_user_id=user-a&channel=wecom_direct&purpose=normal_chat") {
+          return Response.json([
+            {
+              conversation_id: "conv-2",
+              bot_id: "prd-bot",
+              wecom_user_id: "user-a",
+              channel: "wecom_direct",
+              purpose: "normal_chat",
+              display_name: "第二轮",
+              is_active: true,
+              created_at: "2026-06-25T00:00:00.000Z",
+              updated_at: "2026-06-25T00:00:00.000Z",
+            },
+            {
+              conversation_id: "conv-1",
+              bot_id: "prd-bot",
+              wecom_user_id: "user-a",
+              channel: "wecom_direct",
+              purpose: "normal_chat",
+              display_name: "第一轮",
+              is_active: false,
+              created_at: "2026-06-24T00:00:00.000Z",
+              updated_at: "2026-06-24T00:00:00.000Z",
+            },
+          ]);
+        }
+
+        return Response.json({ error: "unexpected" }, { status: 500 });
+      },
+    });
+
+    const response = await server.fetch(
+      new Request("http://localhost/v1/messages/wecom", {
+        method: "POST",
+        body: JSON.stringify({
+          bot_id: "prd-bot",
+          wecom_user_id: "user-a",
+          text: "/history",
+          runtime: "mock",
+        }),
+      }),
+    );
+
+    expect(response.status).toBe(200);
+    const payload = await response.json() as { output: string };
+    expect(payload.output).toContain("| 序号 | 会话 | 状态 | 更新时间 |");
+    expect(payload.output).toContain("第二轮");
+    expect(payload.output).toContain("第一轮");
+    expect(calls.map((call) => call.url)).not.toContain("http://llm-runner/v1/chat");
+  });
+
+  it("creates a new conversation and renames the active conversation without calling llm-runner", async () => {
+    const calls: Array<{ url: string; body: unknown }> = [];
+    const server = createBotHostServer({
+      dataServiceUrl: "http://data-service",
+      llmRunnerUrl: "http://llm-runner",
+      fetch: async (request) => {
+        if (!(request instanceof Request)) {
+          throw new Error("expected Request");
+        }
+        const body = request.method === "POST" ? await request.json().catch(() => undefined) : undefined;
+        calls.push({ url: request.url, body });
+        const noActiveInitializationSession = noActiveInitializationSessionResponse(request);
+        if (noActiveInitializationSession) {
+          return noActiveInitializationSession;
+        }
+
+        if (request.url === "http://data-service/v1/message-context/resolve") {
+          return Response.json({
+            allowed: true,
+            reason: "ready",
+            bot_id: body.bot_id,
+            wecom_user_id: body.wecom_user_id,
+            conversation: {
+              conversation_id: "conv-1",
+              bot_id: body.bot_id,
+              wecom_user_id: body.wecom_user_id,
+              channel: body.channel,
+              purpose: body.purpose,
+            },
+          });
+        }
+
+        if (request.url === "http://data-service/v1/conversations" && request.method === "POST") {
+          return Response.json({
+            conversation_id: "conv-2",
+            bot_id: "prd-bot",
+            wecom_user_id: "user-a",
+            channel: "wecom_direct",
+            purpose: "normal_chat",
+            display_name: "",
+            is_active: true,
+            created_at: "2026-06-25T00:00:00.000Z",
+            updated_at: "2026-06-25T00:00:00.000Z",
+          }, { status: 201 });
+        }
+
+        if (request.url === "http://data-service/v1/conversations/name" && request.method === "POST") {
+          return Response.json({
+            conversation_id: "conv-1",
+            bot_id: "prd-bot",
+            wecom_user_id: "user-a",
+            channel: "wecom_direct",
+            purpose: "normal_chat",
+            display_name: "会议记录",
+            is_active: true,
+            created_at: "2026-06-24T00:00:00.000Z",
+            updated_at: "2026-06-25T00:00:00.000Z",
+          });
+        }
+
+        return Response.json({ error: "unexpected" }, { status: 500 });
+      },
+    });
+
+    const created = await server.fetch(new Request("http://localhost/v1/messages/wecom", {
+      method: "POST",
+      body: JSON.stringify({
+        bot_id: "prd-bot",
+        wecom_user_id: "user-a",
+        text: "/new",
+        runtime: "mock",
+      }),
+    }));
+    expect(created.status).toBe(200);
+    const createdPayload = await created.json() as { output: string };
+    expect(createdPayload.output).toContain("已创建并切换到新会话");
+    expect(createdPayload.output).toContain("conv-2");
+
+    const renamed = await server.fetch(new Request("http://localhost/v1/messages/wecom", {
+      method: "POST",
+      body: JSON.stringify({
+        bot_id: "prd-bot",
+        wecom_user_id: "user-a",
+        text: "/name 会议记录",
+        runtime: "mock",
+      }),
+    }));
+    expect(renamed.status).toBe(200);
+    const renamedPayload = await renamed.json() as { output: string };
+    expect(renamedPayload.output).toContain("会议记录");
+    expect(calls.map((call) => call.url)).not.toContain("http://llm-runner/v1/chat");
+  });
+
   it("injects current memory documents into the llm prompt", async () => {
     const calls: Array<{ url: string; body: unknown }> = [];
     const server = createBotHostServer({
@@ -3676,6 +3852,141 @@ describe("bot-host server", () => {
     });
   });
 
+  it("handles /help as a platform command and returns a table instead of calling llm", async () => {
+    const calls: Array<{ url: string; body: unknown }> = [];
+    const server = createBotHostServer({
+      dataServiceUrl: "http://data-service",
+      llmRunnerUrl: "http://llm-runner",
+      fetch: async (request) => {
+        if (!(request instanceof Request)) {
+          throw new Error("expected Request");
+        }
+        const body = request.method === "POST" ? await request.json() : undefined;
+        calls.push({ url: request.url, body });
+
+        if (request.url === "http://data-service/v1/message-context/resolve") {
+          return Response.json({
+            allowed: true,
+            reason: "ready",
+            is_admin: true,
+            conversation: {
+              conversation_id: "conv-help",
+            },
+          });
+        }
+
+        return Response.json({ error: "unexpected", url: request.url }, { status: 500 });
+      },
+    });
+
+    const response = await server.fetch(
+      new Request("http://localhost/v1/messages/wecom", {
+        method: "POST",
+        body: JSON.stringify({
+          bot_id: "prd-bot",
+          wecom_user_id: "admin-a",
+          text: "/help",
+          runtime: "mock",
+        }),
+      }),
+    );
+
+    expect(response.status).toBe(200);
+    const payload = await response.json() as { output: string };
+    expect(payload.output).toContain("| 指令 | 功能 |");
+    expect(payload.output).toContain("| `/stop` | 中断当前任务 |");
+    expect(payload.output).toContain("| `/skill` | 查看当前已安装的技能 |");
+    expect(payload.output).toContain("| `/skill_list` | 已装技能列表 |");
+    expect(calls.map((call) => call.url)).toEqual([
+      "http://data-service/v1/message-context/resolve",
+    ]);
+  });
+
+  it("handles /history as a platform command and returns stored conversations instead of calling llm", async () => {
+    const calls: Array<{ url: string; body: unknown }> = [];
+    const server = createBotHostServer({
+      dataServiceUrl: "http://data-service",
+      llmRunnerUrl: "http://llm-runner",
+      fetch: async (request) => {
+        if (!(request instanceof Request)) {
+          throw new Error("expected Request");
+        }
+        const body = request.method === "POST" ? await request.json() : undefined;
+        calls.push({ url: request.url, body });
+
+        if (request.url === "http://data-service/v1/message-context/resolve") {
+          return Response.json({
+            allowed: true,
+            reason: "ready",
+            is_admin: true,
+            conversation: {
+              conversation_id: "conv-active",
+              bot_id: "prd-bot",
+              wecom_user_id: "admin-a",
+              channel: "wecom_direct",
+              purpose: "normal_chat",
+              is_active: true,
+              created_at: "2026-06-24T00:00:00.000Z",
+              updated_at: "2026-06-24T00:00:00.000Z",
+            },
+          });
+        }
+
+        if (request.url === "http://data-service/v1/conversations?bot_id=prd-bot&wecom_user_id=admin-a&channel=wecom_direct&purpose=normal_chat") {
+          return Response.json([
+            {
+              conversation_id: "conv-2",
+              bot_id: "prd-bot",
+              wecom_user_id: "admin-a",
+              channel: "wecom_direct",
+              purpose: "normal_chat",
+              display_name: "第二轮",
+              is_active: true,
+              created_at: "2026-06-24T02:00:00.000Z",
+              updated_at: "2026-06-24T02:00:00.000Z",
+            },
+            {
+              conversation_id: "conv-1",
+              bot_id: "prd-bot",
+              wecom_user_id: "admin-a",
+              channel: "wecom_direct",
+              purpose: "normal_chat",
+              display_name: "第一轮",
+              is_active: false,
+              created_at: "2026-06-24T01:00:00.000Z",
+              updated_at: "2026-06-24T01:00:00.000Z",
+            },
+          ]);
+        }
+
+        return Response.json({ error: "unexpected", url: request.url }, { status: 500 });
+      },
+    });
+
+    const response = await server.fetch(
+      new Request("http://localhost/v1/messages/wecom", {
+        method: "POST",
+        body: JSON.stringify({
+          bot_id: "prd-bot",
+          wecom_user_id: "admin-a",
+          text: "/history",
+          runtime: "mock",
+        }),
+      }),
+    );
+
+    expect(response.status).toBe(200);
+    const payload = await response.json() as { output: string };
+    expect(payload.output).toContain("历史会话");
+    expect(payload.output).toContain("| 序号 | 会话 | 状态 | 更新时间 |");
+    expect(payload.output).toContain("第二轮");
+    expect(payload.output).toContain("第一轮");
+    expect(calls.map((call) => call.url)).toEqual([
+      "http://data-service/v1/message-context/resolve",
+      "http://data-service/v1/conversations?bot_id=prd-bot&wecom_user_id=admin-a&channel=wecom_direct&purpose=normal_chat",
+    ]);
+  });
+
   it("requires admin permission for shared memory writes", async () => {
     const server = createBotHostServer({
       dataServiceUrl: "http://data-service",
@@ -4220,7 +4531,7 @@ describe("bot-host server", () => {
     expect(calls[3].body).toEqual({ mcp_manage_policy: "admin_only" });
   });
 
-  it("returns capability summaries for skill mcp and capability commands", async () => {
+  it("returns capability summaries for slash and natural-language skill queries", async () => {
     const server = createBotHostServer({
       dataServiceUrl: "http://data-service",
       llmRunnerUrl: "http://llm-runner",
@@ -4302,7 +4613,39 @@ describe("bot-host server", () => {
     );
     expect(skillResponse.status).toBe(200);
     await expect(skillResponse.json()).resolves.toMatchObject({
-      output: expect.stringContaining("repo-analyzer"),
+      output: expect.stringContaining("当前 bot 已安装的 Skills"),
+    });
+
+    const naturalSkillResponse = await server.fetch(
+      new Request("http://localhost/v1/messages/wecom", {
+        method: "POST",
+        body: JSON.stringify({
+          bot_id: "prd-bot",
+          wecom_user_id: "user-a",
+          text: "我安装了 grill-me ，但是 bot 给我的内容中没看到这个skill，我当前有哪些 skill？",
+          runtime: "mock",
+        }),
+      }),
+    );
+    expect(naturalSkillResponse.status).toBe(200);
+    await expect(naturalSkillResponse.json()).resolves.toMatchObject({
+      output: expect.stringContaining("当前 bot 已安装的 Skills"),
+    });
+
+    const longNaturalSkillResponse = await server.fetch(
+      new Request("http://localhost/v1/messages/wecom", {
+        method: "POST",
+        body: JSON.stringify({
+          bot_id: "prd-bot",
+          wecom_user_id: "user-a",
+          text: "我安装了 grill-me ，但是 bot 给我的内容中没看到这个skill",
+          runtime: "mock",
+        }),
+      }),
+    );
+    expect(longNaturalSkillResponse.status).toBe(200);
+    await expect(longNaturalSkillResponse.json()).resolves.toMatchObject({
+      output: expect.stringContaining("当前 bot 已安装的 Skills"),
     });
 
     const mcpResponse = await server.fetch(
@@ -4318,7 +4661,7 @@ describe("bot-host server", () => {
     );
     expect(mcpResponse.status).toBe(200);
     await expect(mcpResponse.json()).resolves.toMatchObject({
-      output: expect.stringContaining("search-mcp"),
+      output: expect.stringContaining("当前 bot 已配置的 MCP"),
     });
 
     const capabilityResponse = await server.fetch(
@@ -5036,6 +5379,85 @@ describe("bot-host server", () => {
     expect(sent[0]).toEqual({ conversationId: "conversation-a", text: "正在思考...", finish: false });
     expect(sent.slice(1, -1).map((item) => item.text)).toEqual([]);
     expect(sent.at(-1)).toEqual({ conversationId: "conversation-a", text: "hello", finish: true });
+  });
+
+  it("does not stream capability skill queries to llm and returns the bot skill summary", async () => {
+    const sent: Array<{ conversationId: string; text: string; finish: boolean }> = [];
+    let messageHandler:
+      | ((message: {
+        conversationId: string;
+        userId: string;
+        text: string;
+      }) => Promise<void>)
+      | undefined;
+    const worker = createBotHostWorker({
+      botId: "prd-bot",
+      runtime: "kiro",
+      dataServiceUrl: "http://data-service",
+      llmRunnerUrl: "http://llm-runner",
+      fetch: async (request) => {
+        if (!(request instanceof Request)) {
+          throw new Error("expected Request");
+        }
+
+        if (request.url === "http://data-service/v1/message-context/resolve") {
+          return Response.json({
+            allowed: true,
+            reason: "ready",
+            conversation: {
+              conversation_id: "conv-1",
+            },
+          });
+        }
+
+        if (request.url.startsWith("http://data-service/internal/initialization-sessions/active?")) {
+          return Response.json({ error: "data-service unavailable" }, { status: 500 });
+        }
+
+        if (request.url === "http://data-service/v1/bots/prd-bot/skills") {
+          return Response.json([
+            {
+              bot_id: "prd-bot",
+              name: "grill-me",
+              source_type: "github",
+              source_ref: "https://github.com/mattpocock/skills",
+              status: "installed",
+            },
+          ]);
+        }
+
+        if (request.url === "http://llm-runner/v1/chat/stream") {
+          return Response.json({ error: "should not stream capability queries" }, { status: 500 });
+        }
+
+        return Response.json({ error: "unexpected", url: request.url }, { status: 500 });
+      },
+      wecomClient: {
+        async connect() {},
+        disconnect() {},
+        onMessage(handler) {
+          messageHandler = handler;
+        },
+        async sendText(conversationId, text, options) {
+          sent.push({ conversationId, text, finish: options?.finish ?? true });
+        },
+      },
+    });
+
+    await worker.start();
+    await messageHandler?.({
+      conversationId: "conversation-a",
+      userId: "user-a",
+      text: "我当前有哪些 skill",
+    });
+
+    expect(sent).toEqual([
+      {
+        conversationId: "conversation-a",
+        text: expect.stringContaining("当前 bot 已安装的 Skills"),
+        finish: true,
+      },
+    ]);
   });
 
   it("asks for confirmation before storing generated markdown documents from streaming workers", async () => {

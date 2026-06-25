@@ -1132,6 +1132,58 @@ describe("data-service store", () => {
     expect(first.conversation_id).toMatch(/^conv_/);
   });
 
+  it("creates and switches between multiple conversations for the same scope", () => {
+    const store = createDataStore();
+    store.createBot({ bot_id: "prd-bot", name: "PRD Bot", runtime: "kiro" });
+
+    const first = store.createConversation({
+      bot_id: "prd-bot",
+      wecom_user_id: "user-a",
+      channel: "wecom_direct",
+      purpose: "normal_chat",
+      display_name: "第一轮",
+    });
+    const second = store.createConversation({
+      bot_id: "prd-bot",
+      wecom_user_id: "user-a",
+      channel: "wecom_direct",
+      purpose: "normal_chat",
+      display_name: "第二轮",
+    });
+
+    expect(second.conversation_id).not.toBe(first.conversation_id);
+    expect(store.listConversations({
+      bot_id: "prd-bot",
+      wecom_user_id: "user-a",
+      channel: "wecom_direct",
+      purpose: "normal_chat",
+    }).map((conversation) => conversation.display_name)).toEqual([
+      "第二轮",
+      "第一轮",
+    ]);
+    expect(store.resolveConversation({
+      bot_id: "prd-bot",
+      wecom_user_id: "user-a",
+      channel: "wecom_direct",
+      purpose: "normal_chat",
+    }).conversation_id).toBe(second.conversation_id);
+
+    const opened = store.openConversation({
+      bot_id: "prd-bot",
+      wecom_user_id: "user-a",
+      conversation_id: first.conversation_id,
+    });
+
+    expect(opened.conversation_id).toBe(first.conversation_id);
+    expect(opened.is_active).toBe(true);
+    expect(store.resolveConversation({
+      bot_id: "prd-bot",
+      wecom_user_id: "user-a",
+      channel: "wecom_direct",
+      purpose: "normal_chat",
+    }).conversation_id).toBe(first.conversation_id);
+  });
+
   it("creates a new memory document version on update", () => {
     const store = createDataStore();
     const first = store.upsertMemoryDocument({

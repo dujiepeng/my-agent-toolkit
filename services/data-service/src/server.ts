@@ -252,11 +252,35 @@ export function createDataServiceServer(
           handleListBotSkills(store, botId),
         );
       }
+      if (request.method === "POST" && botSkillsMatch) {
+        return withDecodedBotId(botSkillsMatch[1], (botId) =>
+          handleUpsertBotSkill(request, store, botId),
+        );
+      }
+
+      const botSkillDeleteMatch = url.pathname.match(/^\/v1\/bots\/([^/]+)\/skills\/([^/]+)$/);
+      if (request.method === "DELETE" && botSkillDeleteMatch) {
+        return withDecodedBotId(botSkillDeleteMatch[1], (botId) =>
+          handleDeleteBotSkill(store, botId, botSkillDeleteMatch[2]),
+        );
+      }
 
       const botMcpsMatch = url.pathname.match(/^\/v1\/bots\/([^/]+)\/mcps$/);
       if (request.method === "GET" && botMcpsMatch) {
         return withDecodedBotId(botMcpsMatch[1], (botId) =>
           handleListBotMcps(store, botId),
+        );
+      }
+      if (request.method === "POST" && botMcpsMatch) {
+        return withDecodedBotId(botMcpsMatch[1], (botId) =>
+          handleUpsertBotMcp(request, store, botId),
+        );
+      }
+
+      const botMcpDeleteMatch = url.pathname.match(/^\/v1\/bots\/([^/]+)\/mcps\/([^/]+)$/);
+      if (request.method === "DELETE" && botMcpDeleteMatch) {
+        return withDecodedBotId(botMcpDeleteMatch[1], (botId) =>
+          handleDeleteBotMcp(store, botId, botMcpDeleteMatch[2]),
         );
       }
 
@@ -284,6 +308,34 @@ export function createDataServiceServer(
         url.pathname === "/v1/conversations/resolve"
       ) {
         return handleResolveConversation(request, store);
+      }
+
+      if (
+        request.method === "GET" &&
+        url.pathname === "/v1/conversations"
+      ) {
+        return handleListConversations(url, store);
+      }
+
+      if (
+        request.method === "POST" &&
+        url.pathname === "/v1/conversations"
+      ) {
+        return handleCreateConversation(request, store);
+      }
+
+      if (
+        request.method === "POST" &&
+        url.pathname === "/v1/conversations/open"
+      ) {
+        return handleOpenConversation(request, store);
+      }
+
+      if (
+        request.method === "POST" &&
+        url.pathname === "/v1/conversations/name"
+      ) {
+        return handleRenameConversation(request, store);
       }
 
       if (
@@ -963,12 +1015,80 @@ function handleListBotSkills(
   }
 }
 
+async function handleUpsertBotSkill(
+  request: Request,
+  store: DataStore,
+  botId: string,
+): Promise<Response> {
+  try {
+    const body = await request.json() as Record<string, unknown>;
+    const record = store.upsertBotSkill(botId, {
+      name: requireText(body.name, "name"),
+      source_type: requireText(body.source_type, "source_type") as "builtin" | "github" | "url" | "local",
+      source_ref: requireText(body.source_ref, "source_ref"),
+      status: requireText(body.status, "status") as "installing" | "installed" | "failed",
+      installed_by_wecom_user_id: requireText(body.installed_by_wecom_user_id, "installed_by_wecom_user_id"),
+      last_error: typeof body.last_error === "string" ? body.last_error : undefined,
+    });
+    return jsonResponse(record, 201);
+  } catch (error) {
+    return errorResponse(error);
+  }
+}
+
+function handleDeleteBotSkill(
+  store: DataStore,
+  botId: string,
+  name: string,
+): Response {
+  try {
+    store.deleteBotSkill(botId, decodeURIComponent(name));
+    return jsonResponse({ deleted: true });
+  } catch (error) {
+    return errorResponse(error);
+  }
+}
+
 function handleListBotMcps(
   store: DataStore,
   botId: string,
 ): Response {
   try {
     return jsonResponse(store.listBotMcps(botId));
+  } catch (error) {
+    return errorResponse(error);
+  }
+}
+
+async function handleUpsertBotMcp(
+  request: Request,
+  store: DataStore,
+  botId: string,
+): Promise<Response> {
+  try {
+    const body = await request.json() as Record<string, unknown>;
+    const record = store.upsertBotMcp(botId, {
+      name: requireText(body.name, "name"),
+      mode: requireText(body.mode, "mode") as "config" | "package",
+      source_ref: requireText(body.source_ref, "source_ref"),
+      status: requireText(body.status, "status") as "installing" | "installed" | "failed",
+      installed_by_wecom_user_id: requireText(body.installed_by_wecom_user_id, "installed_by_wecom_user_id"),
+      last_error: typeof body.last_error === "string" ? body.last_error : undefined,
+    });
+    return jsonResponse(record, 201);
+  } catch (error) {
+    return errorResponse(error);
+  }
+}
+
+function handleDeleteBotMcp(
+  store: DataStore,
+  botId: string,
+  name: string,
+): Response {
+  try {
+    store.deleteBotMcp(botId, decodeURIComponent(name));
+    return jsonResponse({ deleted: true });
   } catch (error) {
     return errorResponse(error);
   }
@@ -1005,6 +1125,77 @@ async function handleResolveConversation(
   } catch (error) {
     return errorResponse(error);
   }
+}
+
+async function handleListConversations(
+  url: URL,
+  store: DataStore,
+): Promise<Response> {
+  try {
+    return jsonResponse(store.listConversations({
+      bot_id: requireQueryParam(url, "bot_id"),
+      wecom_user_id: requireQueryParam(url, "wecom_user_id"),
+      channel: requireConversationChannel(requireQueryParam(url, "channel")),
+      purpose: requireConversationPurpose(requireQueryParam(url, "purpose")),
+    }));
+  } catch (error) {
+    return errorResponse(error);
+  }
+}
+
+async function handleCreateConversation(
+  request: Request,
+  store: DataStore,
+): Promise<Response> {
+  try {
+    return jsonResponse(store.createConversation(await request.json()), 201);
+  } catch (error) {
+    return errorResponse(error);
+  }
+}
+
+async function handleOpenConversation(
+  request: Request,
+  store: DataStore,
+): Promise<Response> {
+  try {
+    return jsonResponse(store.openConversation(await request.json()));
+  } catch (error) {
+    return errorResponse(error);
+  }
+}
+
+async function handleRenameConversation(
+  request: Request,
+  store: DataStore,
+): Promise<Response> {
+  try {
+    return jsonResponse(store.renameConversation(await request.json()));
+  } catch (error) {
+    return errorResponse(error);
+  }
+}
+
+function requireQueryParam(url: URL, key: string): string {
+  const value = url.searchParams.get(key);
+  if (value === null || value.trim() === "") {
+    throw new Error(`missing query param: ${key}`);
+  }
+  return value;
+}
+
+function requireConversationChannel(value: string) {
+  if (value !== "wecom_direct" && value !== "wecom_group") {
+    throw new Error(`invalid conversation channel: ${value}`);
+  }
+  return value;
+}
+
+function requireConversationPurpose(value: string) {
+  if (value !== "normal_chat" && value !== "init" && value !== "doc_generation") {
+    throw new Error(`invalid conversation purpose: ${value}`);
+  }
+  return value;
 }
 
 async function handleResolveMessageContext(
