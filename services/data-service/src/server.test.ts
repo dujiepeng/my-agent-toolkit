@@ -184,6 +184,57 @@ describe("data-service server", () => {
     });
   });
 
+  it("gets and upserts runtime sessions over internal HTTP", async () => {
+    const server = createDataServiceServer();
+    await server.fetch(
+      new Request("http://localhost/v1/bots", {
+        method: "POST",
+        body: JSON.stringify({
+          bot_id: "prd-bot",
+          name: "PRD Bot",
+          runtime: "kiro",
+        }),
+      }),
+    );
+
+    const missingResponse = await server.fetch(
+      new Request("http://localhost/internal/runtime-sessions/kiro%3Aprd-bot%3Auser-a%3Aconv-1"),
+    );
+    expect(missingResponse.status).toBe(404);
+
+    const upsertResponse = await server.fetch(
+      new Request("http://localhost/internal/runtime-sessions", {
+        method: "PUT",
+        body: JSON.stringify({
+          runner_session_id: "kiro:prd-bot:user-a:conv-1",
+          bot_id: "prd-bot",
+          wecom_user_id: "user-a",
+          conversation_id: "conv-1",
+          runtime: "kiro",
+          provider_session_id: "kiro-session-a",
+        }),
+      }),
+    );
+    expect(upsertResponse.status).toBe(200);
+    await expect(upsertResponse.json()).resolves.toMatchObject({
+      runner_session_id: "kiro:prd-bot:user-a:conv-1",
+      provider_session_id: "kiro-session-a",
+    });
+
+    const getResponse = await server.fetch(
+      new Request("http://localhost/internal/runtime-sessions/kiro%3Aprd-bot%3Auser-a%3Aconv-1"),
+    );
+    expect(getResponse.status).toBe(200);
+    await expect(getResponse.json()).resolves.toMatchObject({
+      runner_session_id: "kiro:prd-bot:user-a:conv-1",
+      bot_id: "prd-bot",
+      wecom_user_id: "user-a",
+      conversation_id: "conv-1",
+      runtime: "kiro",
+      provider_session_id: "kiro-session-a",
+    });
+  });
+
   it("updates runtime config over HTTP", async () => {
     const server = createDataServiceServer();
     await server.fetch(

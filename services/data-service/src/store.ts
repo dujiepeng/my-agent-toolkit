@@ -179,6 +179,26 @@ export interface UpsertRuntimeConfigInput {
   options?: Record<string, unknown>;
 }
 
+export interface RuntimeSessionRecord {
+  runner_session_id: string;
+  bot_id: string;
+  wecom_user_id: string;
+  conversation_id: string;
+  runtime: string;
+  provider_session_id?: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface UpsertRuntimeSessionInput {
+  runner_session_id: string;
+  bot_id: string;
+  wecom_user_id: string;
+  conversation_id: string;
+  runtime: string;
+  provider_session_id?: string;
+}
+
 export type BotCapabilityPolicy = "admin_only" | "open";
 
 export interface BotRuntimePolicyRecord {
@@ -724,6 +744,8 @@ export interface DataStore {
     botId: string,
     input: UpsertRuntimeConfigInput,
   ): RuntimeConfigRecord;
+  getRuntimeSession(runnerSessionId: string): RuntimeSessionRecord | undefined;
+  upsertRuntimeSession(input: UpsertRuntimeSessionInput): RuntimeSessionRecord;
   getOrCreateBotRuntimePolicy(botId: string): BotRuntimePolicyRecord;
   updateBotRuntimePolicy(
     botId: string,
@@ -824,6 +846,7 @@ export function createDataStore(options: DataStoreOptions = {}): DataStore {
   const initializationSessions = new Map<string, InitializationSessionRecord>();
   const pendingGeneratedDocuments = new Map<string, PendingGeneratedDocumentRecord>();
   const runtimeConfigs = new Map<string, RuntimeConfigRecord>();
+  const runtimeSessions = new Map<string, RuntimeSessionRecord>();
   const botRuntimePolicies = new Map<string, BotRuntimePolicyRecord>();
   const botEnvVars = new Map<string, BotEnvVarRecord>();
   const botSkills = new Map<string, BotSkillRecord>();
@@ -922,6 +945,7 @@ export function createDataStore(options: DataStoreOptions = {}): DataStore {
       initializationSessions.clear();
       pendingGeneratedDocuments.clear();
       runtimeConfigs.clear();
+      runtimeSessions.clear();
       businessDocuments.clear();
       businessDocumentVersions.clear();
       memoryDocuments.clear();
@@ -1118,6 +1142,30 @@ export function createDataStore(options: DataStoreOptions = {}): DataStore {
       };
       runtimeConfigs.set(record.bot_id, record);
       return cloneRuntimeConfigRecord(record);
+    },
+
+    getRuntimeSession(runnerSessionId) {
+      const record = runtimeSessions.get(requireText(runnerSessionId, "runner_session_id"));
+      return record ? cloneRuntimeSessionRecord(record) : undefined;
+    },
+
+    upsertRuntimeSession(input) {
+      getRequiredBot(bots, input.bot_id);
+      const runnerSessionId = requireText(input.runner_session_id, "runner_session_id");
+      const existing = runtimeSessions.get(runnerSessionId);
+      const now = existing ? nextIsoTimestamp(existing.updated_at) : new Date().toISOString();
+      const record: RuntimeSessionRecord = {
+        runner_session_id: runnerSessionId,
+        bot_id: requireText(input.bot_id, "bot_id"),
+        wecom_user_id: requireText(input.wecom_user_id, "wecom_user_id"),
+        conversation_id: requireText(input.conversation_id, "conversation_id"),
+        runtime: requireText(input.runtime, "runtime"),
+        ...(optionalText(input.provider_session_id) ? { provider_session_id: optionalText(input.provider_session_id) } : {}),
+        created_at: existing?.created_at ?? now,
+        updated_at: now,
+      };
+      runtimeSessions.set(record.runner_session_id, record);
+      return cloneRuntimeSessionRecord(record);
     },
 
     getOrCreateBotRuntimePolicy(botId) {
@@ -2187,6 +2235,8 @@ export function seedDefaultRoleConfig(store: Pick<
         "- 默认补齐范围、非范围、限制条件、依赖条件和风险点。",
         "- 涉及环信需求时默认检查 Console、IMM、计量计费、集群、开关灰度兼容性。",
         "- 输出偏评审与落地，不写空泛 PRD。",
+        "- 生成 PRD 时，功能点清单必须使用 Markdown 表格展示，至少包含编号、功能、说明、优先级列。",
+        "- PRD 功能点清单必须按优先级排布，优先级使用 P0/P1/P2；P0 表示首期必须完成，P1 表示首期重要增强，P2 表示后续规划。",
       ].join("\n"),
       questions: [
         buildSingleChoiceQuestion("interaction_mode", "你希望它用什么方式和你交互？", 10, [
@@ -3110,6 +3160,14 @@ export function cloneRuntimeConfigRecord(
   return {
     ...record,
     options: normalizeRuntimeConfigOptions(record.options),
+  };
+}
+
+export function cloneRuntimeSessionRecord(
+  record: RuntimeSessionRecord,
+): RuntimeSessionRecord {
+  return {
+    ...record,
   };
 }
 

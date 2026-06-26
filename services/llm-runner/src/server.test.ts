@@ -1,9 +1,14 @@
 import * as fs from "node:fs/promises";
 import { describe, expect, it, vi } from "vitest";
+import type { RunnerConfig } from "./config.js";
 import { createLlmRunnerServer } from "./server.js";
 
 describe("llm-runner server", () => {
   it("responds to health checks", async () => {
+    const previousSha = process.env.APP_BUILD_SHA;
+    const previousBuildTime = process.env.APP_BUILD_TIME;
+    process.env.APP_BUILD_SHA = "sha-llm";
+    process.env.APP_BUILD_TIME = "2026-06-24T12:00:02.000Z";
     const server = createLlmRunnerServer();
     const response = await server.fetch(new Request("http://localhost/health"));
 
@@ -11,7 +16,11 @@ describe("llm-runner server", () => {
     await expect(response.json()).resolves.toEqual({
       service: "llm-runner",
       status: "ok",
+      git_sha: "sha-llm",
+      build_time: "2026-06-24T12:00:02.000Z",
     });
+    process.env.APP_BUILD_SHA = previousSha;
+    process.env.APP_BUILD_TIME = previousBuildTime;
   });
 
   it("reports runtime statuses", async () => {
@@ -251,6 +260,80 @@ describe("llm-runner server", () => {
       runner_session_id: "kiro:prd-bot:user-a:conv-1",
       output: "hello kiro adapter",
     });
+  });
+
+  it("persists kiro runtime sessions and resumes after llm-runner restart", async () => {
+    const argsLogPath = `/tmp/kiro-runtime-session-${crypto.randomUUID()}.log`;
+    const command = [
+      "const fs = require('node:fs');",
+      "fs.appendFileSync(process.env.ARGS_LOG, JSON.stringify(process.argv.slice(1)) + '\\n');",
+      "process.stdin.pipe(process.stdout);",
+    ].join(" ");
+    const storedSessions = new Map<string, unknown>();
+    const fetchRequests: Request[] = [];
+    const fetchStub = vi.fn(async (input: RequestInfo | URL) => {
+      const request = input instanceof Request ? input : new Request(input);
+      fetchRequests.push(request);
+      const url = new URL(request.url);
+      if (request.method === "GET" && url.pathname.startsWith("/internal/runtime-sessions/")) {
+        const runnerSessionId = decodeURIComponent(url.pathname.split("/").pop() ?? "");
+        const session = storedSessions.get(runnerSessionId);
+        return session
+          ? new Response(JSON.stringify(session), { status: 200, headers: { "content-type": "application/json" } })
+          : new Response(JSON.stringify({ error: "runtime session not found" }), { status: 404 });
+      }
+      if (request.method === "PUT" && url.pathname === "/internal/runtime-sessions") {
+        const payload = await request.json();
+        storedSessions.set(payload.runner_session_id, payload);
+        return new Response(JSON.stringify(payload), { status: 200, headers: { "content-type": "application/json" } });
+      }
+      return new Response(JSON.stringify({ error: "unexpected request" }), { status: 500 });
+    });
+    const baseConfig: RunnerConfig = {
+      enabled_runtimes: ["kiro"],
+      data_service_url: "http://data-service:8300",
+      kiro: {
+        command: process.execPath,
+        args: ["-e", command, "chat", "--no-interactive"],
+        timeout_ms: 1000,
+        env: {
+          ARGS_LOG: argsLogPath,
+        },
+      },
+      fetch: fetchStub,
+    };
+
+    for (const prompt of ["first", "second"]) {
+      const server = createLlmRunnerServer(baseConfig);
+      const response = await server.fetch(
+        new Request("http://localhost/v1/chat", {
+          method: "POST",
+          body: JSON.stringify({
+            bot_id: "prd-bot",
+            user_id: "user-a",
+            conversation_id: "conv-1",
+            runtime: "kiro",
+            prompt,
+          }),
+        }),
+      );
+      expect(response.status).toBe(200);
+    }
+
+    const argsLines = (await fs.readFile(argsLogPath, "utf8"))
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line));
+    expect(argsLines).toEqual([
+      ["chat", "--no-interactive"],
+      ["chat", "--resume", "--no-interactive"],
+    ]);
+    expect(fetchRequests.map((request) => `${request.method} ${new URL(request.url).pathname}`)).toEqual([
+      "GET /internal/runtime-sessions/kiro%3Aprd-bot%3Auser-a%3Aconv-1",
+      "PUT /internal/runtime-sessions",
+      "GET /internal/runtime-sessions/kiro%3Aprd-bot%3Auser-a%3Aconv-1",
+      "PUT /internal/runtime-sessions",
+    ]);
   });
 
   it("injects bot env vars into cli runtime execution without exposing them in prompt or output", async () => {

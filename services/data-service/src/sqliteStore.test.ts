@@ -101,6 +101,28 @@ describe("sqlite data store", () => {
     second.close?.();
   });
 
+  it("persists runtime sessions across store instances", () => {
+    const dir = mkdtempSync(join(tmpdir(), "data-service-"));
+    dirs.push(dir);
+    const dbPath = join(dir, "data.db");
+
+    const first = createSqliteDataStore(dbPath);
+    first.createBot({ bot_id: "prd-bot", name: "PRD Bot", runtime: "kiro" });
+    const created = first.upsertRuntimeSession({
+      runner_session_id: "kiro:prd-bot:user-a:conv-1",
+      bot_id: "prd-bot",
+      wecom_user_id: "user-a",
+      conversation_id: "conv-1",
+      runtime: "kiro",
+      provider_session_id: "kiro-session-a",
+    });
+    first.close?.();
+
+    const second = createSqliteDataStore(dbPath);
+    expect(second.getRuntimeSession(created.runner_session_id)).toEqual(created);
+    second.close?.();
+  });
+
   it("migrates existing conversation rows without scope keys", () => {
     const dir = mkdtempSync(join(tmpdir(), "data-service-"));
     dirs.push(dir);

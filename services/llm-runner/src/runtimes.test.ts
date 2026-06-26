@@ -39,7 +39,7 @@ describe("runtime adapters", () => {
     });
   });
 
-  it("resumes later CLI runs for the same runner session", async () => {
+  it("adds resume args when runtime config requests resume", async () => {
     const command = [
       "const fs = require('node:fs');",
       "const log = process.env.ARGS_LOG;",
@@ -60,7 +60,7 @@ describe("runtime adapters", () => {
       runtime: "kiro" as const,
     };
     await runCliRuntime(config, { ...isolatedRequest, prompt: "first" });
-    await runCliRuntime(config, { ...isolatedRequest, prompt: "second" });
+    await runCliRuntime({ ...config, resume: true }, { ...isolatedRequest, prompt: "second" });
 
     const lines = (await import("node:fs")).readFileSync(logPath, "utf8").trim().split("\n");
     expect(lines.map((line) => JSON.parse(line))).toEqual([

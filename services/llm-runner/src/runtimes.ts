@@ -17,6 +17,7 @@ export interface CliRuntimeConfig {
   args: string[];
   timeout_ms: number;
   env?: Record<string, string>;
+  resume?: boolean;
 }
 
 export class RuntimeExecutionError extends Error {
@@ -79,7 +80,7 @@ export function runCliRuntimeStream(
   };
 }
 
-function buildRunnerSessionId(
+export function buildRunnerSessionId(
   runtime: RuntimeName,
   request: Pick<ChatRequest, "bot_id" | "user_id" | "conversation_id">,
 ): string {
@@ -88,11 +89,9 @@ function buildRunnerSessionId(
   );
 }
 
-const startedRunnerSessions = new Set<string>();
-
 function runProcess(config: CliRuntimeConfig, input: string, runnerSessionId: string): Promise<string> {
   return new Promise((resolve, reject) => {
-    const args = argsForRunnerSession(config.args, runnerSessionId);
+    const args = argsForRunnerSession(config.args, Boolean(config.resume));
     const child = spawn(config.command, args, {
       env: { ...process.env, ...config.env },
       stdio: ["pipe", "pipe", "pipe"],
@@ -153,7 +152,6 @@ function runProcess(config: CliRuntimeConfig, input: string, runnerSessionId: st
         return;
       }
 
-      startedRunnerSessions.add(runnerSessionId);
       resolve(Buffer.concat(stdout).toString());
     });
 
@@ -164,7 +162,7 @@ function runProcess(config: CliRuntimeConfig, input: string, runnerSessionId: st
 function streamProcess(config: CliRuntimeConfig, input: string, runnerSessionId: string): ReadableStream<string> {
   return new ReadableStream<string>({
     start(controller) {
-      const args = argsForRunnerSession(config.args, runnerSessionId);
+      const args = argsForRunnerSession(config.args, Boolean(config.resume));
       const child = spawn(config.command, args, {
         env: { ...process.env, ...config.env },
         stdio: ["pipe", "pipe", "pipe"],
@@ -216,7 +214,6 @@ function streamProcess(config: CliRuntimeConfig, input: string, runnerSessionId:
           );
           return;
         }
-        startedRunnerSessions.add(runnerSessionId);
         controller.close();
       });
 
@@ -225,8 +222,8 @@ function streamProcess(config: CliRuntimeConfig, input: string, runnerSessionId:
   });
 }
 
-function argsForRunnerSession(args: string[], runnerSessionId: string): string[] {
-  if (!startedRunnerSessions.has(runnerSessionId)) {
+function argsForRunnerSession(args: string[], resume: boolean): string[] {
+  if (!resume) {
     return [...args];
   }
 

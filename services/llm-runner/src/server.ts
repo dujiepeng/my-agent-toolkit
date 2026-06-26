@@ -10,6 +10,7 @@ import {
 import { getRuntimeStatuses } from "./runtimeStatus.js";
 import {
   RuntimeExecutionError,
+  buildRunnerSessionId,
   runCliRuntime,
   runCliRuntimeStream,
   runMockRuntime,
@@ -31,10 +32,7 @@ export function createLlmRunnerServer(
       const url = new URL(request.url);
 
       if (request.method === "GET" && url.pathname === "/health") {
-        return jsonResponse({
-          service: "llm-runner",
-          status: "ok",
-        });
+        return jsonResponse(healthResponse("llm-runner"));
       }
 
       if (request.method === "GET" && url.pathname === "/v1/runtimes") {
@@ -53,6 +51,20 @@ export function createLlmRunnerServer(
 
       return jsonResponse({ error: "not found" }, 404);
     },
+  };
+}
+
+function healthResponse(service: string): {
+  service: string;
+  status: "ok";
+  git_sha: string;
+  build_time: string;
+} {
+  return {
+    service,
+    status: "ok",
+    git_sha: process.env.APP_BUILD_SHA ?? "unknown",
+    build_time: process.env.APP_BUILD_TIME ?? "unknown",
   };
 }
 
@@ -228,6 +240,15 @@ async function continueAfterMcpToolCall(
   });
 }
 
+interface RuntimeSessionRecord {
+  runner_session_id: string;
+  bot_id: string;
+  wecom_user_id: string;
+  conversation_id: string;
+  runtime: string;
+  provider_session_id?: string;
+}
+
 async function executeMcpToolCall(
   config: RunnerConfig,
   chatRequest: ReturnType<typeof parseChatRequest>,
@@ -297,7 +318,16 @@ async function runRuntime(
   }
 
   if (chatRequest.runtime === "kiro" && config.kiro) {
-    return runCliRuntime(await withBotEnv(config, chatRequest), chatRequest);
+    const runtimeSession = await getPersistedRuntimeSession(config, chatRequest);
+    const runtimeResult = await runCliRuntime(
+      {
+        ...(await withBotEnv(config, chatRequest)),
+        resume: Boolean(runtimeSession),
+      },
+      chatRequest,
+    );
+    await persistRuntimeSession(config, chatRequest, runtimeResult.runner_session_id, runtimeSession);
+    return runtimeResult;
   }
 
   throw new UnavailableRuntimeError("runtime is not available yet");
@@ -335,7 +365,15 @@ async function runRuntimeStreamResolved(
   }
 
   if (chatRequest.runtime === "kiro" && config.kiro) {
-    return runCliRuntimeStream(await withBotEnv(config, chatRequest), chatRequest);
+    const runtimeSession = await getPersistedRuntimeSession(config, chatRequest);
+    const runtimeResult = runCliRuntimeStream(
+      {
+        ...(await withBotEnv(config, chatRequest)),
+        resume: Boolean(runtimeSession),
+      },
+      chatRequest,
+    );
+    return persistRuntimeSessionAfterStream(config, chatRequest, runtimeResult, runtimeSession);
   }
 
   throw new UnavailableRuntimeError("runtime is not available yet");
@@ -355,6 +393,96 @@ async function withBotEnv(
       ...botEnv,
     },
   };
+}
+
+async function getPersistedRuntimeSession(
+  config: RunnerConfig,
+  chatRequest: ReturnType<typeof parseChatRequest>,
+): Promise<RuntimeSessionRecord | undefined> {
+  if (!config.data_service_url) {
+    return undefined;
+  }
+
+  const runnerSessionId = buildRunnerSessionId(chatRequest.runtime, chatRequest);
+  const response = await fetchWithConfig(config, new Request(
+    `${config.data_service_url}/internal/runtime-sessions/${encodeURIComponent(runnerSessionId)}`,
+  ));
+  if (response.status === 404) {
+    return undefined;
+  }
+  if (!response.ok) {
+    throw new Error("runtime session lookup failed");
+  }
+  return await response.json() as RuntimeSessionRecord;
+}
+
+async function persistRuntimeSession(
+  config: RunnerConfig,
+  chatRequest: ReturnType<typeof parseChatRequest>,
+  runnerSessionId: string,
+  existing?: RuntimeSessionRecord,
+): Promise<void> {
+  if (!config.data_service_url) {
+    return;
+  }
+
+  const response = await fetchWithConfig(config, new Request(
+    `${config.data_service_url}/internal/runtime-sessions`,
+    {
+      method: "PUT",
+      headers: {
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({
+        runner_session_id: runnerSessionId,
+        bot_id: chatRequest.bot_id,
+        wecom_user_id: chatRequest.user_id,
+        conversation_id: chatRequest.conversation_id,
+        runtime: chatRequest.runtime,
+        ...(existing?.provider_session_id
+          ? { provider_session_id: existing.provider_session_id }
+          : {}),
+      }),
+    },
+  ));
+  if (!response.ok) {
+    throw new Error("runtime session persistence failed");
+  }
+}
+
+function persistRuntimeSessionAfterStream(
+  config: RunnerConfig,
+  chatRequest: ReturnType<typeof parseChatRequest>,
+  runtimeResult: RuntimeStreamResult,
+  existing?: RuntimeSessionRecord,
+): RuntimeStreamResult {
+  return {
+    runner_session_id: runtimeResult.runner_session_id,
+    stream: new ReadableStream<string>({
+      async start(controller) {
+        const reader = runtimeResult.stream.getReader();
+        try {
+          while (true) {
+            const { done, value } = await reader.read();
+            if (done) {
+              break;
+            }
+            if (value) {
+              controller.enqueue(value);
+            }
+          }
+          await persistRuntimeSession(config, chatRequest, runtimeResult.runner_session_id, existing);
+          controller.close();
+        } catch (error) {
+          controller.error(error);
+        }
+      },
+    }),
+  };
+}
+
+async function fetchWithConfig(config: RunnerConfig, request: Request): Promise<Response> {
+  return config.fetch ? config.fetch(request) : fetch(request);
 }
 
 function ndjsonLine(payload: unknown): string {

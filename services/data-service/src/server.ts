@@ -118,6 +118,18 @@ export function createDataServiceServer(
       }
 
       if (
+        request.method === "PUT" &&
+        url.pathname === "/internal/runtime-sessions"
+      ) {
+        return handleUpsertRuntimeSession(request, store);
+      }
+
+      const runtimeSessionMatch = url.pathname.match(/^\/internal\/runtime-sessions\/([^/]+)$/);
+      if (request.method === "GET" && runtimeSessionMatch) {
+        return handleGetRuntimeSession(store, runtimeSessionMatch[1]);
+      }
+
+      if (
         request.method === "POST" &&
         url.pathname === "/internal/pending-generated-documents"
       ) {
@@ -780,6 +792,30 @@ function handleClearInitializationSession(
       conversation_id: url.searchParams.get("conversation_id") ?? "",
     });
     return jsonResponse({ cleared: true });
+  } catch (error) {
+    return errorResponse(error);
+  }
+}
+
+async function handleUpsertRuntimeSession(
+  request: Request,
+  store: DataStore,
+): Promise<Response> {
+  try {
+    return jsonResponse(store.upsertRuntimeSession(await request.json()));
+  } catch (error) {
+    return errorResponse(error);
+  }
+}
+
+function handleGetRuntimeSession(
+  store: DataStore,
+  encodedRunnerSessionId: string,
+): Response {
+  try {
+    const runnerSessionId = decodeURIComponent(encodedRunnerSessionId);
+    const session = store.getRuntimeSession(runnerSessionId);
+    return session ? jsonResponse(session) : jsonResponse({ error: "runtime session not found" }, 404);
   } catch (error) {
     return errorResponse(error);
   }

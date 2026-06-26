@@ -89,6 +89,7 @@ import {
   type RoleQuestionType,
   type RoleRecord,
   type RuntimeConfigRecord,
+  type RuntimeSessionRecord,
   type TransferAdminInput,
   type UpdateBusinessDocumentInput,
   type UpdateBotRuntimePolicyInput,
@@ -98,6 +99,7 @@ import {
   type UpsertBotMcpInput,
   type UpsertBotSkillInput,
   type UpsertRuntimeConfigInput,
+  type UpsertRuntimeSessionInput,
   type UpsertInitializationSessionInput,
   type UpsertGlobalDocumentInput,
   type UpsertMemoryDocumentInput,
@@ -265,6 +267,14 @@ export function createSqliteDataStore(
 
     upsertRuntimeConfig(botId, input) {
       return upsertRuntimeConfig(db, botId, input);
+    },
+
+    getRuntimeSession(runnerSessionId) {
+      return getRuntimeSession(db, runnerSessionId);
+    },
+
+    upsertRuntimeSession(input) {
+      return upsertRuntimeSession(db, input);
     },
 
     getOrCreateBotRuntimePolicy(botId) {
@@ -1573,6 +1583,62 @@ function upsertRuntimeConfig(
   return record;
 }
 
+function getRuntimeSession(
+  db: Database.Database,
+  runnerSessionId: string,
+): RuntimeSessionRecord | undefined {
+  return mapRuntimeSessionRecord(
+    db.prepare("select * from runtime_sessions where runner_session_id = ?").get(
+      requireText(runnerSessionId, "runner_session_id"),
+    ),
+  );
+}
+
+function upsertRuntimeSession(
+  db: Database.Database,
+  input: UpsertRuntimeSessionInput,
+): RuntimeSessionRecord {
+  const bot = getRequiredBot(db, input.bot_id);
+  const runnerSessionId = requireText(input.runner_session_id, "runner_session_id");
+  const existing = getRuntimeSession(db, runnerSessionId);
+  const now = existing ? nextIsoTimestamp(existing.updated_at) : new Date().toISOString();
+  const record: RuntimeSessionRecord = {
+    runner_session_id: runnerSessionId,
+    bot_id: bot.bot_id,
+    wecom_user_id: requireText(input.wecom_user_id, "wecom_user_id"),
+    conversation_id: requireText(input.conversation_id, "conversation_id"),
+    runtime: requireText(input.runtime, "runtime"),
+    ...(optionalText(input.provider_session_id) ? { provider_session_id: optionalText(input.provider_session_id) } : {}),
+    created_at: existing?.created_at ?? now,
+    updated_at: now,
+  };
+  db.prepare(
+    `
+      insert into runtime_sessions (
+        runner_session_id, bot_id, wecom_user_id, conversation_id, runtime,
+        provider_session_id, created_at, updated_at
+      ) values (?, ?, ?, ?, ?, ?, ?, ?)
+      on conflict(runner_session_id) do update set
+        bot_id = excluded.bot_id,
+        wecom_user_id = excluded.wecom_user_id,
+        conversation_id = excluded.conversation_id,
+        runtime = excluded.runtime,
+        provider_session_id = excluded.provider_session_id,
+        updated_at = excluded.updated_at
+    `,
+  ).run(
+    record.runner_session_id,
+    record.bot_id,
+    record.wecom_user_id,
+    record.conversation_id,
+    record.runtime,
+    record.provider_session_id ?? null,
+    record.created_at,
+    record.updated_at,
+  );
+  return record;
+}
+
 function updateBot(
   db: Database.Database,
   botId: string,
@@ -2197,6 +2263,17 @@ function migrate(db: Database.Database): void {
       provider text not null,
       stream integer not null,
       options_json text not null,
+      created_at text not null,
+      updated_at text not null
+    );
+
+    create table if not exists runtime_sessions (
+      runner_session_id text primary key,
+      bot_id text not null,
+      wecom_user_id text not null,
+      conversation_id text not null,
+      runtime text not null,
+      provider_session_id text,
       created_at text not null,
       updated_at text not null
     );
@@ -3342,6 +3419,25 @@ function mapRuntimeConfigRecord(row: unknown): RuntimeConfigRecord | undefined {
     options: normalizeRuntimeConfigOptions(
       JSON.parse(record.options_json as string) as Record<string, unknown>,
     ),
+    created_at: record.created_at as string,
+    updated_at: record.updated_at as string,
+  };
+}
+
+function mapRuntimeSessionRecord(row: unknown): RuntimeSessionRecord | undefined {
+  if (!row || typeof row !== "object") {
+    return undefined;
+  }
+  const record = row as Record<string, unknown>;
+  return {
+    runner_session_id: requireText(record.runner_session_id as string, "runner_session_id"),
+    bot_id: requireText(record.bot_id as string, "bot_id"),
+    wecom_user_id: requireText(record.wecom_user_id as string, "wecom_user_id"),
+    conversation_id: requireText(record.conversation_id as string, "conversation_id"),
+    runtime: requireText(record.runtime as string, "runtime"),
+    ...(typeof record.provider_session_id === "string" && record.provider_session_id.trim()
+      ? { provider_session_id: record.provider_session_id }
+      : {}),
     created_at: record.created_at as string,
     updated_at: record.updated_at as string,
   };

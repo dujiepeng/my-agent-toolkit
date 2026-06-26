@@ -142,6 +142,38 @@ describe("data-service store", () => {
       .toThrow("bot not found: missing-bot");
   });
 
+  it("stores runtime sessions by runner session id", () => {
+    const store = createDataStore();
+    store.createBot({ bot_id: "prd-bot", name: "PRD Bot", runtime: "kiro" });
+
+    const created = store.upsertRuntimeSession({
+      runner_session_id: "kiro:prd-bot:user-a:conv-1",
+      bot_id: "prd-bot",
+      wecom_user_id: "user-a",
+      conversation_id: "conv-1",
+      runtime: "kiro",
+      provider_session_id: "kiro-session-a",
+    });
+
+    expect(store.getRuntimeSession(created.runner_session_id)).toEqual(created);
+
+    const updated = store.upsertRuntimeSession({
+      runner_session_id: created.runner_session_id,
+      bot_id: "prd-bot",
+      wecom_user_id: "user-a",
+      conversation_id: "conv-1",
+      runtime: "kiro",
+      provider_session_id: "kiro-session-b",
+    });
+
+    expect(updated).toMatchObject({
+      runner_session_id: created.runner_session_id,
+      provider_session_id: "kiro-session-b",
+      created_at: created.created_at,
+    });
+    expect(updated.updated_at >= created.updated_at).toBe(true);
+  });
+
   it("isolates runtime config options from nested caller mutations", () => {
     const store = createDataStore();
     store.createBot({ bot_id: "prd-bot", name: "PRD Bot", runtime: "kiro" });
@@ -1342,6 +1374,9 @@ describe("data-service store", () => {
     expect(documents).toHaveLength(1);
     expect(documents[0]?.title).toBe("role.md");
     expect(String(documents[0]?.content ?? "")).toContain("角色定位");
+    expect(String(documents[0]?.content ?? "")).toContain("PRD 功能点清单");
+    expect(String(documents[0]?.content ?? "")).toContain("优先级");
+    expect(String(documents[0]?.content ?? "")).toContain("P0/P1/P2");
 
     const questions = store.listRoleQuestions(productManager!.role_id);
     expect(questions.length).toBeGreaterThanOrEqual(5);

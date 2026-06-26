@@ -3,6 +3,7 @@ import type { CliRuntimeConfig } from "./runtimes.js";
 
 export interface RunnerConfig {
   enabled_runtimes: RuntimeName[];
+  data_service_url?: string;
   kiro?: CliRuntimeConfig;
   mcp?: McpRunnerConfig;
   fetch?: typeof fetch;
@@ -26,6 +27,11 @@ export function loadRunnerConfig(
   const config: RunnerConfig = {
     enabled_runtimes: enabledRuntimes,
   };
+
+  const dataServiceUrl = env.DATA_SERVICE_URL?.trim();
+  if (dataServiceUrl) {
+    config.data_service_url = dataServiceUrl.replace(/\/+$/, "");
+  }
 
   if (enabledRuntimes.includes("kiro")) {
     const command = env.KIRO_COMMAND?.trim();
