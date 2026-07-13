@@ -420,6 +420,9 @@ describe("llm-runner server", () => {
   it("injects bot env vars into cli runtime execution without exposing them in prompt or output", async () => {
     const secretKey = "BOT_PRIVATE_TEST_SECRET";
     const sentinelPath = `/tmp/${secretKey}-value.txt`;
+    const relayBotIdPath = `/tmp/${secretKey}-relay-bot-id.txt`;
+    const relayUserIdPath = `/tmp/${secretKey}-relay-user-id.txt`;
+    const jiraUsernamePath = `/tmp/${secretKey}-jira-username.txt`;
     const server = createLlmRunnerServer({
       enabled_runtimes: ["kiro"],
       kiro: {
@@ -430,6 +433,9 @@ describe("llm-runner server", () => {
             "const fs = require('node:fs');",
             `const value = process.env.${secretKey} || 'missing';`,
             `fs.writeFileSync(${JSON.stringify(sentinelPath)}, value, 'utf8');`,
+            `fs.writeFileSync(${JSON.stringify(relayBotIdPath)}, process.env.KIRO_RELAY_BOT_ID || 'missing', 'utf8');`,
+            `fs.writeFileSync(${JSON.stringify(relayUserIdPath)}, process.env.KIRO_RELAY_USER_ID || 'missing', 'utf8');`,
+            `fs.writeFileSync(${JSON.stringify(jiraUsernamePath)}, process.env.EASEMOB_JIRA_USERNAME || 'missing', 'utf8');`,
             "process.stdout.write(`secret=${value}`);",
           ].join(" "),
         ],
@@ -439,7 +445,13 @@ describe("llm-runner server", () => {
         expect(botId).toBe("prd-bot");
         return {
           [secretKey]: "sk-live-secret",
+          KIRO_RELAY_BOT_ID: "spoofed-bot-id",
         };
+      }),
+      resolveUserEnvVars: vi.fn(async (botId: string, userId: string) => {
+        expect(botId).toBe("prd-bot");
+        expect(userId).toBe("user-a");
+        return { EASEMOB_JIRA_USERNAME: "jira-user-a" };
       }),
     });
 
@@ -461,6 +473,9 @@ describe("llm-runner server", () => {
     expect(body.output).toBe("secret=[REDACTED]");
     expect(JSON.stringify(body)).not.toContain("sk-live-secret");
     await expect(fs.readFile(sentinelPath, "utf8")).resolves.toBe("sk-live-secret");
+    await expect(fs.readFile(relayBotIdPath, "utf8")).resolves.toBe("prd-bot");
+    await expect(fs.readFile(relayUserIdPath, "utf8")).resolves.toBe("user-a");
+    await expect(fs.readFile(jiraUsernamePath, "utf8")).resolves.toBe("jira-user-a");
   });
 
   it("streams enabled kiro runtime output as ndjson chunks", async () => {

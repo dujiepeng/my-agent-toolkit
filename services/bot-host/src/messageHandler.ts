@@ -28,7 +28,11 @@ import {
   upsertBotEnvVar,
   updateBotRuntimePolicy,
   upsertInitializationSession,
+  createUserCredentialBinding,
+  deleteUserCredential,
+  getUserCredentialStatus,
 } from "./botStateClient.js";
+import { presentRuntimeOutput } from "./runtimeOutput.js";
 import type { WeComClient } from "./wecomClient.js";
 
 export interface BotHostConfig {
@@ -37,6 +41,8 @@ export interface BotHostConfig {
   capabilityRunnerUrl?: string;
   logServiceUrl?: string;
   fetch: typeof fetch;
+  credentialBindPublicUrl?: string;
+  credentialInternalToken?: string;
 }
 
 export interface WeComMessageInput {
@@ -231,6 +237,9 @@ export async function shouldStreamReply(
   if (parseConversationCommand(input.text)) {
     return false;
   }
+  if (parseJiraCredentialCommand(input.text)) {
+    return false;
+  }
 
   try {
     const context = await resolveMessageContext(config, input);
@@ -251,6 +260,9 @@ export async function shouldDeferStreamingForWizardState(
     return { failed: false, hasWizardState: false };
   }
   if (parseConversationCommand(input.text)) {
+    return { failed: false, hasWizardState: false };
+  }
+  if (parseJiraCredentialCommand(input.text)) {
     return { failed: false, hasWizardState: false };
   }
 
@@ -343,6 +355,11 @@ async function processWeComMessage(
       return handleCapabilityCommand(input, config, context, capabilityCommand);
     }
 
+    const jiraCredentialCommand = parseJiraCredentialCommand(input.text);
+    if (jiraCredentialCommand) {
+      return handleJiraCredentialCommand(input, config, jiraCredentialCommand);
+    }
+
     const conversationCommand = parseConversationCommand(input.text);
     if (conversationCommand) {
       return handleConversationCommand(input, config, context, conversationCommand);
@@ -389,9 +406,9 @@ function buildPrompt(
     ]),
     "</memory>",
     "",
-    "<message>",
+    "<user-message>",
     text,
-    "</message>",
+    "</user-message>",
   ].join("\n");
 }
 
@@ -434,6 +451,13 @@ export async function beginWizardGenerationIfReady(
   config: BotHostConfig,
 ): Promise<{ notice: string; shouldProcess: boolean } | undefined> {
   if (parseClaimAdminCommand(input.text) || isMarkReadyCommand(input.text)) {
+    return undefined;
+  }
+  if (
+    parseCapabilityCommand(input.text)
+    || parseConversationCommand(input.text)
+    || parseJiraCredentialCommand(input.text)
+  ) {
     return undefined;
   }
   const context = await resolveMessageContext(config, input);
@@ -785,8 +809,11 @@ async function processAllowedWeComMessage(
     prompt,
   });
 
-  const processed = await processAssistantOutput(config, input, result.output, resolvedConversationId);
-  const output = selectVisibleAssistantOutput(input.text, result.output, processed);
+  const presentation = presentRuntimeOutput(result.output);
+  writeRuntimeDiagnostics(input, result.run_id, presentation.diagnosticText);
+  const presentedOutput = presentation.visibleText || INVALID_RUNTIME_OUTPUT_MESSAGE;
+  const processed = await processAssistantOutput(config, input, presentedOutput, resolvedConversationId);
+  const output = selectVisibleAssistantOutput(input.text, presentedOutput, processed);
   await recordChatEvent(
     config,
     input,
@@ -1004,8 +1031,9 @@ async function streamAllowedWeComMessage(
   }
 
   let runId = `stream_${crypto.randomUUID()}`;
-  let output = "";
-  let sentAnyChunk = false;
+  let rawOutput = "";
+  let visibleOutput = "";
+  let sentAnyVisibleChunk = false;
   const presentationStream = createCoalescedPresentationStream(
     config.wecomClient,
     wecomConversationId,
@@ -1016,25 +1044,27 @@ async function streamAllowedWeComMessage(
       continue;
     }
     if (event.type === "chunk" && typeof event.content === "string") {
-      const content = cleanupRuntimeStreamChunk(event.content);
-      if (!content) {
+      rawOutput += event.content;
+      const presentation = presentRuntimeOutput(rawOutput);
+      const content = presentation.visibleText;
+      if (!content || content === visibleOutput) {
         continue;
       }
-      output += content;
-      if (isPromptEchoOutput(output)) {
-        output = INVALID_RUNTIME_OUTPUT_MESSAGE;
-        await config.wecomClient.sendText(wecomConversationId, output, { finish: true });
+      visibleOutput = content;
+      if (isPromptEchoOutput(visibleOutput)) {
+        visibleOutput = INVALID_RUNTIME_OUTPUT_MESSAGE;
+        await config.wecomClient.sendText(wecomConversationId, visibleOutput, { finish: true });
         await recordChatEvent(
           config,
           input,
           resolvedConversationId,
-          { run_id: runId, output },
+          { run_id: runId, output: visibleOutput },
           memoryDocuments,
         );
         return;
       }
-      sentAnyChunk = true;
-      presentationStream.push(output);
+      sentAnyVisibleChunk = true;
+      presentationStream.push(visibleOutput);
       continue;
     }
     if (event.type === "error") {
@@ -1057,7 +1087,11 @@ async function streamAllowedWeComMessage(
     }
   }
 
-  const rawFinalOutput = sentAnyChunk ? output : INVALID_RUNTIME_OUTPUT_MESSAGE;
+  const finalPresentation = presentRuntimeOutput(rawOutput);
+  writeRuntimeDiagnostics(input, runId, finalPresentation.diagnosticText);
+  const rawFinalOutput = sentAnyVisibleChunk && finalPresentation.visibleText
+    ? finalPresentation.visibleText
+    : INVALID_RUNTIME_OUTPUT_MESSAGE;
   const processed = await processAssistantOutput(config, input, rawFinalOutput, resolvedConversationId);
   const finalOutput = normalizeVisibleAssistantFormatting(
     selectVisibleAssistantOutput(input.text, rawFinalOutput, processed),
@@ -1150,17 +1184,27 @@ async function* readNdjsonEvents(
   }
 }
 
-function cleanupRuntimeStreamChunk(content: string): string {
-  return content
-    .replace(/\x1B\[[0-?]*[ -/]*[@-~]/g, "")
-    .replace(/^>\s*/, "");
-}
-
 function normalizeVisibleAssistantFormatting(output: string): string {
   return output
     .replace(/([^\n])([2-9]\.\s+)/g, "$1\n$2")
     .replace(/^([1-9]\.)\s*/gm, "$1 ")
     .trim();
+}
+
+function writeRuntimeDiagnostics(
+  input: WeComMessageInput,
+  runId: string,
+  diagnostics: string,
+): void {
+  if (!diagnostics) {
+    return;
+  }
+  console.warn("[bot-host] runtime diagnostics hidden from WeCom", {
+    botId: input.bot_id,
+    wecomUserId: input.wecom_user_id,
+    runId,
+    diagnostics: diagnostics.slice(-8_000),
+  });
 }
 
 function createCoalescedPresentationStream(
@@ -1365,7 +1409,8 @@ function selectVisibleAssistantOutput(
 }
 
 function isPromptEchoOutput(output: string): boolean {
-  return /<memory>[\s\S]*<\/memory>/.test(output) && /<message>[\s\S]*<\/message>/.test(output);
+  return /<memory>[\s\S]*<\/memory>/.test(output)
+    && /<(?:user-message|message)>[\s\S]*<\/(?:user-message|message)>/.test(output);
 }
 
 function formatRuntimeUnavailableMessage(error: string | undefined): string {
@@ -1634,6 +1679,66 @@ function parseCapabilityCommand(
   }
 
   return undefined;
+}
+
+type JiraCredentialCommand = "bind" | "status" | "unbind";
+
+function parseJiraCredentialCommand(text: string): JiraCredentialCommand | undefined {
+  const match = text.trim().match(/^\/jira\s+(bind|status|unbind)$/i);
+  return match?.[1].toLowerCase() as JiraCredentialCommand | undefined;
+}
+
+async function handleJiraCredentialCommand(
+  input: WeComMessageInput,
+  config: BotHostConfig,
+  command: JiraCredentialCommand,
+): Promise<Record<string, unknown>> {
+  const scope = {
+    bot_id: input.bot_id,
+    wecom_user_id: input.wecom_user_id,
+    provider: "easemob_jira" as const,
+  };
+
+  if (command === "status") {
+    const status = await getUserCredentialStatus(config, scope);
+    return {
+      output: status.is_bound
+        ? `Jira 账号已绑定。最近更新时间：${status.updated_at ?? "未知"}。`
+        : "Jira 账号尚未绑定。请发送 /jira bind 开始绑定。",
+    };
+  }
+
+  if (command === "unbind") {
+    await deleteUserCredential(config, scope);
+    return {
+      output: "已解除当前 Bot 下的 Jira 账号绑定。历史 Jira Cookie 将不再被复用。",
+    };
+  }
+
+  const status = await getUserCredentialStatus(config, scope);
+  if (status.is_bound) {
+    return {
+      output: "当前 Bot 下的 Jira 账号已经绑定。如需更换账号，请先发送 /jira unbind，再发送 /jira bind。",
+    };
+  }
+
+  const publicUrl = config.credentialBindPublicUrl?.replace(/\/+$/, "");
+  if (!publicUrl) {
+    return {
+      output: "Jira 账号绑定功能尚未配置公开访问地址，请联系管理员。",
+    };
+  }
+  const binding = await createUserCredentialBinding(config, scope);
+  const link = `${publicUrl}/bind/jira?token=${encodeURIComponent(binding.token)}`;
+  return {
+    output: [
+      "请打开下面的一次性链接绑定 Jira 账号：",
+      link,
+      "",
+      `链接有效期至：${binding.expires_at}`,
+      "请勿转发此链接，也不要在企微对话中发送账号或密码。",
+    ].join("\n"),
+  };
 }
 
 async function handleCapabilityCommand(
@@ -1911,6 +2016,9 @@ function buildHelpTable(): string {
     "| `/skill_list` | 已装技能列表 |",
     "| `/skill_add <git_url>` | 安装技能 |",
     "| `/skill_remove <name>` | 卸载技能 |",
+    "| `/jira bind` | 生成个人 Jira 账号绑定链接 |",
+    "| `/jira status` | 查看个人 Jira 绑定状态 |",
+    "| `/jira unbind` | 解除个人 Jira 账号绑定 |",
     "| `/claim_admin <认领码>` | 认领管理员身份 |",
     "| `/help` | 显示本帮助 |",
   ].join("\n");
@@ -1965,12 +2073,13 @@ function buildEnvSummary(items: BotEnvVarMetadataDto[]): string {
 }
 
 function buildSkillSummary(skills: BotSkillDto[]): string {
-  if (skills.length === 0) {
+  const installedSkills = skills.filter((skill) => skill.status === "installed");
+  if (installedSkills.length === 0) {
     return "当前没有已安装的 skill。";
   }
   return [
     "当前 bot 已安装的 Skills：",
-    ...skills.map((skill) => `- ${skill.name}（${skill.source_type}，${skill.status}）`),
+    ...installedSkills.map((skill) => `- ${skill.name}（${skill.source_type}）`),
   ].join("\n");
 }
 

@@ -58,8 +58,8 @@ describe("control-api server", () => {
     expect(html).toContain("renderClaimCard");
     expect(html).toContain("已同步");
     expect(html).toContain("机器人配置");
-    expect(html).toContain("能力状态");
-    expect(html).toContain("编辑能力");
+    expect(html).toContain("运行能力");
+    expect(html).toContain("编辑运行能力");
     expect(html).toContain("保存能力配置");
     expect(html).toContain("MCP Tools");
     expect(html).toContain("记忆索引");
@@ -95,6 +95,22 @@ describe("control-api server", () => {
     expect(html).not.toContain('response.ok ? "完成"');
     expect(html).not.toContain("查询审计日志");
     expect(html).not.toContain("写入 Memory 文档");
+  });
+
+  it("exposes a prominent bot private capability management entry", async () => {
+    const server = createControlApiServer({
+      dataServiceUrl: "http://data-service",
+      logServiceUrl: "http://log-service",
+      fetch: async () => new Response("not used", { status: 500 }),
+    });
+
+    const response = await server.fetch(new Request("http://localhost/"));
+    const html = await response.text();
+
+    expect(response.status).toBe(200);
+    expect(html).toContain("管理 Env / Skills / MCP");
+    expect(html).toContain("manage-bot-capabilities");
+    expect(html).toContain('window.location.href = "/admin/bots/"');
   });
 
   it("renders pending admin claim from channel detail data", async () => {
@@ -622,6 +638,18 @@ describe("control-api server", () => {
             mcp_manage_policy: "open",
           });
         }
+        if (request.url === "http://capability-runner/internal/skills/catalog") {
+          return Response.json({
+            items: [
+              {
+                name: "easemob-jira-testcase",
+                description: "Analyze Jira for QA",
+                source_type: "builtin",
+                source_ref: "easemob-jira-testcase",
+              },
+            ],
+          });
+        }
         return Response.json({ error: "unexpected" }, { status: 500 });
       },
     });
@@ -639,6 +667,10 @@ describe("control-api server", () => {
     expect(html).toContain("已设置");
     expect(html).toContain("****");
     expect(html).toContain("repo-analyzer");
+    expect(html).toContain("easemob-jira-testcase");
+    expect(html).toContain("安装 Skill");
+    expect(html).toContain("/admin/bots/prd-bot/capabilities/skills/install");
+    expect(html).toContain("/admin/bots/prd-bot/capabilities/skills/delete");
     expect(html).toContain("search-mcp");
     expect(html).toContain("skill_install_policy");
     expect(html).toContain("mcp_manage_policy");
@@ -3011,5 +3043,51 @@ describe("control-api server", () => {
         },
       },
     ]);
+  });
+
+  it("renders and submits the ordinary-user Jira credential binding page", async () => {
+    const forwardedBodies: unknown[] = [];
+    const server = createControlApiServer({
+      dataServiceUrl: "http://data-service",
+      logServiceUrl: "http://log-service",
+      fetch: async (input, init) => {
+        const request = input instanceof Request ? input : new Request(input, init);
+        if (request.method === "GET") {
+          return Response.json({
+            provider: "easemob_jira",
+            expires_at: "2026-07-13T18:00:00.000Z",
+          });
+        }
+        forwardedBodies.push(await request.json());
+        return Response.json({ provider: "easemob_jira", is_bound: true });
+      },
+    });
+
+    const page = await server.fetch(new Request(
+      "http://localhost/bind/jira?token=one-time-token",
+    ));
+    expect(page.status).toBe(200);
+    const html = await page.text();
+    expect(html).toContain("绑定 Jira 账号");
+    expect(html).toContain("one-time-token");
+    expect(html).not.toContain("管理员配置");
+
+    const submitted = await server.fetch(new Request("http://localhost/bind/jira", {
+      method: "POST",
+      body: new URLSearchParams({
+        token: "one-time-token",
+        username: "jira-user-a",
+        password: "jira-password-a",
+        use_same_credentials: "on",
+      }),
+    }));
+    expect(submitted.status).toBe(200);
+    expect(await submitted.text()).toContain("Jira 账号绑定成功");
+    expect(forwardedBodies).toEqual([{
+      username: "jira-user-a",
+      password: "jira-password-a",
+      redirect_username: "jira-user-a",
+      redirect_password: "jira-password-a",
+    }]);
   });
 });

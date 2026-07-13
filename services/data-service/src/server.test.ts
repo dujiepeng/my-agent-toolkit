@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { createDataServiceServer } from "./server.js";
 import { createDataStore, seedDefaultRoleConfig } from "./store.js";
+import { createCredentialVault } from "./credentialVault.js";
 
 describe("data-service server", () => {
   it("responds to health checks", async () => {
@@ -2859,5 +2860,107 @@ describe("data-service server", () => {
     await expect(response.json()).resolves.toEqual({
       error: "generation_in_progress is invalid",
     });
+  });
+
+  it("binds encrypted Jira credentials and isolates runtime env by bot and user", async () => {
+    const internalToken = "internal-test-token";
+    const server = createDataServiceServer(createDataStore(), {
+      credentialVault: createCredentialVault(Buffer.alloc(32, 5).toString("base64")),
+      credentialInternalToken: internalToken,
+    });
+    await server.fetch(new Request("http://localhost/v1/bots", {
+      method: "POST",
+      body: JSON.stringify({ bot_id: "jira-bot", name: "Jira Bot", runtime: "kiro" }),
+    }));
+
+    const bindingResponse = await server.fetch(new Request(
+      "http://localhost/internal/user-credential-bindings",
+      {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          authorization: `Bearer ${internalToken}`,
+        },
+        body: JSON.stringify({
+          bot_id: "jira-bot",
+          wecom_user_id: "user-a",
+          provider: "easemob_jira",
+        }),
+      },
+    ));
+    expect(bindingResponse.status).toBe(201);
+    const binding = await bindingResponse.json() as { token: string };
+
+    const completeResponse = await server.fetch(new Request(
+      `http://localhost/v1/credential-bindings/${encodeURIComponent(binding.token)}`,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          username: "jira-user-a",
+          password: "jira-password-a",
+          redirect_username: "sso-user-a",
+          redirect_password: "sso-password-a",
+        }),
+      },
+    ));
+    expect(completeResponse.status).toBe(200);
+    expect(JSON.stringify(await completeResponse.json())).not.toContain("jira-password-a");
+
+    const duplicateBindingResponse = await server.fetch(new Request(
+      "http://localhost/internal/user-credential-bindings",
+      {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          authorization: `Bearer ${internalToken}`,
+        },
+        body: JSON.stringify({
+          bot_id: "jira-bot",
+          wecom_user_id: "user-a",
+          provider: "easemob_jira",
+        }),
+      },
+    ));
+    expect(duplicateBindingResponse.status).toBe(400);
+    await expect(duplicateBindingResponse.json()).resolves.toEqual({
+      error: "user credential is already bound; unbind first",
+    });
+
+    const authHeaders = { authorization: `Bearer ${internalToken}` };
+    const scope = (userId: string) => new URLSearchParams({
+      bot_id: "jira-bot",
+      wecom_user_id: userId,
+      provider: "easemob_jira",
+    });
+    const statusA = await server.fetch(new Request(
+      `http://localhost/internal/user-credentials?${scope("user-a")}`,
+      { headers: authHeaders },
+    ));
+    const statusB = await server.fetch(new Request(
+      `http://localhost/internal/user-credentials?${scope("user-b")}`,
+      { headers: authHeaders },
+    ));
+    await expect(statusA.json()).resolves.toMatchObject({ is_bound: true });
+    await expect(statusB.json()).resolves.toMatchObject({ is_bound: false });
+
+    const envA = await server.fetch(new Request(
+      `http://localhost/internal/user-credentials/runtime-env?${scope("user-a")}`,
+      { headers: authHeaders },
+    ));
+    const envB = await server.fetch(new Request(
+      `http://localhost/internal/user-credentials/runtime-env?${scope("user-b")}`,
+      { headers: authHeaders },
+    ));
+    await expect(envA.json()).resolves.toEqual({
+      env: {
+        MY_AGENT_JIRA_CREDENTIAL_VERSION: expect.any(String),
+        EASEMOB_JIRA_USERNAME: "jira-user-a",
+        EASEMOB_JIRA_PASSWORD: "jira-password-a",
+        EASEMOB_JIRA_REDIRECT_USERNAME: "sso-user-a",
+        EASEMOB_JIRA_REDIRECT_PASSWORD: "sso-password-a",
+      },
+    });
+    await expect(envB.json()).resolves.toEqual({ env: {} });
   });
 });

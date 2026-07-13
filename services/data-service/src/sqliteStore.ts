@@ -1,4 +1,5 @@
 import Database from "better-sqlite3";
+import { randomBytes } from "node:crypto";
 import {
   buildDefaultMcpCapabilityConfig,
   parseMcpCapabilityConfig,
@@ -17,6 +18,7 @@ import {
   configDocumentOrder,
   defaultRuntimeConfig,
   hashClaimCode,
+  hashCredentialBindingToken,
   initializationSessionKey,
   isBotConfigDocumentTitle,
   nextIsoTimestamp,
@@ -30,6 +32,7 @@ import {
   requireInitializationPhase,
   requireInitializationSessionStatus,
   requireText,
+  requireUserCredentialProvider,
   type AdminClaimRecord,
   type AdminRecord,
   type AssetRecord,
@@ -96,6 +99,11 @@ import {
   type OpenConversationInput,
   type RenameConversationInput,
   type UpsertBotEnvVarInput,
+  type CompleteUserCredentialBindingInput,
+  type UserCredentialBindingRecord,
+  type UserCredentialMetadataRecord,
+  type UserCredentialRecord,
+  type UserCredentialScopeInput,
   type UpsertBotMcpInput,
   type UpsertBotSkillInput,
   type UpsertRuntimeConfigInput,
@@ -295,6 +303,31 @@ export function createSqliteDataStore(
 
     deleteBotEnvVar(botId, key) {
       deleteBotEnvVar(db, botId, key);
+    },
+
+    createUserCredentialBinding(input) {
+      return createUserCredentialBinding(db, input);
+    },
+
+    getUserCredentialBinding(token) {
+      return getUserCredentialBinding(db, token);
+    },
+
+    completeUserCredentialBinding(input) {
+      return completeUserCredentialBinding(db, input);
+    },
+
+    getUserCredential(input) {
+      return getUserCredential(db, input);
+    },
+
+    getUserCredentialMetadata(input) {
+      const record = getUserCredential(db, input);
+      return record ? userCredentialMetadata(record) : undefined;
+    },
+
+    deleteUserCredential(input) {
+      deleteUserCredential(db, input);
     },
 
     upsertBotSkill(botId, input) {
@@ -696,6 +729,8 @@ function resetToStandardRoleConfigInSqlite(
     db.prepare("delete from bot_mcp_capability_configs").run();
     db.prepare("delete from bot_runtime_policies").run();
     db.prepare("delete from bot_env_vars").run();
+    db.prepare("delete from user_credential_bindings").run();
+    db.prepare("delete from user_credentials").run();
     db.prepare("delete from bot_skills").run();
     db.prepare("delete from bot_mcps").run();
     db.prepare("delete from bot_capability_audit_logs").run();
@@ -1017,6 +1052,156 @@ function deleteBotEnvVar(
     bot.bot_id,
     requireText(key, "key"),
   );
+}
+
+function createUserCredentialBinding(
+  db: Database.Database,
+  input: UserCredentialScopeInput,
+): UserCredentialBindingRecord {
+  const bot = getRequiredBot(db, input.bot_id);
+  const wecomUserId = requireText(input.wecom_user_id, "wecom_user_id");
+  const provider = requireUserCredentialProvider(input.provider);
+  if (getUserCredential(db, {
+    bot_id: bot.bot_id,
+    wecom_user_id: wecomUserId,
+    provider,
+  })) {
+    throw new Error("user credential is already bound; unbind first");
+  }
+  const token = randomBytes(32).toString("base64url");
+  const tokenHash = hashCredentialBindingToken(token);
+  const now = new Date();
+  db.prepare(`
+    update user_credential_bindings
+    set consumed_at = ?
+    where bot_id = ? and wecom_user_id = ? and provider = ? and consumed_at is null
+  `).run(now.toISOString(), bot.bot_id, wecomUserId, provider);
+  const record: UserCredentialBindingRecord = {
+    token,
+    token_hash: tokenHash,
+    bot_id: bot.bot_id,
+    wecom_user_id: wecomUserId,
+    provider,
+    created_at: now.toISOString(),
+    expires_at: new Date(now.getTime() + 10 * 60 * 1000).toISOString(),
+  };
+  db.prepare(`
+    insert into user_credential_bindings (
+      token_hash, bot_id, wecom_user_id, provider, created_at, expires_at, consumed_at
+    ) values (?, ?, ?, ?, ?, ?, null)
+  `).run(
+    record.token_hash,
+    record.bot_id,
+    record.wecom_user_id,
+    record.provider,
+    record.created_at,
+    record.expires_at,
+  );
+  return record;
+}
+
+function getUserCredentialBinding(
+  db: Database.Database,
+  token: string,
+): UserCredentialBindingRecord | undefined {
+  const record = mapUserCredentialBindingRecord(
+    db.prepare("select * from user_credential_bindings where token_hash = ?")
+      .get(hashCredentialBindingToken(token)),
+    token,
+  );
+  if (
+    !record
+    || record.consumed_at
+    || new Date(record.expires_at).getTime() < Date.now()
+  ) {
+    return undefined;
+  }
+  return record;
+}
+
+function completeUserCredentialBinding(
+  db: Database.Database,
+  input: CompleteUserCredentialBindingInput,
+): UserCredentialMetadataRecord {
+  const transaction = db.transaction(() => {
+    const binding = getUserCredentialBinding(db, input.token);
+    if (!binding) {
+      throw new Error("credential binding link is invalid or expired");
+    }
+    const existing = getUserCredential(db, binding);
+    const now = existing ? nextIsoTimestamp(existing.updated_at) : new Date().toISOString();
+    const createdAt = existing?.created_at ?? now;
+    db.prepare(`
+      insert into user_credentials (
+        bot_id, wecom_user_id, provider, payload_ciphertext, created_at, updated_at
+      ) values (?, ?, ?, ?, ?, ?)
+      on conflict(bot_id, wecom_user_id, provider) do update set
+        payload_ciphertext = excluded.payload_ciphertext,
+        updated_at = excluded.updated_at
+    `).run(
+      binding.bot_id,
+      binding.wecom_user_id,
+      binding.provider,
+      requireText(input.payload_ciphertext, "payload_ciphertext"),
+      createdAt,
+      now,
+    );
+    db.prepare(`
+      update user_credential_bindings
+      set consumed_at = ?
+      where token_hash = ? and consumed_at is null
+    `).run(now, binding.token_hash);
+    return {
+      bot_id: binding.bot_id,
+      wecom_user_id: binding.wecom_user_id,
+      provider: binding.provider,
+      is_bound: true as const,
+      updated_at: now,
+    };
+  });
+  return transaction();
+}
+
+function getUserCredential(
+  db: Database.Database,
+  input: UserCredentialScopeInput,
+): UserCredentialRecord | undefined {
+  getRequiredBot(db, input.bot_id);
+  return mapUserCredentialRecord(db.prepare(`
+    select * from user_credentials
+    where bot_id = ? and wecom_user_id = ? and provider = ?
+  `).get(
+    requireText(input.bot_id, "bot_id"),
+    requireText(input.wecom_user_id, "wecom_user_id"),
+    requireUserCredentialProvider(input.provider),
+  ));
+}
+
+function deleteUserCredential(
+  db: Database.Database,
+  input: UserCredentialScopeInput,
+): void {
+  getRequiredBot(db, input.bot_id);
+  db.prepare(`
+    delete from user_credentials
+    where bot_id = ? and wecom_user_id = ? and provider = ?
+  `).run(
+    requireText(input.bot_id, "bot_id"),
+    requireText(input.wecom_user_id, "wecom_user_id"),
+    requireUserCredentialProvider(input.provider),
+  );
+}
+
+function userCredentialMetadata(
+  record: UserCredentialRecord,
+): UserCredentialMetadataRecord {
+  return {
+    bot_id: record.bot_id,
+    wecom_user_id: record.wecom_user_id,
+    provider: record.provider,
+    is_bound: true,
+    updated_at: record.updated_at,
+  };
 }
 
 function upsertBotSkill(
@@ -2297,6 +2482,26 @@ function migrate(db: Database.Database): void {
       primary key (bot_id, key)
     );
 
+    create table if not exists user_credentials (
+      bot_id text not null,
+      wecom_user_id text not null,
+      provider text not null,
+      payload_ciphertext text not null,
+      created_at text not null,
+      updated_at text not null,
+      primary key (bot_id, wecom_user_id, provider)
+    );
+
+    create table if not exists user_credential_bindings (
+      token_hash text primary key,
+      bot_id text not null,
+      wecom_user_id text not null,
+      provider text not null,
+      created_at text not null,
+      expires_at text not null,
+      consumed_at text
+    );
+
     create table if not exists bot_skills (
       skill_id text primary key,
       bot_id text not null,
@@ -2590,6 +2795,12 @@ function migrate(db: Database.Database): void {
   addColumnIfMissing(db, "initialization_sessions", "selected_role_id", "text");
   db.prepare(
     "create unique index if not exists idx_bots_wecom_bot_id_unique on bots (wecom_bot_id) where wecom_bot_id is not null",
+  ).run();
+  db.prepare(
+    "create index if not exists idx_user_credentials_scope on user_credentials(bot_id, wecom_user_id, provider)",
+  ).run();
+  db.prepare(
+    "create index if not exists idx_user_credential_bindings_expiry on user_credential_bindings(expires_at)",
   ).run();
   migrateBotConfigDocuments(db);
 }
@@ -3518,6 +3729,46 @@ function mapBotEnvVarMetadataRecord(row: unknown): BotEnvVarMetadataRecord | und
     key: record.key as string,
     is_set: Boolean(record.is_set),
     updated_at: record.updated_at as string,
+  };
+}
+
+function mapUserCredentialRecord(row: unknown): UserCredentialRecord | undefined {
+  if (!row || typeof row !== "object") {
+    return undefined;
+  }
+  const record = row as Record<string, unknown>;
+  return {
+    bot_id: requireText(record.bot_id as string, "bot_id"),
+    wecom_user_id: requireText(record.wecom_user_id as string, "wecom_user_id"),
+    provider: requireUserCredentialProvider(record.provider as string),
+    payload_ciphertext: requireText(
+      record.payload_ciphertext as string,
+      "payload_ciphertext",
+    ),
+    created_at: requireText(record.created_at as string, "created_at"),
+    updated_at: requireText(record.updated_at as string, "updated_at"),
+  };
+}
+
+function mapUserCredentialBindingRecord(
+  row: unknown,
+  token: string,
+): UserCredentialBindingRecord | undefined {
+  if (!row || typeof row !== "object") {
+    return undefined;
+  }
+  const record = row as Record<string, unknown>;
+  return {
+    token: requireText(token, "token"),
+    token_hash: requireText(record.token_hash as string, "token_hash"),
+    bot_id: requireText(record.bot_id as string, "bot_id"),
+    wecom_user_id: requireText(record.wecom_user_id as string, "wecom_user_id"),
+    provider: requireUserCredentialProvider(record.provider as string),
+    created_at: requireText(record.created_at as string, "created_at"),
+    expires_at: requireText(record.expires_at as string, "expires_at"),
+    ...(typeof record.consumed_at === "string"
+      ? { consumed_at: record.consumed_at }
+      : {}),
   };
 }
 

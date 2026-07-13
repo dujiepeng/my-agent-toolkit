@@ -16,12 +16,14 @@ export interface CapabilityDispatchContext {
 
 export interface CreateCapabilityRunnerServerOptions {
   dispatch?(context: CapabilityDispatchContext): void | Promise<void>;
+  listSkills?(): unknown | Promise<unknown>;
 }
 
 export function createCapabilityRunnerServer(
   options: CreateCapabilityRunnerServerOptions = {},
 ): CapabilityRunnerServer {
   const dispatch = options.dispatch;
+  const listSkills = options.listSkills;
 
   return {
     async fetch(request: Request): Promise<Response> {
@@ -29,6 +31,10 @@ export function createCapabilityRunnerServer(
 
       if (request.method === "GET" && url.pathname === "/health") {
         return jsonResponse({ ok: true });
+      }
+
+      if (request.method === "GET" && url.pathname === "/internal/skills/catalog") {
+        return jsonResponse({ items: await listSkills?.() ?? [] });
       }
 
       const skillInstallRouteMatch = url.pathname.match(

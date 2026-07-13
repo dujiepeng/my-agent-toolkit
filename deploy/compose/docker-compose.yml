@@ -42,6 +42,8 @@ services:
       LLM_RUNNER_URL: "http://llm-runner:8200"
       CAPABILITY_RUNNER_URL: "http://capability-runner:8700"
       LOG_SERVICE_URL: "http://log-service:8500"
+      CREDENTIAL_BIND_PUBLIC_URL: "${CREDENTIAL_BIND_PUBLIC_URL:-http://localhost:8600}"
+      USER_CREDENTIALS_INTERNAL_TOKEN: "${USER_CREDENTIALS_INTERNAL_TOKEN:-}"
     ports:
       - "8400:8400"
     depends_on:
@@ -81,6 +83,8 @@ services:
       LLM_RUNNER_URL: "http://llm-runner:8200"
       CAPABILITY_RUNNER_URL: "http://capability-runner:8700"
       LOG_SERVICE_URL: "http://log-service:8500"
+      CREDENTIAL_BIND_PUBLIC_URL: "${CREDENTIAL_BIND_PUBLIC_URL:-http://localhost:8600}"
+      USER_CREDENTIALS_INTERNAL_TOKEN: "${USER_CREDENTIALS_INTERNAL_TOKEN:-}"
     ports:
       - "8401:8401"
     depends_on:
@@ -112,6 +116,8 @@ services:
     environment:
       PORT: "8300"
       DATA_SERVICE_DB_PATH: "/data/data-service.db"
+      USER_CREDENTIALS_MASTER_KEY: "${USER_CREDENTIALS_MASTER_KEY:-}"
+      USER_CREDENTIALS_INTERNAL_TOKEN: "${USER_CREDENTIALS_INTERNAL_TOKEN:-}"
     ports:
       - "8300:8300"
     volumes:
@@ -166,7 +172,9 @@ services:
       KIRO_RELAY_URL: "http://host.docker.internal:8210/v1/kiro/chat"
       KIRO_RELAY_STREAM: "true"
       KIRO_RELAY_STREAM_URL: "http://host.docker.internal:8210/v1/kiro/chat/stream"
-      KIRO_TIMEOUT_MS: "120000"
+      KIRO_TIMEOUT_MS: "${KIRO_TIMEOUT_MS:-180000}"
+      USER_CREDENTIALS_INTERNAL_TOKEN: "${USER_CREDENTIALS_INTERNAL_TOKEN:-}"
+      KIRO_RELAY_AUTH_TOKEN: "${KIRO_RELAY_AUTH_TOKEN:-}"
     ports:
       - "8200:8200"
     healthcheck:
@@ -189,10 +197,18 @@ services:
     environment:
       PORT: "8700"
       WORKSPACE_ROOT: "/workspace/runtime/bots"
+      DATA_SERVICE_URL: "http://data-service:8300"
+      KIRO_WORKSPACE_ROOT: "/kiro-workspaces"
+      SKILL_CATALOG_ROOT: "/skill-catalog"
     ports:
       - "8700:8700"
     volumes:
-      - ../../runtime:/workspace/runtime
+      - capability-runner-data:/workspace/runtime
+      - ${HOME}/Documents/KiroBotWorkspaces:/kiro-workspaces
+      - ../../.agents/skills:/skill-catalog:ro
+    depends_on:
+      data-service:
+        condition: service_healthy
     healthcheck:
       test:
         [
@@ -209,3 +225,4 @@ services:
 volumes:
   data-service-data:
   log-service-data:
+  capability-runner-data:

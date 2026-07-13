@@ -7,13 +7,21 @@ import {
   type RoleQuestionOption,
   type UpdateBusinessDocumentInput,
 } from "./store.js";
+import type { CredentialVault, UserCredentialPayload } from "./credentialVault.js";
+import { timingSafeEqual } from "node:crypto";
 
 export interface DataServiceServer {
   fetch(request: Request): Promise<Response>;
 }
 
+export interface DataServiceServerConfig {
+  credentialVault?: CredentialVault;
+  credentialInternalToken?: string;
+}
+
 export function createDataServiceServer(
   store: DataStore = createDataStore(),
+  config: DataServiceServerConfig = {},
 ): DataServiceServer {
   return {
     async fetch(request: Request): Promise<Response> {
@@ -21,6 +29,42 @@ export function createDataServiceServer(
 
       if (request.method === "GET" && url.pathname === "/health") {
         return jsonResponse(healthResponse("data-service"));
+      }
+
+      if (
+        request.method === "POST"
+        && url.pathname === "/internal/user-credential-bindings"
+      ) {
+        return handleCreateUserCredentialBinding(request, store, config);
+      }
+
+      const publicCredentialBindingMatch = url.pathname.match(
+        /^\/v1\/credential-bindings\/([^/]+)$/,
+      );
+      if (request.method === "GET" && publicCredentialBindingMatch) {
+        return handleGetUserCredentialBinding(store, publicCredentialBindingMatch[1]);
+      }
+      if (request.method === "POST" && publicCredentialBindingMatch) {
+        return handleCompleteUserCredentialBinding(
+          request,
+          store,
+          config,
+          publicCredentialBindingMatch[1],
+        );
+      }
+
+      if (
+        url.pathname === "/internal/user-credentials"
+        && (request.method === "GET" || request.method === "DELETE")
+      ) {
+        return handleUserCredential(request, url, store, config);
+      }
+
+      if (
+        request.method === "GET"
+        && url.pathname === "/internal/user-credentials/runtime-env"
+      ) {
+        return handleGetUserCredentialRuntimeEnv(request, url, store, config);
       }
 
       if (request.method === "POST" && url.pathname === "/v1/bots") {
@@ -1838,6 +1882,211 @@ async function handleVerifyAdminClaim(
   } catch (error) {
     return errorResponse(error);
   }
+}
+
+async function handleCreateUserCredentialBinding(
+  request: Request,
+  store: DataStore,
+  config: DataServiceServerConfig,
+): Promise<Response> {
+  const accessError = internalCredentialAccessError(request, config);
+  if (accessError) {
+    return accessError;
+  }
+  try {
+    const body = await request.json() as Record<string, unknown>;
+    const binding = store.createUserCredentialBinding({
+      bot_id: requireText(body.bot_id, "bot_id"),
+      wecom_user_id: requireText(body.wecom_user_id, "wecom_user_id"),
+      provider: requireCredentialProvider(body.provider),
+    });
+    return jsonResponse({
+      token: binding.token,
+      provider: binding.provider,
+      expires_at: binding.expires_at,
+    }, 201);
+  } catch (error) {
+    return errorResponse(error);
+  }
+}
+
+function handleGetUserCredentialBinding(
+  store: DataStore,
+  encodedToken: string,
+): Response {
+  try {
+    const binding = store.getUserCredentialBinding(decodeURIComponent(encodedToken));
+    if (!binding) {
+      return jsonResponse({ error: "credential binding link is invalid or expired" }, 404);
+    }
+    return jsonResponse({
+      provider: binding.provider,
+      expires_at: binding.expires_at,
+    });
+  } catch (error) {
+    return errorResponse(error);
+  }
+}
+
+async function handleCompleteUserCredentialBinding(
+  request: Request,
+  store: DataStore,
+  config: DataServiceServerConfig,
+  encodedToken: string,
+): Promise<Response> {
+  if (!config.credentialVault) {
+    return jsonResponse({ error: "user credential vault is not configured" }, 503);
+  }
+  try {
+    const body = await request.json() as Record<string, unknown>;
+    const payload = normalizeCredentialPayload(body);
+    const metadata = store.completeUserCredentialBinding({
+      token: decodeURIComponent(encodedToken),
+      payload_ciphertext: config.credentialVault.encrypt(payload),
+    });
+    return jsonResponse({
+      provider: metadata.provider,
+      is_bound: metadata.is_bound,
+      updated_at: metadata.updated_at,
+    });
+  } catch (error) {
+    return errorResponse(error);
+  }
+}
+
+function handleUserCredential(
+  request: Request,
+  url: URL,
+  store: DataStore,
+  config: DataServiceServerConfig,
+): Response {
+  const accessError = internalCredentialAccessError(request, config);
+  if (accessError) {
+    return accessError;
+  }
+  try {
+    const scope = credentialScopeFromUrl(url);
+    if (request.method === "DELETE") {
+      store.deleteUserCredential(scope);
+      return jsonResponse({ deleted: true });
+    }
+    const metadata = store.getUserCredentialMetadata(scope);
+    return jsonResponse(metadata ?? {
+      ...scope,
+      is_bound: false,
+    });
+  } catch (error) {
+    return errorResponse(error);
+  }
+}
+
+function handleGetUserCredentialRuntimeEnv(
+  request: Request,
+  url: URL,
+  store: DataStore,
+  config: DataServiceServerConfig,
+): Response {
+  const accessError = internalCredentialAccessError(request, config);
+  if (accessError) {
+    return accessError;
+  }
+  if (!config.credentialVault) {
+    return jsonResponse({ error: "user credential vault is not configured" }, 503);
+  }
+  try {
+    const credential = store.getUserCredential(credentialScopeFromUrl(url));
+    if (!credential) {
+      return jsonResponse({ env: {} });
+    }
+    const payload = config.credentialVault.decrypt(credential.payload_ciphertext);
+    return jsonResponse({
+      env: {
+        MY_AGENT_JIRA_CREDENTIAL_VERSION: credential.updated_at,
+        EASEMOB_JIRA_USERNAME: payload.username,
+        EASEMOB_JIRA_PASSWORD: payload.password,
+        ...(payload.redirect_username
+          ? { EASEMOB_JIRA_REDIRECT_USERNAME: payload.redirect_username }
+          : {}),
+        ...(payload.redirect_password
+          ? { EASEMOB_JIRA_REDIRECT_PASSWORD: payload.redirect_password }
+          : {}),
+      },
+    });
+  } catch (error) {
+    return jsonResponse({
+      error: error instanceof Error ? error.message : "credential lookup failed",
+    }, 500);
+  }
+}
+
+function credentialScopeFromUrl(url: URL) {
+  return {
+    bot_id: requireText(url.searchParams.get("bot_id"), "bot_id"),
+    wecom_user_id: requireText(
+      url.searchParams.get("wecom_user_id"),
+      "wecom_user_id",
+    ),
+    provider: requireCredentialProvider(url.searchParams.get("provider")),
+  };
+}
+
+function requireCredentialProvider(value: unknown): "easemob_jira" {
+  if (value !== "easemob_jira") {
+    throw new Error("unsupported credential provider");
+  }
+  return value;
+}
+
+function normalizeCredentialPayload(
+  body: Record<string, unknown>,
+): UserCredentialPayload {
+  const username = requireSecret(body.username, "username");
+  const password = requireSecret(body.password, "password");
+  const redirectUsername = optionalSecret(body.redirect_username);
+  const redirectPassword = optionalSecret(body.redirect_password);
+  if (Boolean(redirectUsername) !== Boolean(redirectPassword)) {
+    throw new Error("redirect username and password must be provided together");
+  }
+  return {
+    username,
+    password,
+    ...(redirectUsername ? { redirect_username: redirectUsername } : {}),
+    ...(redirectPassword ? { redirect_password: redirectPassword } : {}),
+  };
+}
+
+function internalCredentialAccessError(
+  request: Request,
+  config: DataServiceServerConfig,
+): Response | undefined {
+  const expected = config.credentialInternalToken?.trim();
+  if (!expected) {
+    return jsonResponse({ error: "user credential internal token is not configured" }, 503);
+  }
+  const authorization = request.headers.get("authorization") ?? "";
+  const actual = authorization.startsWith("Bearer ")
+    ? authorization.slice("Bearer ".length)
+    : "";
+  const expectedBuffer = Buffer.from(expected);
+  const actualBuffer = Buffer.from(actual);
+  if (
+    expectedBuffer.length !== actualBuffer.length
+    || !timingSafeEqual(expectedBuffer, actualBuffer)
+  ) {
+    return jsonResponse({ error: "unauthorized" }, 401);
+  }
+  return undefined;
+}
+
+function requireSecret(value: unknown, fieldName: string): string {
+  if (typeof value !== "string" || value.trim() === "") {
+    throw new Error(`${fieldName} is required`);
+  }
+  return value;
+}
+
+function optionalSecret(value: unknown): string | undefined {
+  return typeof value === "string" && value.trim() !== "" ? value : undefined;
 }
 
 function optionalSearchParam(url: URL, name: string): string | undefined {

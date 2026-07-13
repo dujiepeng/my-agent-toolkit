@@ -1,8 +1,17 @@
 import { createServer } from "node:http";
 import { createCapabilityRunnerServer } from "./server.js";
+import { createSkillManager } from "./skillManager.js";
 
 const port = Number.parseInt(process.env.PORT ?? "8400", 10);
-const app = createCapabilityRunnerServer();
+const skillManager = createSkillManager({
+  dataServiceUrl: process.env.DATA_SERVICE_URL ?? "http://data-service:8300",
+  kiroWorkspaceRoot: process.env.KIRO_WORKSPACE_ROOT ?? "/kiro-workspaces",
+  skillCatalogRoot: process.env.SKILL_CATALOG_ROOT ?? "/skill-catalog",
+});
+const app = createCapabilityRunnerServer({
+  dispatch: (context) => skillManager.dispatch(context),
+  listSkills: () => skillManager.listCatalog(),
+});
 
 const server = createServer(async (req, res) => {
   try {

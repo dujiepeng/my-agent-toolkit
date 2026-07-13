@@ -3,10 +3,16 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+CREDENTIAL_ENV_FILE="$($ROOT_DIR/scripts/dev-user-credentials-init.sh)"
+set -a
+source "$CREDENTIAL_ENV_FILE"
+set +a
+unset USER_CREDENTIALS_MASTER_KEY USER_CREDENTIALS_INTERNAL_TOKEN
 PORT="${KIRO_HOST_RELAY_PORT:-8210}"
 HOST="${KIRO_HOST_RELAY_HOST:-0.0.0.0}"
 PID_FILE="${KIRO_HOST_RELAY_PID_FILE:-$ROOT_DIR/runtime/kiro-host-relay.pid}"
 COMMAND="${KIRO_COMMAND:-$HOME/.local/bin/kiro-cli}"
+WORKSPACE_ROOT="${KIRO_WORKSPACE_ROOT:-$HOME/Documents/KiroBotWorkspaces}"
 RELAY_SCRIPT="$ROOT_DIR/services/llm-runner/scripts/kiro-host-relay.mjs"
 
 if [[ "$COMMAND" == */* && ! -x "$COMMAND" ]]; then
@@ -42,10 +48,12 @@ fi
 
 echo "Kiro relay watch mode: http://$HOST:$PORT"
 echo "Kiro command: $COMMAND"
+echo "Kiro workspace root: $WORKSPACE_ROOT"
 
 cd "$ROOT_DIR"
 exec env \
   KIRO_HOST_RELAY_PORT="$PORT" \
   KIRO_HOST_RELAY_HOST="$HOST" \
   KIRO_COMMAND="$COMMAND" \
+  KIRO_WORKSPACE_ROOT="$WORKSPACE_ROOT" \
   node --watch "$RELAY_SCRIPT"

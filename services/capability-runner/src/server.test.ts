@@ -13,6 +13,28 @@ describe("capability-runner server", () => {
     await expect(response.json()).resolves.toEqual({ ok: true });
   });
 
+  it("returns the installable skill catalog", async () => {
+    const listSkills = vi.fn().mockReturnValue([
+      {
+        name: "jira-test",
+        description: "Analyze Jira for QA",
+        source_type: "builtin",
+        source_ref: "jira-test",
+      },
+    ]);
+    const server = createCapabilityRunnerServer({ listSkills });
+
+    const response = await server.fetch(
+      new Request("http://localhost/internal/skills/catalog"),
+    );
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toEqual({
+      items: [expect.objectContaining({ name: "jira-test" })],
+    });
+    expect(listSkills).toHaveBeenCalledTimes(1);
+  });
+
   it("dispatches bot skill install requests with structured payload", async () => {
     const dispatch = vi.fn().mockResolvedValue(undefined);
     const server = createCapabilityRunnerServer({ dispatch });

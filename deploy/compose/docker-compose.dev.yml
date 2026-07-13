@@ -97,7 +97,6 @@ services:
     environment:
       NODE_ENV: development
     volumes:
-      - ../../runtime:/workspace/runtime
       - ../../services/capability-runner/src:/app/services/capability-runner/src:ro
 
 volumes:

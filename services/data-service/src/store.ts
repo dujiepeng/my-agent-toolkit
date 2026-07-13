@@ -3,6 +3,7 @@ import {
   parseMcpCapabilityConfig,
   type McpCapabilityConfig,
 } from "@my-agent-toolkit/contracts";
+import { createHash, randomBytes } from "node:crypto";
 
 export type BotStatus = "draft" | "initializing" | "ready";
 export type ConversationPurpose = "normal_chat" | "init" | "doc_generation";
@@ -235,6 +236,47 @@ export interface BotEnvVarMetadataRecord {
   key: string;
   is_set: boolean;
   updated_at: string;
+}
+
+export type UserCredentialProvider = "easemob_jira";
+
+export interface UserCredentialRecord {
+  bot_id: string;
+  wecom_user_id: string;
+  provider: UserCredentialProvider;
+  payload_ciphertext: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface UserCredentialMetadataRecord {
+  bot_id: string;
+  wecom_user_id: string;
+  provider: UserCredentialProvider;
+  is_bound: true;
+  updated_at: string;
+}
+
+export interface UserCredentialBindingRecord {
+  token: string;
+  token_hash: string;
+  bot_id: string;
+  wecom_user_id: string;
+  provider: UserCredentialProvider;
+  created_at: string;
+  expires_at: string;
+  consumed_at?: string;
+}
+
+export interface UserCredentialScopeInput {
+  bot_id: string;
+  wecom_user_id: string;
+  provider: UserCredentialProvider;
+}
+
+export interface CompleteUserCredentialBindingInput {
+  token: string;
+  payload_ciphertext: string;
 }
 
 export type BotSkillSourceType = "builtin" | "github" | "url" | "local";
@@ -755,6 +797,16 @@ export interface DataStore {
   upsertBotEnvVar(botId: string, input: UpsertBotEnvVarInput): BotEnvVarRecord;
   listBotEnvVars(botId: string): BotEnvVarMetadataRecord[];
   deleteBotEnvVar(botId: string, key: string): void;
+  createUserCredentialBinding(input: UserCredentialScopeInput): UserCredentialBindingRecord;
+  getUserCredentialBinding(token: string): UserCredentialBindingRecord | undefined;
+  completeUserCredentialBinding(
+    input: CompleteUserCredentialBindingInput,
+  ): UserCredentialMetadataRecord;
+  getUserCredential(input: UserCredentialScopeInput): UserCredentialRecord | undefined;
+  getUserCredentialMetadata(
+    input: UserCredentialScopeInput,
+  ): UserCredentialMetadataRecord | undefined;
+  deleteUserCredential(input: UserCredentialScopeInput): void;
   upsertBotSkill(botId: string, input: UpsertBotSkillInput): BotSkillRecord;
   listBotSkills(botId: string): BotSkillRecord[];
   deleteBotSkill(botId: string, name: string): void;
@@ -850,6 +902,8 @@ export function createDataStore(options: DataStoreOptions = {}): DataStore {
   const runtimeSessions = new Map<string, RuntimeSessionRecord>();
   const botRuntimePolicies = new Map<string, BotRuntimePolicyRecord>();
   const botEnvVars = new Map<string, BotEnvVarRecord>();
+  const userCredentials = new Map<string, UserCredentialRecord>();
+  const userCredentialBindings = new Map<string, UserCredentialBindingRecord>();
   const botSkills = new Map<string, BotSkillRecord>();
   const botMcps = new Map<string, BotMcpRecord>();
   const botCapabilityAuditLogs = new Map<string, BotCapabilityAuditLogRecord>();
@@ -960,6 +1014,8 @@ export function createDataStore(options: DataStoreOptions = {}): DataStore {
       mcpCapabilityConfigs.clear();
       botRuntimePolicies.clear();
       botEnvVars.clear();
+      userCredentials.clear();
+      userCredentialBindings.clear();
       botSkills.clear();
       botMcps.clear();
       botCapabilityAuditLogs.clear();
@@ -1233,6 +1289,83 @@ export function createDataStore(options: DataStoreOptions = {}): DataStore {
     deleteBotEnvVar(botId, key) {
       const bot = getRequiredBot(bots, botId);
       botEnvVars.delete(botCapabilityScopedKey(bot.bot_id, requireText(key, "key")));
+    },
+
+    createUserCredentialBinding(input) {
+      const bot = getRequiredBot(bots, input.bot_id);
+      const scope = normalizeUserCredentialScope({ ...input, bot_id: bot.bot_id });
+      if (userCredentials.has(userCredentialScopeKey(scope))) {
+        throw new Error("user credential is already bound; unbind first");
+      }
+      const token = randomCredentialBindingToken();
+      const now = new Date();
+      for (const [tokenHash, existing] of userCredentialBindings.entries()) {
+        if (
+          existing.bot_id === scope.bot_id
+          && existing.wecom_user_id === scope.wecom_user_id
+          && existing.provider === scope.provider
+          && !existing.consumed_at
+        ) {
+          userCredentialBindings.set(tokenHash, {
+            ...existing,
+            consumed_at: now.toISOString(),
+          });
+        }
+      }
+      const record: UserCredentialBindingRecord = {
+        token,
+        token_hash: hashCredentialBindingToken(token),
+        ...scope,
+        created_at: now.toISOString(),
+        expires_at: new Date(now.getTime() + 10 * 60 * 1000).toISOString(),
+      };
+      userCredentialBindings.set(record.token_hash, record);
+      return cloneUserCredentialBindingRecord(record);
+    },
+
+    getUserCredentialBinding(token) {
+      const record = userCredentialBindings.get(hashCredentialBindingToken(token));
+      return isActiveUserCredentialBinding(record)
+        ? cloneUserCredentialBindingRecord(record)
+        : undefined;
+    },
+
+    completeUserCredentialBinding(input) {
+      const tokenHash = hashCredentialBindingToken(input.token);
+      const binding = userCredentialBindings.get(tokenHash);
+      if (!isActiveUserCredentialBinding(binding)) {
+        throw new Error("credential binding link is invalid or expired");
+      }
+      const scopeKey = userCredentialScopeKey(binding);
+      const existing = userCredentials.get(scopeKey);
+      const now = new Date().toISOString();
+      const credential: UserCredentialRecord = {
+        bot_id: binding.bot_id,
+        wecom_user_id: binding.wecom_user_id,
+        provider: binding.provider,
+        payload_ciphertext: requireText(input.payload_ciphertext, "payload_ciphertext"),
+        created_at: existing?.created_at ?? now,
+        updated_at: existing ? nextIsoTimestamp(existing.updated_at) : now,
+      };
+      userCredentials.set(scopeKey, credential);
+      userCredentialBindings.set(tokenHash, { ...binding, consumed_at: now });
+      return userCredentialMetadata(credential);
+    },
+
+    getUserCredential(input) {
+      getRequiredBot(bots, input.bot_id);
+      const record = userCredentials.get(userCredentialScopeKey(normalizeUserCredentialScope(input)));
+      return record ? { ...record } : undefined;
+    },
+
+    getUserCredentialMetadata(input) {
+      const record = this.getUserCredential(input);
+      return record ? userCredentialMetadata(record) : undefined;
+    },
+
+    deleteUserCredential(input) {
+      getRequiredBot(bots, input.bot_id);
+      userCredentials.delete(userCredentialScopeKey(normalizeUserCredentialScope(input)));
     },
 
     upsertBotSkill(botId, input) {
@@ -3211,6 +3344,66 @@ export function hashClaimCode(code: string): string {
     hash = Math.imul(hash, 16777619);
   }
   return `fnv1a:${(hash >>> 0).toString(16)}`;
+}
+
+export function hashCredentialBindingToken(token: string): string {
+  return createHash("sha256")
+    .update(requireText(token, "token"), "utf8")
+    .digest("hex");
+}
+
+export function requireUserCredentialProvider(value: string): UserCredentialProvider {
+  if (value !== "easemob_jira") {
+    throw new Error("unsupported credential provider");
+  }
+  return value;
+}
+
+function randomCredentialBindingToken(): string {
+  return randomBytes(32).toString("base64url");
+}
+
+function normalizeUserCredentialScope(
+  input: UserCredentialScopeInput,
+): UserCredentialScopeInput {
+  return {
+    bot_id: requireText(input.bot_id, "bot_id"),
+    wecom_user_id: requireText(input.wecom_user_id, "wecom_user_id"),
+    provider: requireUserCredentialProvider(input.provider),
+  };
+}
+
+function userCredentialScopeKey(input: UserCredentialScopeInput): string {
+  const scope = normalizeUserCredentialScope(input);
+  return [scope.bot_id, scope.wecom_user_id, scope.provider].join(":");
+}
+
+function isActiveUserCredentialBinding(
+  record: UserCredentialBindingRecord | undefined,
+): record is UserCredentialBindingRecord {
+  return Boolean(
+    record
+    && !record.consumed_at
+    && new Date(record.expires_at).getTime() >= Date.now(),
+  );
+}
+
+function cloneUserCredentialBindingRecord(
+  record: UserCredentialBindingRecord,
+): UserCredentialBindingRecord {
+  return { ...record };
+}
+
+function userCredentialMetadata(
+  record: UserCredentialRecord,
+): UserCredentialMetadataRecord {
+  return {
+    bot_id: record.bot_id,
+    wecom_user_id: record.wecom_user_id,
+    provider: record.provider,
+    is_bound: true,
+    updated_at: record.updated_at,
+  };
 }
 
 export function nextIsoTimestamp(previous: string): string {

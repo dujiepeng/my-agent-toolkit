@@ -407,13 +407,65 @@ async function withBotEnv(
   const botEnv = config.resolveBotEnvVars
     ? await config.resolveBotEnvVars(chatRequest.bot_id)
     : {};
+  const userEnv = config.resolveUserEnvVars
+    ? await config.resolveUserEnvVars(chatRequest.bot_id, chatRequest.user_id)
+    : await resolveUserCredentialEnv(config, chatRequest.bot_id, chatRequest.user_id);
   return {
     ...config.kiro!,
     env: {
       ...(config.kiro?.env ?? {}),
       ...botEnv,
+      ...userEnv,
+      KIRO_RELAY_BOT_ID: chatRequest.bot_id,
+      KIRO_RELAY_USER_ID: chatRequest.user_id,
     },
   };
+}
+
+async function resolveUserCredentialEnv(
+  config: RunnerConfig,
+  botId: string,
+  userId: string,
+): Promise<Record<string, string>> {
+  if (!config.data_service_url || !config.credential_internal_token) {
+    return {};
+  }
+  const query = new URLSearchParams({
+    bot_id: botId,
+    wecom_user_id: userId,
+    provider: "easemob_jira",
+  });
+  const response = await fetchWithConfig(config, new Request(
+    `${config.data_service_url}/internal/user-credentials/runtime-env?${query}`,
+    {
+      headers: {
+        authorization: `Bearer ${config.credential_internal_token}`,
+      },
+    },
+  ));
+  const payload = await response.json().catch(() => undefined) as
+    | { env?: Record<string, unknown>; error?: string }
+    | undefined;
+  if (!response.ok) {
+    throw new Error(payload?.error ?? "user credential lookup failed");
+  }
+  const env: Record<string, string> = {};
+  for (const [key, value] of Object.entries(payload?.env ?? {})) {
+    if (isAllowedUserCredentialEnvKey(key) && typeof value === "string") {
+      env[key] = value;
+    }
+  }
+  return env;
+}
+
+function isAllowedUserCredentialEnvKey(key: string): boolean {
+  return [
+    "EASEMOB_JIRA_USERNAME",
+    "EASEMOB_JIRA_PASSWORD",
+    "EASEMOB_JIRA_REDIRECT_USERNAME",
+    "EASEMOB_JIRA_REDIRECT_PASSWORD",
+    "MY_AGENT_JIRA_CREDENTIAL_VERSION",
+  ].includes(key);
 }
 
 async function getPersistedRuntimeSession(

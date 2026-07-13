@@ -2003,4 +2003,44 @@ describe("data-service store", () => {
       first,
     ]);
   });
+
+  it("stores user credentials by bot user and provider and consumes binding tokens once", () => {
+    const store = createDataStore();
+    store.createBot({ bot_id: "jira-bot", name: "Jira Bot", runtime: "kiro" });
+    const binding = store.createUserCredentialBinding({
+      bot_id: "jira-bot",
+      wecom_user_id: "user-a",
+      provider: "easemob_jira",
+    });
+
+    const metadata = store.completeUserCredentialBinding({
+      token: binding.token,
+      payload_ciphertext: "encrypted-payload-a",
+    });
+    expect(metadata).toMatchObject({
+      bot_id: "jira-bot",
+      wecom_user_id: "user-a",
+      provider: "easemob_jira",
+      is_bound: true,
+    });
+    expect(store.getUserCredential({
+      bot_id: "jira-bot",
+      wecom_user_id: "user-a",
+      provider: "easemob_jira",
+    })?.payload_ciphertext).toBe("encrypted-payload-a");
+    expect(store.getUserCredentialMetadata({
+      bot_id: "jira-bot",
+      wecom_user_id: "user-b",
+      provider: "easemob_jira",
+    })).toBeUndefined();
+    expect(() => store.createUserCredentialBinding({
+      bot_id: "jira-bot",
+      wecom_user_id: "user-a",
+      provider: "easemob_jira",
+    })).toThrow("already bound");
+    expect(() => store.completeUserCredentialBinding({
+      token: binding.token,
+      payload_ciphertext: "second-value",
+    })).toThrow("invalid or expired");
+  });
 });

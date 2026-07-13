@@ -26,6 +26,14 @@ export function createControlApiServer(config: ControlApiConfig): ControlApiServ
         return htmlResponse(renderChannelWorkbenchPage());
       }
 
+      if (request.method === "GET" && url.pathname === "/bind/jira") {
+        return handleJiraCredentialBindingPage(url, config);
+      }
+
+      if (request.method === "POST" && url.pathname === "/bind/jira") {
+        return handleJiraCredentialBindingSubmit(request, config);
+      }
+
       const roleAdminPageMatch = url.pathname.match(/^\/admin\/roles\/([^/]+)$/);
       if (request.method === "GET" && roleAdminPageMatch) {
         return handleRoleDetailPage(config, roleAdminPageMatch[1]);
@@ -567,12 +575,16 @@ async function handleBotCapabilitiesPage(
   botId: string,
 ): Promise<Response> {
   const encodedBotId = encodeURIComponent(botId);
-  const [botResponse, envResponse, skillsResponse, mcpsResponse, policyResponse] = await Promise.all([
+  const catalogRequest = config.capabilityRunnerUrl
+    ? config.fetch(new Request(`${config.capabilityRunnerUrl}/internal/skills/catalog`)).catch(() => undefined)
+    : Promise.resolve(undefined);
+  const [botResponse, envResponse, skillsResponse, mcpsResponse, policyResponse, catalogResponse] = await Promise.all([
     config.fetch(new Request(`${config.dataServiceUrl}/v1/bots/${encodedBotId}`)),
     config.fetch(new Request(`${config.dataServiceUrl}/v1/bots/${encodedBotId}/env`)),
     config.fetch(new Request(`${config.dataServiceUrl}/v1/bots/${encodedBotId}/skills`)),
     config.fetch(new Request(`${config.dataServiceUrl}/v1/bots/${encodedBotId}/mcps`)),
     config.fetch(new Request(`${config.dataServiceUrl}/v1/bots/${encodedBotId}/runtime-policy`)),
+    catalogRequest,
   ]);
   if (!botResponse.ok) {
     return cloneJsonResponse(botResponse);
@@ -595,6 +607,9 @@ async function handleBotCapabilitiesPage(
   const skills = await skillsResponse.json() as Array<Record<string, unknown>>;
   const mcps = await mcpsResponse.json() as Array<Record<string, unknown>>;
   const policy = await policyResponse.json() as Record<string, unknown>;
+  const catalogPayload = catalogResponse?.ok
+    ? await catalogResponse.json() as { items?: Array<Record<string, unknown>> }
+    : { items: [] };
 
   return htmlResponse(renderBotCapabilitiesPage(
     botId,
@@ -603,6 +618,7 @@ async function handleBotCapabilitiesPage(
     skills,
     mcps,
     policy,
+    Array.isArray(catalogPayload.items) ? catalogPayload.items : [],
   ));
 }
 
@@ -782,14 +798,21 @@ async function handleBotSkillInstall(
     return jsonResponse({ error: "capability runner is not configured" }, 503);
   }
   const form = await readUrlEncodedForm(request);
+  const name = (form.name || form.source_ref || "").trim();
+  const sourceRef = (form.source_ref || name).trim();
+  const sourceType = (form.source_type || "builtin").trim();
+  if (!name || !sourceRef) {
+    return jsonResponse({ error: "skill name and source_ref are required" }, 400);
+  }
   const response = await config.fetch(
     new Request(`${config.capabilityRunnerUrl}/internal/bots/${encodeURIComponent(botId)}/skills/install`, {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({
-        name: form.name,
-        source_ref: form.source_ref || undefined,
-        source_type: form.source_type || undefined,
+        name,
+        source_ref: sourceRef,
+        source_type: sourceType,
+        actor_id: form.actor_id || "webui",
       }),
     }),
   );
@@ -802,9 +825,9 @@ async function handleBotSkillInstall(
     target_type: "bot",
     target_id: botId,
     metadata: {
-      name: form.name,
-      source_ref: form.source_ref,
-      source_type: form.source_type,
+      name,
+      source_ref: sourceRef,
+      source_type: sourceType,
     },
   });
   return redirectResponse(`/admin/bots/${encodeURIComponent(botId)}/capabilities`);
@@ -825,6 +848,7 @@ async function handleBotSkillDelete(
       headers: { "content-type": "application/json" },
       body: JSON.stringify({
         name: form.name,
+        actor_id: form.actor_id || "webui",
       }),
     }),
   );
@@ -1299,6 +1323,163 @@ async function readUrlEncodedForm(request: Request): Promise<Record<string, stri
   return result;
 }
 
+async function handleJiraCredentialBindingPage(
+  url: URL,
+  config: ControlApiConfig,
+): Promise<Response> {
+  const token = url.searchParams.get("token") ?? "";
+  if (!token) {
+    return credentialHtmlResponse(renderJiraBindingResult("绑定链接无效", "请回到企微重新发送 /jira bind。", false));
+  }
+  const response = await config.fetch(
+    `${config.dataServiceUrl}/v1/credential-bindings/${encodeURIComponent(token)}`,
+  );
+  const payload = await response.json().catch(() => undefined) as
+    | { expires_at?: string; error?: string }
+    | undefined;
+  if (!response.ok) {
+    return credentialHtmlResponse(renderJiraBindingResult(
+      "绑定链接已失效",
+      payload?.error ?? "请回到企微重新发送 /jira bind。",
+      false,
+    ));
+  }
+  return credentialHtmlResponse(renderJiraBindingForm(token, payload?.expires_at));
+}
+
+async function handleJiraCredentialBindingSubmit(
+  request: Request,
+  config: ControlApiConfig,
+): Promise<Response> {
+  const form = await readUrlEncodedForm(request);
+  const token = form.token ?? "";
+  if (!token) {
+    return credentialHtmlResponse(renderJiraBindingResult("绑定失败", "绑定令牌缺失，请重新发起绑定。", false));
+  }
+  const useSameCredentials = form.use_same_credentials === "on";
+  const body = {
+    username: form.username ?? "",
+    password: form.password ?? "",
+    redirect_username: useSameCredentials
+      ? form.username ?? ""
+      : form.redirect_username ?? "",
+    redirect_password: useSameCredentials
+      ? form.password ?? ""
+      : form.redirect_password ?? "",
+  };
+  const response = await config.fetch(
+    new Request(
+      `${config.dataServiceUrl}/v1/credential-bindings/${encodeURIComponent(token)}`,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(body),
+      },
+    ),
+  );
+  const payload = await response.json().catch(() => undefined) as
+    | { error?: string }
+    | undefined;
+  if (!response.ok) {
+    return credentialHtmlResponse(renderJiraBindingResult(
+      "绑定失败",
+      payload?.error ?? "凭证保存失败，请回到企微重新发起绑定。",
+      false,
+    ));
+  }
+  return credentialHtmlResponse(renderJiraBindingResult(
+    "Jira 账号绑定成功",
+    "现在可以关闭此页面，回到企微重新发送 Jira 编号。",
+    true,
+  ));
+}
+
+function renderJiraBindingForm(token: string, expiresAt?: string): string {
+  return renderCredentialPage("绑定 Jira 账号", `
+    <p class="lead">账号仅用于当前企微用户在当前 Bot 中访问 Jira，不会显示给管理员。</p>
+    <form method="post" action="/bind/jira" autocomplete="off">
+      <input type="hidden" name="token" value="${escapeHtmlValue(token)}">
+      <label>Jira 用户名
+        <input name="username" autocomplete="username" required maxlength="256">
+      </label>
+      <label>Jira 密码
+        <input type="password" name="password" autocomplete="current-password" required maxlength="1024">
+      </label>
+      <label class="check">
+        <input type="checkbox" name="use_same_credentials" checked>
+        跳转登录页面使用同一组账号密码
+      </label>
+      <details>
+        <summary>跳转登录页面使用不同账号</summary>
+        <div class="details-grid">
+          <label>跳转登录用户名
+            <input name="redirect_username" autocomplete="off" maxlength="256">
+          </label>
+          <label>跳转登录密码
+            <input type="password" name="redirect_password" autocomplete="off" maxlength="1024">
+          </label>
+        </div>
+      </details>
+      <button type="submit">加密保存并绑定</button>
+    </form>
+    <p class="hint">链接有效期至：${escapeHtmlValue(expiresAt ? new Date(expiresAt).toLocaleString("zh-CN") : "10 分钟内")}</p>
+    <p class="warning">请勿转发本页面地址。系统不会把密码写入 Prompt、聊天记录或 Git。</p>
+  `);
+}
+
+function renderJiraBindingResult(title: string, message: string, success: boolean): string {
+  return renderCredentialPage(title, `
+    <div class="result ${success ? "success" : "error"}">${escapeHtmlValue(message)}</div>
+  `);
+}
+
+function renderCredentialPage(title: string, content: string): string {
+  return `<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="referrer" content="no-referrer">
+  <title>${escapeHtmlValue(title)}</title>
+  <style>
+    * { box-sizing: border-box; }
+    body { margin: 0; min-height: 100vh; padding: 24px; display: grid; place-items: center; background: #f3f6f8; color: #17202e; font-family: system-ui, -apple-system, sans-serif; }
+    main { width: min(520px, 100%); background: #fff; border: 1px solid #dce4ea; border-radius: 14px; padding: 28px; box-shadow: 0 16px 40px rgba(18, 38, 63, .08); }
+    h1 { margin: 0 0 12px; font-size: 24px; }
+    .lead, .hint, .warning { color: #5e6d7c; line-height: 1.6; }
+    form, .details-grid { display: grid; gap: 16px; }
+    label { display: grid; gap: 7px; font-weight: 600; }
+    input { width: 100%; border: 1px solid #cbd6df; border-radius: 8px; padding: 11px 12px; font: inherit; }
+    .check { display: flex; align-items: center; font-weight: 500; }
+    .check input { width: auto; }
+    details { border: 1px solid #dce4ea; border-radius: 8px; padding: 12px; }
+    summary { cursor: pointer; font-weight: 600; }
+    .details-grid { margin-top: 14px; }
+    button { border: 0; border-radius: 8px; padding: 12px 16px; background: #1769e0; color: #fff; font: inherit; font-weight: 700; cursor: pointer; }
+    .warning { font-size: 13px; }
+    .result { margin-top: 18px; border-radius: 9px; padding: 16px; line-height: 1.6; }
+    .success { background: #eaf8ef; color: #196534; }
+    .error { background: #fff0f0; color: #9c2f2f; }
+  </style>
+</head>
+<body><main><h1>${escapeHtmlValue(title)}</h1>${content}</main></body>
+</html>`;
+}
+
+function credentialHtmlResponse(body: string): Response {
+  return new Response(body, {
+    status: 200,
+    headers: {
+      "content-type": "text/html; charset=utf-8",
+      "cache-control": "no-store, max-age=0",
+      "content-security-policy": "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'",
+      "referrer-policy": "no-referrer",
+      "x-content-type-options": "nosniff",
+      "x-frame-options": "DENY",
+    },
+  });
+}
+
 function parseJsonArrayField(raw: string | undefined): unknown[] {
   if (!raw || raw.trim() === "") {
     return [];
@@ -1417,7 +1598,9 @@ function renderBotCapabilitiesPage(
   skills: Array<Record<string, unknown>>,
   mcps: Array<Record<string, unknown>>,
   policy: Record<string, unknown>,
+  skillCatalog: Array<Record<string, unknown>>,
 ): string {
+  const encodedBotId = encodeURIComponent(botId);
   return pageShell("Bot 能力管理", [
     `<section class="card stack">`,
     `<div class="actions"><a class="btn" href="/">返回 Channel 管理</a><a class="btn" href="/admin/bots/${escapeHtmlValue(botId)}/config">编辑配置</a></div>`,
@@ -1437,10 +1620,34 @@ function renderBotCapabilitiesPage(
     `</section>`,
     `<section class="card stack">`,
     `<h2>Skills</h2>`,
-    `<table><thead><tr><th>名称</th><th>来源</th><th>状态</th></tr></thead><tbody>`,
+    `<form class="stack" method="post" action="/admin/bots/${encodedBotId}/capabilities/skills/install">`,
+    `<input type="hidden" name="source_type" value="builtin">`,
+    `<input type="hidden" name="actor_id" value="webui">`,
+    `<label>选择内置 Skill<select name="source_ref" required ${skillCatalog.length === 0 ? "disabled" : ""}>`,
+    `<option value="">请选择</option>`,
+    ...skillCatalog.map((skill) => `<option value="${escapeHtmlValue(skill.source_ref ?? skill.name)}">${escapeHtmlValue(skill.name)} — ${escapeHtmlValue(skill.description ?? "")}</option>`),
+    `</select></label>`,
+    `<div class="actions"><button type="submit" ${skillCatalog.length === 0 ? "disabled" : ""}>安装 Skill</button></div>`,
+    ...(skillCatalog.length === 0
+      ? [`<div class="muted">暂无可安装的内置 Skill，请检查 capability-runner 的 Skill 目录。</div>`]
+      : []),
+    `</form>`,
+    `<table><thead><tr><th>名称</th><th>来源</th><th>状态</th><th>错误</th><th>操作</th></tr></thead><tbody>`,
     ...(skills.length === 0
-      ? [`<tr><td colspan="3" class="muted">暂无 Skills</td></tr>`]
-      : skills.map((skill) => `<tr><td>${escapeHtmlValue(skill.name)}</td><td>${escapeHtmlValue(skill.source_ref ?? skill.source_type ?? "-")}</td><td>${escapeHtmlValue(skill.status)}</td></tr>`)),
+      ? [`<tr><td colspan="5" class="muted">暂无 Skills</td></tr>`]
+      : skills.map((skill) => [
+        `<tr>`,
+        `<td>${escapeHtmlValue(skill.name)}</td>`,
+        `<td>${escapeHtmlValue(skill.source_ref ?? skill.source_type ?? "-")}</td>`,
+        `<td>${escapeHtmlValue(skill.status)}</td>`,
+        `<td>${escapeHtmlValue(skill.last_error ?? "-")}</td>`,
+        `<td><form method="post" action="/admin/bots/${encodedBotId}/capabilities/skills/delete">`,
+        `<input type="hidden" name="name" value="${escapeHtmlValue(skill.name)}">`,
+        `<input type="hidden" name="actor_id" value="webui">`,
+        `<button class="danger" type="submit">删除</button>`,
+        `</form></td>`,
+        `</tr>`,
+      ].join(""))),
     `</tbody></table>`,
     `</section>`,
     `<section class="card stack">`,
@@ -2070,7 +2277,10 @@ function renderChannelWorkbenchPage(): string {
             metric("认证状态", channel.connection_status || "unchecked"),
             metric("运行状态", channel.runtime_status || "unknown"),
           '</div>',
-          '<div class="tools"><button type="button" class="secondary" data-action="edit-channel">编辑配置</button></div>',
+          '<div class="tools">',
+            '<button type="button" class="secondary" data-action="edit-channel">编辑配置</button>',
+            '<button type="button" data-action="manage-bot-capabilities">管理 Env / Skills / MCP</button>',
+          '</div>',
         '</div>',
         section("生命周期", lifecycle(channel, bot, admin, configDocs)),
         section("Channel 信息", [
@@ -2100,7 +2310,7 @@ function renderChannelWorkbenchPage(): string {
           configDocPreview("soul", soul),
           configDocPreview("agents.md", agents),
         ].join("")),
-        sectionWithActions("能力状态", renderCapabilities(capabilities), '<button type="button" class="secondary" data-action="edit-capabilities">编辑能力</button>'),
+        sectionWithActions("运行能力", renderCapabilities(capabilities), '<button type="button" class="secondary" data-action="edit-capabilities">编辑运行能力</button>'),
         section("文档", normalDocs.length ? normalDocs.map((doc) => docPreview(doc.title, doc)).join("") : '<div class="subtle">暂无普通文档。</div>'),
         sectionWithActions("危险操作", '<div class="subtle">删除 Channel 会清除企业微信 Bot ID 和 Secret，使 runtime 不再拉起该 Channel；不会删除 Bot、聊天记录、机器人配置或普通文档。</div>', '<button type="button" class="danger" data-action="delete-channel">删除 Channel</button>'),
       ].join("");
@@ -2278,7 +2488,7 @@ function renderChannelWorkbenchPage(): string {
         setToast("能力配置尚未加载。", true);
         return;
       }
-      modalTitle.textContent = "编辑能力";
+      modalTitle.textContent = "编辑运行能力";
       modalBody.innerHTML = renderCapabilityForm(config);
       modalBackdrop.classList.add("open");
       document.querySelector("#capabilityForm input")?.focus();
@@ -2357,6 +2567,10 @@ function renderChannelWorkbenchPage(): string {
       try {
         if (button.dataset.action === "edit-channel") {
           openModal(detail.bot);
+          return;
+        }
+        if (button.dataset.action === "manage-bot-capabilities") {
+          window.location.href = "/admin/bots/" + encodeURIComponent(botId) + "/capabilities";
           return;
         }
         if (button.dataset.action === "edit-capabilities") {

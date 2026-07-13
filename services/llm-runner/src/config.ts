@@ -8,9 +8,15 @@ export interface RunnerConfig {
   mcp?: McpRunnerConfig;
   fetch?: typeof fetch;
   resolveBotEnvVars?: BotEnvResolver;
+  resolveUserEnvVars?: UserEnvResolver;
+  credential_internal_token?: string;
 }
 
 export type BotEnvResolver = (botId: string) => Promise<Record<string, string>>;
+export type UserEnvResolver = (
+  botId: string,
+  userId: string,
+) => Promise<Record<string, string>>;
 
 export interface McpRunnerConfig {
   service_url: string;
@@ -33,6 +39,11 @@ export function loadRunnerConfig(
     config.data_service_url = dataServiceUrl.replace(/\/+$/, "");
   }
 
+  const credentialInternalToken = env.USER_CREDENTIALS_INTERNAL_TOKEN?.trim();
+  if (credentialInternalToken) {
+    config.credential_internal_token = credentialInternalToken;
+  }
+
   if (enabledRuntimes.includes("kiro")) {
     const command = env.KIRO_COMMAND?.trim();
     if (!command) {
@@ -42,7 +53,7 @@ export function loadRunnerConfig(
     config.kiro = {
       command,
       args: parseArgs(env.KIRO_ARGS ?? "chat --no-interactive --trust-all-tools"),
-      timeout_ms: parsePositiveInteger(env.KIRO_TIMEOUT_MS, 120_000),
+      timeout_ms: parsePositiveInteger(env.KIRO_TIMEOUT_MS, 180_000),
     };
   }
 
