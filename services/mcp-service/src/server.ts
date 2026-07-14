@@ -6,6 +6,7 @@ import {
 } from "./memoryBackendClient.js";
 import { callMcpTool, listMcpTools, type McpToolResult } from "./tools.js";
 import { createProjectClient, type ProjectClient } from "./projectClient.js";
+import type { McpToolExecutionAuditInput } from "./dataClient.js";
 
 export type McpMemoryBackendDependency = Pick<
   MemoryBackendClient,
@@ -21,6 +22,7 @@ export interface McpServiceConfig {
   allowedDirectoryRefs?: Record<string, string>;
   capabilityRunnerUrl?: string;
   projectClient?: ProjectClient;
+  auditToolExecution?: (input: McpToolExecutionAuditInput) => Promise<void>;
 }
 
 export interface McpServiceServer {
@@ -156,13 +158,19 @@ async function handleToolCall(
   if (context instanceof Response) {
     return context;
   }
+  const startedAt = Date.now();
+  let toolName = "unknown";
   try {
     const toolCall = await request.json() as { tool: string; input: unknown };
+    toolName = typeof toolCall.tool === "string" && toolCall.tool.trim()
+      ? toolCall.tool.trim()
+      : "unknown";
     const capabilityConfig = await dataClient.getMcpCapabilityConfig(context.bot_id);
     if (!capabilityConfig.tools.enabled.includes(toolCall.tool)) {
+      await writeToolExecutionAudit(config, context, toolName, "rejected", startedAt, "tool_disabled");
       return jsonResponse(disabledToolResult(toolCall.tool));
     }
-    return jsonResponse(await callMcpTool(context, {
+    const result = await callMcpTool(context, {
       dataClient,
       memoryBackend,
       allowedDirectoryRefs: filterAllowedDirectoryRefs(
@@ -171,14 +179,60 @@ async function handleToolCall(
       ),
       capabilityConfig,
       projectClient,
-    }, toolCall));
+    }, toolCall);
+    await writeToolExecutionAudit(
+      config,
+      context,
+      toolName,
+      result.ok ? "success" : "failed",
+      startedAt,
+      result.ok ? undefined : errorCodeFromToolResult(result),
+    );
+    return jsonResponse(result);
   } catch (error) {
+    await writeToolExecutionAudit(config, context, toolName, "failed", startedAt, "tool_execution_error");
     return mcpErrorResponse(
       "validation_error",
       error instanceof Error ? error.message : "invalid MCP tool request",
       400,
     );
   }
+}
+
+async function writeToolExecutionAudit(
+  config: McpServiceConfig,
+  context: { bot_id: string; user_id: string; conversation_id: string },
+  toolName: string,
+  status: McpToolExecutionAuditInput["status"],
+  startedAt: number,
+  errorCode?: string,
+): Promise<void> {
+  try {
+    await config.auditToolExecution?.({
+      bot_id: context.bot_id,
+      wecom_user_id: context.user_id,
+      conversation_id: context.conversation_id,
+      tool_name: toolName,
+      status,
+      duration_ms: Math.min(Math.max(0, Date.now() - startedAt), 3_600_000),
+      ...(errorCode ? { error_code: errorCode } : {}),
+    });
+  } catch {
+    // Audit failures must not turn a successful user tool call into an error.
+  }
+}
+
+function errorCodeFromToolResult(result: McpToolResult): string {
+  if (result.ok) {
+    return "tool_failed";
+  }
+  if (typeof result.error === "object" && result.error && !Array.isArray(result.error)) {
+    const code = (result.error as Record<string, unknown>).code;
+    if (typeof code === "string" && code.length <= 100) {
+      return code;
+    }
+  }
+  return "tool_failed";
 }
 
 function disabledToolResult(toolName: string): McpToolResult {

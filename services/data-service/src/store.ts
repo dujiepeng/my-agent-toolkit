@@ -380,6 +380,30 @@ export interface AppendBotCapabilityAuditLogInput {
   error_message?: string;
 }
 
+export type McpToolExecutionStatus = "success" | "failed" | "rejected";
+
+export interface McpToolExecutionRecord {
+  execution_id: string;
+  bot_id: string;
+  wecom_user_id: string;
+  conversation_id: string;
+  tool_name: string;
+  status: McpToolExecutionStatus;
+  duration_ms: number;
+  error_code?: string;
+  created_at: string;
+}
+
+export interface AppendMcpToolExecutionInput {
+  bot_id: string;
+  wecom_user_id: string;
+  conversation_id: string;
+  tool_name: string;
+  status: McpToolExecutionStatus;
+  duration_ms: number;
+  error_code?: string;
+}
+
 export interface CreatePendingGeneratedDocumentInput {
   bot_id: string;
   wecom_user_id: string;
@@ -836,6 +860,8 @@ export interface DataStore {
   deleteBotMcp(botId: string, name: string): void;
   appendBotCapabilityAuditLog(input: AppendBotCapabilityAuditLogInput): BotCapabilityAuditLogRecord;
   listBotCapabilityAuditLogs(botId: string): BotCapabilityAuditLogRecord[];
+  appendMcpToolExecution(input: AppendMcpToolExecutionInput): McpToolExecutionRecord;
+  listMcpToolExecutions(botId: string): McpToolExecutionRecord[];
   getAdmin(botId: string): AdminRecord | undefined;
   createAdminClaim(botId: string): AdminClaimRecord;
   claimAdmin(input: ClaimAdminInput): AdminRecord;
@@ -928,6 +954,7 @@ export function createDataStore(options: DataStoreOptions = {}): DataStore {
   const botSkills = new Map<string, BotSkillRecord>();
   const botMcps = new Map<string, BotMcpRecord>();
   const botCapabilityAuditLogs = new Map<string, BotCapabilityAuditLogRecord>();
+  const mcpToolExecutions = new Map<string, McpToolExecutionRecord>();
   const globalDocuments = new Map<string, GlobalDocumentRecord>();
   const roles = new Map<string, RoleRecord>();
   const roleDocuments = new Map<string, RoleDocumentRecord>();
@@ -1044,6 +1071,7 @@ export function createDataStore(options: DataStoreOptions = {}): DataStore {
       botSkills.clear();
       botMcps.clear();
       botCapabilityAuditLogs.clear();
+      mcpToolExecutions.clear();
 
       if (playground) {
         globalDocuments.clear();
@@ -1505,6 +1533,31 @@ export function createDataStore(options: DataStoreOptions = {}): DataStore {
         .filter((record) => record.bot_id === bot.bot_id)
         .sort(compareCreatedRecordsDesc)
         .map(cloneBotCapabilityAuditLogRecord);
+    },
+
+    appendMcpToolExecution(input) {
+      const bot = getRequiredBot(bots, input.bot_id);
+      const record: McpToolExecutionRecord = {
+        execution_id: `mcp_exec_${crypto.randomUUID()}`,
+        bot_id: bot.bot_id,
+        wecom_user_id: requireText(input.wecom_user_id, "wecom_user_id"),
+        conversation_id: requireText(input.conversation_id, "conversation_id"),
+        tool_name: requireText(input.tool_name, "tool_name"),
+        status: requireMcpToolExecutionStatus(input.status),
+        duration_ms: requireMcpToolExecutionDuration(input.duration_ms),
+        error_code: optionalText(input.error_code),
+        created_at: nextCollectionIsoTimestamp(mcpToolExecutions, "created_at"),
+      };
+      mcpToolExecutions.set(record.execution_id, record);
+      return cloneMcpToolExecutionRecord(record);
+    },
+
+    listMcpToolExecutions(botId) {
+      const bot = getRequiredBot(bots, botId);
+      return [...mcpToolExecutions.values()]
+        .filter((record) => record.bot_id === bot.bot_id)
+        .sort(compareCreatedRecordsDesc)
+        .map(cloneMcpToolExecutionRecord);
     },
 
     getAdmin(botId) {
@@ -3000,6 +3053,20 @@ function requireBotCapabilityAuditResult(value: string): BotCapabilityAuditResul
   return value;
 }
 
+function requireMcpToolExecutionStatus(value: string): McpToolExecutionStatus {
+  if (value !== "success" && value !== "failed" && value !== "rejected") {
+    throw new Error("status is invalid");
+  }
+  return value;
+}
+
+function requireMcpToolExecutionDuration(value: number): number {
+  if (!Number.isInteger(value) || value < 0 || value > 3_600_000) {
+    throw new Error("duration_ms is invalid");
+  }
+  return value;
+}
+
 export function defaultBotRuntimePolicy(
   bot: Pick<BotRecord, "bot_id" | "created_at" | "updated_at">,
 ): BotRuntimePolicyRecord {
@@ -3039,6 +3106,10 @@ export function cloneBotMcpRecord(
 export function cloneBotCapabilityAuditLogRecord(
   record: BotCapabilityAuditLogRecord,
 ): BotCapabilityAuditLogRecord {
+  return { ...record };
+}
+
+export function cloneMcpToolExecutionRecord(record: McpToolExecutionRecord): McpToolExecutionRecord {
   return { ...record };
 }
 

@@ -237,6 +237,7 @@ services:
     environment:
       PORT: "8800"
       MCP_RUNNER_SECRET: "${MCP_RUNNER_SECRET:-}"
+      USER_CREDENTIALS_INTERNAL_TOKEN: "${USER_CREDENTIALS_INTERNAL_TOKEN:-}"
       DATA_SERVICE_URL: "http://data-service:8300"
       CAPABILITY_RUNNER_URL: "http://capability-runner:8700"
     ports:

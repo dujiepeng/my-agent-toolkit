@@ -476,8 +476,15 @@ async function refreshGitRepository(repositoryPath: string, branch: string, acce
     "--depth",
     "1",
     "origin",
-    `+refs/heads/${safeBranch}:refs/heads/${safeBranch}`,
+    `+refs/heads/${safeBranch}:refs/remotes/origin/${safeBranch}`,
   ], accessToken);
+  await runGit([
+    "-C",
+    repositoryPath,
+    "reset",
+    "--hard",
+    `refs/remotes/origin/${safeBranch}`,
+  ]);
 }
 
 async function resolveGitRevision(repositoryPath: string): Promise<string> {

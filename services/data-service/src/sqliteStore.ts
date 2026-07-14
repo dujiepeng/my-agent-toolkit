@@ -9,6 +9,7 @@ import {
   ADMIN_CLAIM_TTL_MS,
   buildWeComConnectionTestResult,
   cloneBotCapabilityAuditLogRecord,
+  cloneMcpToolExecutionRecord,
   cloneBotEnvVarRecord,
   cloneBotMcpRecord,
   cloneBotRuntimePolicyRecord,
@@ -121,6 +122,9 @@ import {
   type UpdateBotInput,
   type WeComRuntimeBotConfig,
   type AppendBotCapabilityAuditLogInput,
+  type AppendMcpToolExecutionInput,
+  type McpToolExecutionRecord,
+  type McpToolExecutionStatus,
   seedDefaultRoleConfig as seedDefaultRoleConfigInMemory,
 } from "./store.js";
 
@@ -371,6 +375,14 @@ export function createSqliteDataStore(
 
     listBotCapabilityAuditLogs(botId) {
       return listBotCapabilityAuditLogs(db, botId);
+    },
+
+    appendMcpToolExecution(input) {
+      return appendMcpToolExecution(db, input);
+    },
+
+    listMcpToolExecutions(botId) {
+      return listMcpToolExecutions(db, botId);
     },
 
     getAdmin(botId) {
@@ -745,6 +757,7 @@ function resetToStandardRoleConfigInSqlite(
     db.prepare("delete from bot_skills").run();
     db.prepare("delete from bot_mcps").run();
     db.prepare("delete from bot_capability_audit_logs").run();
+    db.prepare("delete from mcp_tool_executions").run();
     db.prepare("delete from business_document_versions").run();
     db.prepare("delete from business_documents").run();
     db.prepare("delete from bot_config_document_versions").run();
@@ -1430,6 +1443,44 @@ function listBotCapabilityAuditLogs(
   `).all(bot.bot_id).map(mapBotCapabilityAuditLogRecord)
     .filter((record): record is BotCapabilityAuditLogRecord => Boolean(record))
     .map(cloneBotCapabilityAuditLogRecord);
+}
+
+function appendMcpToolExecution(
+  db: Database.Database,
+  input: AppendMcpToolExecutionInput,
+): McpToolExecutionRecord {
+  const bot = getRequiredBot(db, input.bot_id);
+  const record: McpToolExecutionRecord = {
+    execution_id: `mcp_exec_${crypto.randomUUID()}`,
+    bot_id: bot.bot_id,
+    wecom_user_id: requireText(input.wecom_user_id, "wecom_user_id"),
+    conversation_id: requireText(input.conversation_id, "conversation_id"),
+    tool_name: requireText(input.tool_name, "tool_name"),
+    status: requireMcpToolExecutionStatus(input.status),
+    duration_ms: requireMcpToolExecutionDuration(input.duration_ms),
+    error_code: optionalText(input.error_code),
+    created_at: nextTableIsoTimestamp(db, "mcp_tool_executions", "created_at"),
+  };
+  db.prepare(`
+    insert into mcp_tool_executions (
+      execution_id, bot_id, wecom_user_id, conversation_id, tool_name,
+      status, duration_ms, error_code, created_at
+    ) values (?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(
+    record.execution_id, record.bot_id, record.wecom_user_id, record.conversation_id,
+    record.tool_name, record.status, record.duration_ms, record.error_code ?? null,
+    record.created_at,
+  );
+  return cloneMcpToolExecutionRecord(record);
+}
+
+function listMcpToolExecutions(db: Database.Database, botId: string): McpToolExecutionRecord[] {
+  const bot = getRequiredBot(db, botId);
+  return db.prepare("select * from mcp_tool_executions where bot_id = ? order by created_at desc")
+    .all(bot.bot_id)
+    .map(mapMcpToolExecutionRecord)
+    .filter((record): record is McpToolExecutionRecord => Boolean(record))
+    .map(cloneMcpToolExecutionRecord);
 }
 
 function upsertGlobalDocument(
@@ -2572,6 +2623,20 @@ function migrate(db: Database.Database): void {
       error_message text,
       created_at text not null
     );
+
+    create table if not exists mcp_tool_executions (
+      execution_id text primary key,
+      bot_id text not null,
+      wecom_user_id text not null,
+      conversation_id text not null,
+      tool_name text not null,
+      status text not null,
+      duration_ms integer not null,
+      error_code text,
+      created_at text not null
+    );
+    create index if not exists idx_mcp_tool_executions_bot_created
+      on mcp_tool_executions (bot_id, created_at desc);
 
     create table if not exists global_documents (
       document_id text primary key,
@@ -3875,6 +3940,24 @@ function mapBotCapabilityAuditLogRecord(row: unknown): BotCapabilityAuditLogReco
   };
 }
 
+function mapMcpToolExecutionRecord(row: unknown): McpToolExecutionRecord | undefined {
+  if (!row || typeof row !== "object") {
+    return undefined;
+  }
+  const record = row as Record<string, unknown>;
+  return {
+    execution_id: record.execution_id as string,
+    bot_id: record.bot_id as string,
+    wecom_user_id: record.wecom_user_id as string,
+    conversation_id: record.conversation_id as string,
+    tool_name: record.tool_name as string,
+    status: requireMcpToolExecutionStatus(record.status as string),
+    duration_ms: requireMcpToolExecutionDuration(Number(record.duration_ms)),
+    ...(typeof record.error_code === "string" ? { error_code: record.error_code } : {}),
+    created_at: record.created_at as string,
+  };
+}
+
 function mapConversationRecord(row: unknown): ConversationRecord | undefined {
   if (!row || typeof row !== "object") {
     return undefined;
@@ -4213,9 +4296,23 @@ function requireBotCapabilityAuditResult(value: string): BotCapabilityAuditResul
   return value;
 }
 
+function requireMcpToolExecutionStatus(value: string): McpToolExecutionStatus {
+  if (value !== "success" && value !== "failed" && value !== "rejected") {
+    throw new Error("status is invalid");
+  }
+  return value;
+}
+
+function requireMcpToolExecutionDuration(value: number): number {
+  if (!Number.isInteger(value) || value < 0 || value > 3_600_000) {
+    throw new Error("duration_ms is invalid");
+  }
+  return value;
+}
+
 function nextTableIsoTimestamp(
   db: Database.Database,
-  table: "bot_skills" | "bot_mcps" | "bot_capability_audit_logs",
+  table: "bot_skills" | "bot_mcps" | "bot_capability_audit_logs" | "mcp_tool_executions",
   field: "installed_at" | "created_at",
 ): string {
   const row = db.prepare(`select max(${field}) as latest from ${table}`).get() as {

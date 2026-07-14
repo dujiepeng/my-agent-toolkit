@@ -77,6 +77,10 @@ export function createDataServiceServer(
         return handleGetUserCredentialProjectGit(request, url, store, config);
       }
 
+      if (request.method === "POST" && url.pathname === "/internal/mcp-tool-executions") {
+        return handleAppendMcpToolExecution(request, store, config);
+      }
+
       const internalProjectEnvMatch = url.pathname.match(
         /^\/internal\/bots\/([^/]+)\/project-env$/,
       );
@@ -2199,6 +2203,33 @@ function handleGetUserCredentialProjectGit(
     });
   } catch (error) {
     return jsonResponse({ error: error instanceof Error ? error.message : "GitHub credential lookup failed" }, 500);
+  }
+}
+
+async function handleAppendMcpToolExecution(
+  request: Request,
+  store: DataStore,
+  config: DataServiceServerConfig,
+): Promise<Response> {
+  const accessError = internalCredentialAccessError(request, config);
+  if (accessError) {
+    return accessError;
+  }
+  try {
+    const body = await request.json() as Record<string, unknown>;
+    return jsonResponse(store.appendMcpToolExecution({
+      bot_id: requireText(body.bot_id, "bot_id"),
+      wecom_user_id: requireText(body.wecom_user_id, "wecom_user_id"),
+      conversation_id: requireText(body.conversation_id, "conversation_id"),
+      tool_name: requireText(body.tool_name, "tool_name"),
+      status: requireText(body.status, "status") as "success" | "failed" | "rejected",
+      duration_ms: Number(body.duration_ms),
+      ...(typeof body.error_code === "string" && body.error_code.trim()
+        ? { error_code: body.error_code.trim() }
+        : {}),
+    }));
+  } catch (error) {
+    return errorResponse(error);
   }
 }
 
