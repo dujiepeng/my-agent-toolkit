@@ -21,6 +21,7 @@ import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 const port = Number.parseInt(process.env.KIRO_HOST_RELAY_PORT ?? "8210", 10);
 const host = process.env.KIRO_HOST_RELAY_HOST ?? "127.0.0.1";
 const command = process.env.KIRO_COMMAND ?? "/Users/dujiepeng/.local/bin/kiro-cli";
+const claudeCommand = process.env.CLAUDE_CODE_COMMAND ?? join(homedir(), ".local", "bin", "claude");
 const args = parseArgs(process.env.KIRO_ARGS ?? "chat --no-interactive --trust-all-tools");
 const timeoutMs = Number.parseInt(process.env.KIRO_TIMEOUT_MS ?? "900000", 10);
 const relayAuthToken = process.env.KIRO_RELAY_AUTH_TOKEN?.trim();
@@ -42,6 +43,7 @@ const server = createServer(async (request, response) => {
     try {
       assertRelayAuthorized(request);
       const payload = JSON.parse(await readBody(request));
+      const provider = providerFromPayload(payload);
       const key = runKeyFromPayload(payload);
       const activeRun = activeRuns.get(key);
       if (!activeRun) {
@@ -63,6 +65,7 @@ const server = createServer(async (request, response) => {
     try {
       assertRelayAuthorized(request);
       const payload = JSON.parse(await readBody(request));
+      const provider = providerFromPayload(payload);
       if (typeof payload.prompt !== "string") {
         writeJson(response, 400, { error: "prompt is required" });
         return;
@@ -76,15 +79,16 @@ const server = createServer(async (request, response) => {
         "content-type": "application/x-ndjson",
         "cache-control": "no-cache",
       });
-      const requestArgs = argsFromPayload(payload);
-      const runtimeResult = await runWithSessionDiscovery(
-        requestArgs,
-        workspaceDir,
-        runtimeEnv,
-        (effectiveArgs, sessionsBefore) => streamKiro(payload.prompt, effectiveArgs, (event) => {
-          response.write(`${JSON.stringify(event)}\n`);
-        }, sessionsBefore, workspaceDir, runtimeEnv, runKeyFromPayload(payload), projectCheckpoint),
-      );
+      const requestArgs = argsFromPayload(payload, provider);
+      const onEvent = (event) => response.write(`${JSON.stringify(event)}\n`);
+      const runtimeResult = provider === "claude-code"
+        ? await streamClaude(payload.prompt, requestArgs, onEvent, botRoot, workspaceDir, runtimeEnv, runKeyFromPayload(payload), projectCheckpoint)
+        : await runWithSessionDiscovery(
+          requestArgs,
+          workspaceDir,
+          runtimeEnv,
+          (effectiveArgs, sessionsBefore) => streamKiro(payload.prompt, effectiveArgs, onEvent, sessionsBefore, workspaceDir, runtimeEnv, runKeyFromPayload(payload), projectCheckpoint),
+        );
       response.write(`${JSON.stringify({
         type: "session",
         provider_session_id: runtimeResult.provider_session_id,
@@ -118,6 +122,7 @@ const server = createServer(async (request, response) => {
   try {
     assertRelayAuthorized(request);
     const payload = JSON.parse(await readBody(request));
+    const provider = providerFromPayload(payload);
     if (typeof payload.prompt !== "string") {
       writeJson(response, 400, { error: "prompt is required" });
       return;
@@ -127,21 +132,23 @@ const server = createServer(async (request, response) => {
     const runtimeEnv = prepareRuntimeEnv(payload, botRoot, userRoot, workspaceDir, kiroHome);
     const projectCheckpoint = createProjectCheckpoint(userRoot);
 
-    const requestArgs = argsFromPayload(payload);
-    const result = await runWithSessionDiscovery(
-      requestArgs,
-      workspaceDir,
-      runtimeEnv,
-      (effectiveArgs, sessionsBefore) => runKiro(
-        payload.prompt,
-        effectiveArgs,
-        sessionsBefore,
+    const requestArgs = argsFromPayload(payload, provider);
+    const result = provider === "claude-code"
+      ? await runClaude(payload.prompt, requestArgs, botRoot, workspaceDir, runtimeEnv, runKeyFromPayload(payload), projectCheckpoint)
+      : await runWithSessionDiscovery(
+        requestArgs,
         workspaceDir,
         runtimeEnv,
-        runKeyFromPayload(payload),
-        projectCheckpoint,
-      ),
-    );
+        (effectiveArgs, sessionsBefore) => runKiro(
+          payload.prompt,
+          effectiveArgs,
+          sessionsBefore,
+          workspaceDir,
+          runtimeEnv,
+          runKeyFromPayload(payload),
+          projectCheckpoint,
+        ),
+      );
     writeJson(response, 200, result);
   } catch (error) {
     writeJson(
@@ -339,6 +346,102 @@ function streamKiro(
   });
 }
 
+function runClaude(prompt, requestArgs, botRoot, workspaceDir, runtimeEnv = {}, runKey, projectCheckpoint) {
+  return runClaudeProcess(prompt, requestArgs, undefined, botRoot, workspaceDir, runtimeEnv, runKey, projectCheckpoint);
+}
+
+function streamClaude(prompt, requestArgs, onEvent, botRoot, workspaceDir, runtimeEnv = {}, runKey, projectCheckpoint) {
+  return runClaudeProcess(prompt, requestArgs, onEvent, botRoot, workspaceDir, runtimeEnv, runKey, projectCheckpoint);
+}
+
+function runClaudeProcess(prompt, requestArgs, onEvent, botRoot, workspaceDir, runtimeEnv, runKey, projectCheckpoint) {
+  return new Promise((resolve, reject) => {
+    const providerSessionId = extractClaudeSessionId(requestArgs);
+    if (!providerSessionId) {
+      reject(new RelayRequestError("claude-code requires --session-id or --resume with a UUID"));
+      return;
+    }
+    const cleanupSkills = materializeClaudeSkills(botRoot, workspaceDir);
+    const child = spawn(claudeCommand, requestArgs, {
+      cwd: workspaceDir,
+      stdio: ["pipe", "pipe", "pipe"],
+      env: childProcessEnv(runtimeEnv),
+    });
+    const activeRun = registerActiveRun(runKey, child);
+    const stdout = [];
+    const stderr = [];
+    let settled = false;
+    const timeout = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      clearActiveRun(runKey, activeRun);
+      child.kill("SIGTERM");
+      cleanupSkills();
+      rollbackProjectCheckpoint(projectCheckpoint);
+      reject(new RelayTimeoutError());
+    }, timeoutMs);
+
+    child.stdout.on("data", (chunk) => {
+      stdout.push(chunk);
+      if (onEvent) {
+        const content = chunk.toString();
+        if (content) onEvent({ type: "chunk", content });
+      }
+    });
+    child.stderr.on("data", (chunk) => stderr.push(chunk));
+    child.on("error", (error) => {
+      if (settled) return;
+      settled = true;
+      clearActiveRun(runKey, activeRun);
+      clearTimeout(timeout);
+      cleanupSkills();
+      rollbackProjectCheckpoint(projectCheckpoint);
+      reject(error);
+    });
+    child.on("close", (code) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeout);
+      clearActiveRun(runKey, activeRun);
+      cleanupSkills();
+      if (activeRun?.cancelled) {
+        rollbackProjectCheckpoint(projectCheckpoint);
+        reject(new RelayCancelledError());
+        return;
+      }
+      if (code !== 0) {
+        rollbackProjectCheckpoint(projectCheckpoint);
+        reject(new Error(`claude-code runtime exited with code ${code ?? "unknown"}: ${redact(Buffer.concat(stderr).toString())}`));
+        return;
+      }
+      discardProjectCheckpoint(projectCheckpoint);
+      resolve(onEvent
+        ? { provider_session_id: providerSessionId, has_visible_output: stdout.some((chunk) => chunk.toString().trim()) }
+        : { output: Buffer.concat(stdout).toString(), provider_session_id: providerSessionId });
+    });
+    child.stdin.end(prompt);
+  });
+}
+
+function materializeClaudeSkills(botRoot, workspaceDir) {
+  const source = join(botRoot, ".claude", "skills");
+  const claudeRoot = join(workspaceDir, ".claude");
+  const destination = join(claudeRoot, "skills");
+  ensureSafeDirectory(claudeRoot);
+  rmSync(destination, { recursive: true, force: true });
+  if (existsSync(source)) {
+    cpSync(source, destination, { recursive: true, preserveTimestamps: true });
+  } else {
+    mkdirSync(destination);
+  }
+  let cleaned = false;
+  return () => {
+    if (cleaned) return;
+    cleaned = true;
+    rmSync(destination, { recursive: true, force: true });
+  };
+}
+
 function readBody(request) {
   return new Promise((resolve, reject) => {
     const chunks = [];
@@ -513,6 +616,7 @@ function prepareRuntimeEnv(payload, botRoot, userRoot, workspaceDir, kiroHome) {
   }
   result.MY_AGENT_RUNTIME = "wecom";
   result.KIRO_HOME = kiroHome;
+  result.MY_AGENT_GIT_GUARD_PATH = createGitCommandGuard(botRoot);
   const projectDotenv = result.MY_AGENT_PROJECT_DOTENV_B64;
   delete result.MY_AGENT_PROJECT_DOTENV_B64;
   if (projectDotenv) {
@@ -620,6 +724,44 @@ function createManagedPythonLauncher(botRoot, interpreterPath) {
   return launcherPath;
 }
 
+function createGitCommandGuard(botRoot) {
+  const runtimeRoot = join(botRoot, ".runtime");
+  const guardRoot = join(runtimeRoot, "git-guard");
+  for (const directory of [runtimeRoot, guardRoot]) {
+    ensurePrivateDirectory(directory);
+  }
+  const guardPath = join(guardRoot, "git");
+  if (existsSync(guardPath)) {
+    const stat = lstatSync(guardPath);
+    if (stat.isSymbolicLink() || !stat.isFile()) {
+      throw new RelayRequestError("managed Git guard path is unsafe");
+    }
+  }
+  const systemGit = "/usr/bin/git";
+  if (!existsSync(systemGit)) {
+    throw new RelayRequestError("host Git executable is unavailable");
+  }
+  writeFileSync(
+    guardPath,
+    [
+      "#!/bin/sh",
+      "for argument in \"$@\"; do",
+      "  case \"$argument\" in",
+      "    commit|push)",
+      "      echo 'Direct git commit and git push are disabled. Use project.publish through MCP.' >&2",
+      "      exit 126",
+      "      ;;",
+      "  esac",
+      "done",
+      `exec ${shellQuote(systemGit)} \"$@\"`,
+      "",
+    ].join("\n"),
+    { mode: 0o700 },
+  );
+  chmodSync(guardPath, 0o700);
+  return guardRoot;
+}
+
 function replaceDotenvAssignment(content, key, value) {
   const assignment = new RegExp(`^(\\s*(?:export\\s+)?${key}=).*$`);
   let replaced = false;
@@ -658,13 +800,38 @@ function ensurePrivateDirectory(directory) {
 }
 
 function childProcessEnv(runtimeEnv) {
-  const env = { ...process.env };
-  delete env.KIRO_RELAY_AUTH_TOKEN;
-  delete env.USER_CREDENTIALS_MASTER_KEY;
-  delete env.USER_CREDENTIALS_INTERNAL_TOKEN;
+  const env = { ...process.env, ...runtimeEnv };
+  const gitGuardPath = env.MY_AGENT_GIT_GUARD_PATH;
+  delete env.MY_AGENT_GIT_GUARD_PATH;
+  for (const key of Object.keys(env)) {
+    if (
+      [
+        "KIRO_RELAY_AUTH_TOKEN",
+        "USER_CREDENTIALS_MASTER_KEY",
+        "USER_CREDENTIALS_INTERNAL_TOKEN",
+        "GITHUB_TOKEN",
+        "GH_TOKEN",
+        "GITHUB_PAT",
+        "GIT_ASKPASS",
+        "SSH_ASKPASS",
+        "GIT_SSH_COMMAND",
+        "SSH_AUTH_SOCK",
+        "GIT_CREDENTIAL_HELPER",
+      ].includes(key)
+      || /^GIT_CONFIG_(?:COUNT|KEY_\d+|VALUE_\d+)$/.test(key)
+    ) {
+      delete env[key];
+    }
+  }
   return {
     ...env,
-    ...runtimeEnv,
+    ...(typeof gitGuardPath === "string" && gitGuardPath
+      ? { PATH: `${gitGuardPath}:${env.PATH ?? "/usr/bin:/bin"}` }
+      : {}),
+    GIT_CONFIG_NOSYSTEM: "1",
+    GIT_CONFIG_GLOBAL: "/dev/null",
+    GIT_TERMINAL_PROMPT: "0",
+    GIT_ASKPASS: "/bin/false",
     NO_COLOR: "1",
     KIRO_LOG_NO_COLOR: "1",
   };
@@ -764,16 +931,28 @@ function parseArgs(value) {
   return value.split(" ").map((item) => item.trim()).filter(Boolean);
 }
 
-function argsFromPayload(payload) {
+function providerFromPayload(payload) {
+  if (payload?.provider === "claude-code") return "claude-code";
+  if (payload?.provider === undefined || payload?.provider === "kiro") return "kiro";
+  throw new RelayRequestError("unsupported CLI provider");
+}
+
+function argsFromPayload(payload, provider = "kiro") {
   if (!Array.isArray(payload.args)) {
-    return validateRequestArgs(args);
+    return validateRequestArgs(args, provider);
   }
 
   const requestArgs = payload.args.filter((item) => typeof item === "string" && item.length > 0);
-  return validateRequestArgs(requestArgs.length > 0 ? requestArgs : args);
+  return validateRequestArgs(requestArgs.length > 0 ? requestArgs : args, provider);
 }
 
-function validateRequestArgs(requestArgs) {
+function validateRequestArgs(requestArgs, provider = "kiro") {
+  if (provider === "claude-code") {
+    if (!extractClaudeSessionId(requestArgs)) {
+      throw new RelayRequestError("claude-code requires an explicit UUID session");
+    }
+    return requestArgs;
+  }
   if (requestArgs.includes("--resume")) {
     throw new Error("bare --resume is not allowed; use --resume-id");
   }
@@ -789,6 +968,17 @@ function validateRequestArgs(requestArgs) {
   }
 
   return requestArgs;
+}
+
+function extractClaudeSessionId(requestArgs) {
+  for (const flag of ["--session-id", "--resume"]) {
+    const index = requestArgs.indexOf(flag);
+    if (index >= 0 && isKiroSessionId(requestArgs[index + 1])) return requestArgs[index + 1];
+    const inline = requestArgs.find((item) => item.startsWith(`${flag}=`));
+    const value = inline?.slice(flag.length + 1);
+    if (value && isKiroSessionId(value)) return value;
+  }
+  return undefined;
 }
 
 function extractRequestedProviderSessionId(requestArgs) {

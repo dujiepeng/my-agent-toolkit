@@ -4,6 +4,7 @@ import {
   clearWizardGenerationInProgress,
   clearWizardState,
   handleBotMessage,
+  isProjectSyncCommand,
   resolveMessageContext,
   shouldDeferStreamingForWizardState,
   shouldHandleWizardConfirmationAsync,
@@ -52,12 +53,12 @@ export interface BotHostServerConfig extends BotHostConfig {
 
 export interface BotHostWorkerConfig extends StreamBotMessageConfig {
   botId: string;
-  runtime: "mock" | "kiro";
+  runtime: "mock" | "kiro" | "claude-code";
 }
 
 export interface WeComRuntimeBotConfig {
   bot_id: string;
-  runtime: "mock" | "kiro";
+  runtime: "mock" | "kiro" | "claude-code";
   wecom_bot_id: string;
   wecom_secret: string;
 }
@@ -237,6 +238,14 @@ export function createBotHostWorker(config: BotHostWorkerConfig): BotHostWorker 
           message.conversationId,
           "初始化状态读取失败，请稍后重试。",
         );
+        return;
+      }
+
+      // `/sync` can spend noticeable time recreating the project checkout. It
+      // needs a passive reply stream of its own so the user sees progress
+      // immediately, while the other capability commands remain non-streaming.
+      if (!wizardLookup.hasWizardState && isProjectSyncCommand(message.text)) {
+        await streamBotMessage(messageInput, workerConfig, message.conversationId);
         return;
       }
 
@@ -459,8 +468,8 @@ function parseWeComMessageInput(value: unknown): WeComMessageInput {
 
   const record = value as Record<string, unknown>;
   const runtime = record.runtime;
-  if (runtime !== "mock" && runtime !== "kiro") {
-    throw new Error("runtime must be mock or kiro");
+  if (runtime !== "mock" && runtime !== "kiro" && runtime !== "claude-code") {
+    throw new Error("runtime must be mock, kiro, or claude-code");
   }
 
   return {
@@ -474,8 +483,8 @@ function parseWeComMessageInput(value: unknown): WeComMessageInput {
   };
 }
 
-function isSupportedRuntime(value: string): value is "mock" | "kiro" {
-  return value === "mock" || value === "kiro";
+function isSupportedRuntime(value: string): value is "mock" | "kiro" | "claude-code" {
+  return value === "mock" || value === "kiro" || value === "claude-code";
 }
 
 function requireText(value: unknown, field: string): string {

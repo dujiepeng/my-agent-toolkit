@@ -74,6 +74,43 @@ describe("runtime adapters", () => {
     ]);
   });
 
+  it("creates and resumes Claude Code sessions with explicit UUIDs", async () => {
+    const command = [
+      "const fs = require('node:fs');",
+      "fs.appendFileSync(process.env.ARGS_LOG, JSON.stringify(process.argv.slice(1)) + '\\n');",
+      "process.stdin.pipe(process.stdout);",
+    ].join(" ");
+    const logPath = `/tmp/claude-runner-session-${crypto.randomUUID()}.log`;
+    const config = {
+      provider: "claude-code" as const,
+      command: process.execPath,
+      args: ["-e", command, "--", "-p", "--output-format", "text"],
+      timeout_ms: 1000,
+      env: { ARGS_LOG: logPath },
+    };
+    const claudeRequest = {
+      ...request,
+      conversation_id: `conv-${crypto.randomUUID()}`,
+      runtime: "claude-code" as const,
+    };
+
+    const first = await runCliRuntime(config, { ...claudeRequest, prompt: "first" });
+    await runCliRuntime(
+      { ...config, provider_session_id: providerSessionId },
+      { ...claudeRequest, prompt: "second" },
+    );
+
+    expect(first.provider_session_id).toMatch(/^[0-9a-f-]{36}$/i);
+    const lines = (await import("node:fs")).readFileSync(logPath, "utf8").trim().split("\n");
+    const recorded = lines.map((line) => JSON.parse(line));
+    expect(recorded[0]).toEqual([
+      "-p", "--output-format", "text", "--session-id", first.provider_session_id,
+    ]);
+    expect(recorded[1]).toEqual([
+      "-p", "--output-format", "text", "--resume", providerSessionId,
+    ]);
+  });
+
   it("reads provider session metadata without including it in output", async () => {
     const command = [
       "process.stdout.write('hello');",

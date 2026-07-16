@@ -1,10 +1,6 @@
 import type { TrustedMcpContext } from "@my-agent-toolkit/contracts";
 
 export interface ProjectClient {
-  ensure(
-    context: TrustedMcpContext,
-    projectKey?: string,
-  ): Promise<Record<string, unknown>>;
   publish(
     context: TrustedMcpContext,
     input: {
@@ -23,32 +19,6 @@ export function createProjectClient(options: {
   const fetchImpl = options.fetch ?? fetch;
   const baseUrl = options.baseUrl.replace(/\/+$/, "");
   return {
-    async ensure(context, projectKey) {
-      const response = await fetchImpl(
-        `${baseUrl}/internal/bots/${encodeURIComponent(context.bot_id)}/projects/ensure`,
-        {
-          method: "POST",
-          headers: {
-            "content-type": "application/json",
-            "x-project-runner-token": options.token,
-          },
-          body: JSON.stringify({
-            user_id: context.user_id,
-            conversation_id: context.conversation_id,
-            ...(projectKey ? { project_key: projectKey } : {}),
-          }),
-        },
-      );
-      const body = await response.json().catch(() => ({})) as Record<string, unknown>;
-      if (!response.ok) {
-        throw new Error(
-          typeof body.error === "string"
-            ? body.error
-            : `project ensure failed: ${response.status}`,
-        );
-      }
-      return body;
-    },
     async publish(context, input) {
       const response = await fetchImpl(
         `${baseUrl}/internal/bots/${encodeURIComponent(context.bot_id)}/projects/publish`,

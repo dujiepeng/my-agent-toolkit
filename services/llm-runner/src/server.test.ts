@@ -171,7 +171,7 @@ describe("llm-runner server", () => {
     expect(mcpRequests[0].url).toBe("http://mcp-service:8700/mcp/bots/prd-bot/sessions/conv-1/tools");
   });
 
-  it("prepares the bound project automatically and hides project.ensure from Kiro", async () => {
+  it("does not prepare a project before every runtime call", async () => {
     const mcpRequests: Request[] = [];
     const command = [
       "let input = '';",
@@ -191,13 +191,6 @@ describe("llm-runner server", () => {
             directory_refs: [],
             tools: [
               {
-                name: "project.ensure",
-                category: "project",
-                description: "Internal preparation.",
-                input_schema: { type: "object", required: [], properties: {} },
-                permissions: { reads: [], writes: [] },
-              },
-              {
                 name: "project.publish",
                 category: "project",
                 description: "Publish changes.",
@@ -211,17 +204,7 @@ describe("llm-runner server", () => {
             ],
           });
         }
-        expect(await request.json()).toEqual({ tool: "project.ensure", input: {} });
-        return Response.json({
-          ok: true,
-          result: {
-            project_key: "im-test-hub",
-            path: "../../projects/im-test-hub",
-            branch: "main",
-            base_commit: "a".repeat(40),
-            reused: true,
-          },
-        });
+        return Response.json({ error: "unexpected MCP tool call" }, { status: 500 });
       },
     });
 
@@ -236,13 +219,9 @@ describe("llm-runner server", () => {
       }),
     }));
     const body = await response.json() as { output: string };
-    expect(body.output).toContain("<project_context>");
-    expect(body.output).toContain("Project root: ../../projects/im-test-hub");
     expect(body.output).toContain("- project.publish [project]");
-    expect(body.output).not.toContain("- project.ensure [project]");
     expect(mcpRequests.map((request) => new URL(request.url).pathname)).toEqual([
       "/mcp/bots/prd-bot/sessions/conv-project-auto/tools",
-      "/mcp/bots/prd-bot/sessions/conv-project-auto/tools/call",
     ]);
   });
 
@@ -947,7 +926,7 @@ describe("llm-runner server", () => {
     const command = [
       "process.stdin.resume();",
       "process.stdin.on('end', () => {",
-      "  process.stdout.write('<mcp_tool_call>{\"tool\":\"project.ensure\",\"input\":{\"project_key\":\"im-test-hub\"}}</mcp_tool_call>');",
+      "  process.stdout.write('<mcp_tool_call>{\"tool\":\"project.legacy\",\"input\":{}}</mcp_tool_call>');",
       "});",
     ].join(" ");
     const server = createLlmRunnerServer({
@@ -988,7 +967,7 @@ describe("llm-runner server", () => {
     const command = [
       "process.stdin.resume();",
       "process.stdin.on('end', () => {",
-      "  process.stdout.write('<mcp_tool_call>{\"tool\":\"project.ensure\",\"input\":{\"project_key\":\"im-test-hub\"}}</mcp_tool_call>\\n');",
+      "  process.stdout.write('<mcp_tool_call>{\"tool\":\"project.legacy\",\"input\":{}}</mcp_tool_call>\\n');",
       "  process.stdout.write('## 执行结果\\n\\n- 验证状态：通过');",
       "});",
     ].join(" ");
@@ -1075,7 +1054,7 @@ describe("llm-runner server", () => {
         user_id: "user-a",
         conversation_id: "conv-publish",
         runtime: "kiro",
-        prompt: "push it",
+        prompt: "请推送代码",
       }),
     }));
 
@@ -1097,6 +1076,145 @@ describe("llm-runner server", () => {
       "/mcp/bots/prd-bot/sessions/conv-publish/tools",
       "/mcp/bots/prd-bot/sessions/conv-publish/tools/call",
     ]);
+  });
+
+  it("retries an explicit submit request until the runtime calls project.publish", async () => {
+    const mcpRequests: Request[] = [];
+    const command = [
+      "let input = '';",
+      "process.stdin.on('data', chunk => input += chunk);",
+      "process.stdin.on('end', () => {",
+      "  if (input.includes('PUBLISH_GATE')) {",
+      "    process.stdout.write('<mcp_tool_call>{\"tool\":\"project.publish\",\"input\":{\"project_key\":\"im-test-hub\",\"branch\":\"bot/gated-publish\",\"commit_message\":\"test: gated publish\"}}</mcp_tool_call>');",
+      "  } else {",
+      "    process.stdout.write('本地提交成功');",
+      "  }",
+      "});",
+    ].join(" ");
+    const server = createLlmRunnerServer({
+      enabled_runtimes: ["kiro"],
+      kiro: { command: process.execPath, args: ["-e", command], timeout_ms: 1000 },
+      mcp: { service_url: "http://mcp-service:8700", runner_secret: "runner-secret" },
+      fetch: async (input) => {
+        const request = input instanceof Request ? input : new Request(input);
+        mcpRequests.push(request);
+        if (request.url.endsWith("/tools")) {
+          return Response.json({ version: 1, directory_refs: [], tools: [] });
+        }
+        return Response.json({
+          ok: true,
+          result: {
+            branch: "bot/gated-publish",
+            commit: "c".repeat(40),
+            changed_paths: ["tests/e2e/new_case.py"],
+            github_url: "https://github.com/acme/im-test-hub/tree/bot/gated-publish",
+          },
+        });
+      },
+    });
+
+    const response = await server.fetch(new Request("http://localhost/v1/chat", {
+      method: "POST",
+      body: JSON.stringify({
+        bot_id: "prd-bot",
+        user_id: "user-a",
+        conversation_id: "conv-gated-publish",
+        runtime: "kiro",
+        prompt: [
+          "<project>",
+          "  <root>../../projects/im-test-hub</root>",
+          "</project>",
+          "<user-message>",
+          "请帮我把代码提交一下并推送到 GitHub",
+          "</user-message>",
+        ].join("\n"),
+      }),
+    }));
+
+    expect(response.status).toBe(200);
+    const body = await response.json() as { output: string };
+    expect(body.output).toContain("提交并 Push 成功。");
+    expect(body.output).not.toContain("本地提交成功");
+    expect(mcpRequests.map((request) => new URL(request.url).pathname)).toEqual([
+      "/mcp/bots/prd-bot/sessions/conv-gated-publish/tools",
+      "/mcp/bots/prd-bot/sessions/conv-gated-publish/tools/call",
+    ]);
+  });
+
+  it("rejects project.publish when the user only asks to generate and report a test case", async () => {
+    const mcpRequests: Request[] = [];
+    const command = [
+      "process.stdin.resume();",
+      "process.stdin.on('end', () => {",
+      "  process.stdout.write('<mcp_tool_call>{\"tool\":\"project.publish\",\"input\":{\"project_key\":\"im-test-hub\",\"branch\":\"bot/unrequested-publish\",\"commit_message\":\"test: unrequested publish\"}}</mcp_tool_call>');",
+      "});",
+    ].join(" ");
+    const server = createLlmRunnerServer({
+      enabled_runtimes: ["kiro"],
+      kiro: { command: process.execPath, args: ["-e", command], timeout_ms: 1000 },
+      mcp: { service_url: "http://mcp-service:8700", runner_secret: "runner-secret" },
+      fetch: async (input) => {
+        const request = input instanceof Request ? input : new Request(input);
+        mcpRequests.push(request);
+        return Response.json({ version: 1, directory_refs: [], tools: [] });
+      },
+    });
+
+    const response = await server.fetch(new Request("http://localhost/v1/chat", {
+      method: "POST",
+      body: JSON.stringify({
+        bot_id: "prd-bot",
+        user_id: "user-a",
+        conversation_id: "conv-unrequested-publish",
+        runtime: "kiro",
+        prompt: [
+          "<project>",
+          "  <root>../../projects/im-test-hub</root>",
+          "</project>",
+          "<user-message>",
+          "帮我为 im-test-hub 生成一个有意义的 Case，直接生成测试报告",
+          "</user-message>",
+        ].join("\n"),
+      }),
+    }));
+
+    expect(response.status).toBe(200);
+    const body = await response.json() as { output: string };
+    expect(body.output).toBe("提交和 Push 失败：project.publish requires an explicit user request to submit or Push code");
+    expect(mcpRequests.map((request) => new URL(request.url).pathname)).toEqual([
+      "/mcp/bots/prd-bot/sessions/conv-unrequested-publish/tools",
+    ]);
+  });
+
+  it("does not claim success when an explicit submit request still omits project.publish", async () => {
+    const command = "process.stdin.resume(); process.stdin.on('end', () => process.stdout.write('本地提交成功'));";
+    const server = createLlmRunnerServer({
+      enabled_runtimes: ["kiro"],
+      kiro: { command: process.execPath, args: ["-e", command], timeout_ms: 1000 },
+      mcp: { service_url: "http://mcp-service:8700", runner_secret: "runner-secret" },
+      fetch: async () => Response.json({ version: 1, directory_refs: [], tools: [] }),
+    });
+
+    const response = await server.fetch(new Request("http://localhost/v1/chat/stream", {
+      method: "POST",
+      body: JSON.stringify({
+        bot_id: "prd-bot",
+        user_id: "user-a",
+        conversation_id: "conv-gated-publish-failure",
+        runtime: "kiro",
+        prompt: "推送代码",
+      }),
+    }));
+
+    const lines = (await response.text()).trim().split("\n").map((line) => JSON.parse(line));
+    expect(lines.slice(1)).toEqual([
+      {
+        type: "chunk",
+        content: "提交未执行：机器人没有调用 project.publish，未创建或推送经验证的 Commit。请重试。",
+      },
+      { type: "done" },
+    ]);
+    expect(JSON.stringify(lines)).not.toContain("本地提交成功");
   });
 
   it("corrects fabricated MCP result markup and only reports a verified Push", async () => {
@@ -1141,7 +1259,7 @@ describe("llm-runner server", () => {
         user_id: "user-a",
         conversation_id: "conv-forged-publish",
         runtime: "kiro",
-        prompt: "push it",
+        prompt: "请推送代码",
       }),
     }));
     const lines = (await response.text()).trim().split("\n").map((line) => JSON.parse(line));

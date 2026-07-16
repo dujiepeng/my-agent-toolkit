@@ -166,14 +166,6 @@ export function listMcpTools(options: {
       { writes: [], reads: readableScopes() },
     ),
     toolDescriptor(
-      "project.ensure",
-      "project",
-      "Internal project preparation capability. The runner invokes it automatically; the model must not call it.",
-      [],
-      { project_key: stringProperty() },
-      { writes: [], reads: [] },
-    ),
-    toolDescriptor(
       "project.publish",
       "project",
       "Commit validated changes from the current user's shared project workspace and push a new bot/ branch to that user's bound GitHub fork. Requires explicit user authorization.",
@@ -439,17 +431,6 @@ export async function callMcpTool(
       return {
         ok: true,
         result: await deps.memoryBackend.search(input),
-      };
-    }
-
-    if (call.tool === "project.ensure") {
-      const input = parseProjectEnsureInput(call.input);
-      if (!deps.projectClient) {
-        throw new StorageUnavailableError("project manager is unavailable");
-      }
-      return {
-        ok: true,
-        result: await deps.projectClient.ensure(context, input.project_key),
       };
     }
 
@@ -790,10 +771,6 @@ interface DeleteInput {
   memory_id: string;
 }
 
-interface ProjectEnsureInput {
-  project_key?: string;
-}
-
 interface DocumentIngestFileInput extends DocumentCreateInput {
   filename: string;
 }
@@ -922,15 +899,6 @@ function parseDeleteInput(value: unknown): DeleteInput {
   const record = requireRecord(value, "delete input");
   return {
     memory_id: readRequiredString(record, "memory_id"),
-  };
-}
-
-function parseProjectEnsureInput(value: unknown): ProjectEnsureInput {
-  const record = requireRecord(value, "project ensure input");
-  return {
-    ...(record.project_key !== undefined
-      ? { project_key: readRequiredString(record, "project_key") }
-      : {}),
   };
 }
 

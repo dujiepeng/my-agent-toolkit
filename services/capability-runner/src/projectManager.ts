@@ -4,9 +4,11 @@ import {
   existsSync,
   lstatSync,
   mkdirSync,
+  readFileSync,
   realpathSync,
   renameSync,
   rmSync,
+  writeFileSync,
 } from "node:fs";
 import { join, relative, resolve } from "node:path";
 
@@ -50,8 +52,6 @@ export interface CreateProjectManagerOptions {
   dataServiceUrl: string;
   userCredentialsInternalToken?: string;
   kiroWorkspaceRoot: string;
-  repositoryCacheRoot?: string;
-  baselineRefreshMs?: number;
   fetch?: typeof fetch;
   cloneRepository?: (
     repositoryUrl: string,
@@ -59,12 +59,6 @@ export interface CreateProjectManagerOptions {
     destination: string,
     accessToken?: string,
   ) => Promise<void>;
-  cloneWorkspace?: (
-    baselinePath: string,
-    branch: string,
-    destination: string,
-  ) => Promise<void>;
-  refreshRepository?: (repositoryPath: string, branch: string, accessToken?: string) => Promise<void>;
   resolveRevision?: (repositoryPath: string) => Promise<string>;
   pushBranch?: (
     repositoryPath: string,
@@ -75,203 +69,122 @@ export interface CreateProjectManagerOptions {
 }
 
 export interface ProjectManager {
-  ensure(input: EnsureProjectInput): Promise<EnsureProjectResult>;
+  sync(input: EnsureProjectInput): Promise<EnsureProjectResult>;
   publish(input: PublishProjectInput): Promise<PublishProjectResult>;
 }
 
 export function createProjectManager(options: CreateProjectManagerOptions): ProjectManager {
   const fetchImpl = options.fetch ?? fetch;
   const cloneRepository = options.cloneRepository ?? cloneGitRepository;
-  const cloneWorkspace = options.cloneWorkspace ?? cloneWorkspaceFromBaseline;
-  const refreshRepository = options.refreshRepository ?? refreshGitRepository;
   const resolveRevision = options.resolveRevision ?? resolveGitRevision;
   const pushBranch = options.pushBranch ?? pushGitBranch;
   const workspaceRoot = initializeWorkspaceRoot(options.kiroWorkspaceRoot);
-  const cacheRoot = initializeRepositoryCacheRoot(
-    options.repositoryCacheRoot ?? join(workspaceRoot, ".project-cache"),
-  );
-  const baselineRefreshMs = options.baselineRefreshMs ?? 30_000;
   const pending = new Map<string, Promise<EnsureProjectResult>>();
   const pendingPublishes = new Map<string, Promise<PublishProjectResult>>();
-  const pendingBaselines = new Map<string, Promise<PreparedBaseline>>();
-  const lastBaselineRefresh = new Map<string, number>();
 
-  async function prepareBaseline(input: { botId: string; userId: string; binding: UserProjectBinding }): Promise<PreparedBaseline> {
-    const { binding } = input;
-    const branch = requireGitRef(binding.project_default_branch, "project_default_branch");
-    const cacheKey = createHash("sha256")
-      .update(`${input.botId}\n${input.userId}\n${binding.project_repository_url}\n${branch}`, "utf8")
-      .digest("hex");
-    const existing = pendingBaselines.get(cacheKey);
-    if (existing) {
-      return existing;
-    }
-    const operation = (async () => {
-      const destination = resolve(cacheRoot, cacheKey);
-      assertPathInside(cacheRoot, destination);
-      if (existsSync(destination)) {
-        if (!lstatSync(destination).isDirectory() || !existsSync(join(destination, ".git"))) {
-          throw new Error("project repository cache contains an unsafe path");
-        }
-        const lastRefresh = lastBaselineRefresh.get(cacheKey) ?? 0;
-        if (Date.now() - lastRefresh >= baselineRefreshMs) {
-          await refreshRepository(destination, branch, binding.access_token);
-          lastBaselineRefresh.set(cacheKey, Date.now());
-        }
-      } else {
-        const temporaryDestination = join(cacheRoot, `.${cacheKey}.clone-${randomUUID()}`);
-        try {
-          await cloneRepository(binding.project_repository_url, branch, temporaryDestination, binding.access_token);
-          if (!existsSync(join(temporaryDestination, ".git"))) {
-            throw new Error("Git clone completed without a .git directory");
-          }
-          renameSync(temporaryDestination, destination);
-          lastBaselineRefresh.set(cacheKey, Date.now());
-        } finally {
-          if (existsSync(temporaryDestination)) {
-            rmSync(temporaryDestination, { recursive: true, force: true });
-          }
-        }
-      }
-      return {
-        path: destination,
-        commit: await resolveRevision(destination),
-      };
-    })().finally(() => pendingBaselines.delete(cacheKey));
-    pendingBaselines.set(cacheKey, operation);
-    return operation;
-  }
-
-  async function configuredProject(input: EnsureProjectInput): Promise<{
+  async function ensureProjectDir(input: EnsureProjectInput): Promise<{
     binding: UserProjectBinding;
     userRoot: string;
-    conversationRoot: string;
     destination: string;
   }> {
-      const botId = requireSafeSegment(input.botId, "bot_id");
-      const conversationId = requireSafeSegment(input.conversationId, "conversation_id");
-      const userId = requireText(input.userId, "user_id");
-      const requestedProjectKey = input.projectKey === undefined
-        ? undefined
-        : requireSafeSegment(input.projectKey, "project_key");
-      const binding = await loadUserProjectBinding(fetchImpl, options, botId, userId, requestedProjectKey);
+    const botId = requireSafeSegment(input.botId, "bot_id");
+    const userId = requireText(input.userId, "user_id");
+    const requestedProjectKey = input.projectKey === undefined
+      ? undefined
+      : requireSafeSegment(input.projectKey, "project_key");
+    const binding = await loadUserProjectBinding(fetchImpl, options, botId, userId, requestedProjectKey);
 
-      const { userRoot, conversationRoot } = ensureUserProjectRoots(
-        workspaceRoot,
-        botId,
-        userId,
-        conversationId,
-      );
-      const projectsRoot = ensureSafeDirectory(join(userRoot, "projects"));
-      const destination = resolve(projectsRoot, binding.project_directory);
-      assertPathInside(projectsRoot, destination);
-      return { binding, userRoot, conversationRoot, destination };
+    const botRoot = ensureSafeDirectory(join(workspaceRoot, botId));
+    const usersRoot = ensureSafeDirectory(join(botRoot, "users"));
+    const userRoot = ensureSafeDirectory(join(usersRoot, hashUserId(userId)));
+    const projectsRoot = ensureSafeDirectory(join(userRoot, "projects"));
+    const destination = resolve(projectsRoot, binding.project_directory);
+    assertPathInside(projectsRoot, destination);
+    return { binding, userRoot, destination };
   }
 
   return {
-    async ensure(input) {
-      const botId = requireSafeSegment(input.botId, "bot_id");
-      const userId = requireText(input.userId, "user_id");
-      const { binding, userRoot, conversationRoot, destination } = await configuredProject(input);
-      const projectsRoot = resolve(destination, "..");
-      assertPathInside(userRoot, projectsRoot);
-
-      const legacyProjectsRoot = resolve(conversationRoot, "projects");
-      const legacyDestination = resolve(legacyProjectsRoot, binding.project_directory);
-      assertPathInside(conversationRoot, legacyProjectsRoot);
-      assertPathInside(legacyProjectsRoot, legacyDestination);
-
-      const existing = pending.get(destination);
-      if (existing) {
-        return existing;
+    async sync(input) {
+      const { binding, userRoot, destination } = await ensureProjectDir(input);
+      // 目录存在就删，每次全新 clone
+      if (existsSync(destination)) {
+        rmSync(destination, { recursive: true, force: true });
       }
-      const operation = (async () => {
-        if (!existsSync(destination) && existsSync(legacyDestination)) {
-          if (!lstatSync(legacyDestination).isDirectory() || !existsSync(join(legacyDestination, ".git"))) {
-            throw new Error(`legacy project destination is not a Git repository: ${binding.project_directory}`);
-          }
-          cleanupLegacyManagedProjectDotenv(conversationRoot, legacyDestination, binding.project_directory);
-          renameSync(legacyDestination, destination);
+      const projectsRoot = resolve(destination, "..");
+      mkdirSync(projectsRoot, { recursive: true });
+      const tmpRoot = ensureSafeDirectory(join(userRoot, ".tmp"));
+      const temporaryDestination = join(tmpRoot, `.${binding.project_directory}.clone-${randomUUID()}`);
+      try {
+        await cloneRepository(binding.project_repository_url, binding.project_default_branch, temporaryDestination, binding.access_token);
+        if (!existsSync(join(temporaryDestination, ".git"))) {
+          throw new Error("Git clone completed without a .git directory");
         }
-        if (existsSync(destination)) {
-          if (!lstatSync(destination).isDirectory() || !existsSync(join(destination, ".git"))) {
-            throw new Error(`project destination exists but is not a Git repository: ${binding.project_directory}`);
-          }
-          cleanupManagedProjectDotenv(userRoot, destination, binding.project_directory);
-          return projectResult(binding, conversationRoot, destination, true, await resolveRevision(destination));
+        renameSync(temporaryDestination, destination);
+      } finally {
+        if (existsSync(temporaryDestination)) {
+          rmSync(temporaryDestination, { recursive: true, force: true });
         }
-        const baseline = await prepareBaseline({ botId, userId, binding });
-        const temporaryDestination = join(
-          projectsRoot,
-          `.${binding.project_directory}.clone-${randomUUID()}`,
-        );
-        try {
-          await cloneWorkspace(baseline.path, binding.project_default_branch, temporaryDestination);
-          if (!existsSync(join(temporaryDestination, ".git"))) {
-            throw new Error("Git clone completed without a .git directory");
-          }
-          renameSync(temporaryDestination, destination);
-        } finally {
-          if (existsSync(temporaryDestination)) {
-            rmSync(temporaryDestination, { recursive: true, force: true });
-          }
-        }
-        cleanupManagedProjectDotenv(userRoot, destination, binding.project_directory);
-        return projectResult(binding, conversationRoot, destination, false, baseline.commit);
-      })().finally(() => pending.delete(destination));
-      pending.set(destination, operation);
-      return operation;
+      }
+      const baseCommit = await resolveRevision(destination);
+      writeProjectSyncBaseline(userRoot, binding.project_directory, baseCommit);
+      return projectResult(binding, userRoot, destination, false, baseCommit);
     },
     async publish(input) {
-      const { binding, userRoot, destination } = await configuredProject(input);
+      const { binding, userRoot, destination } = await ensureProjectDir(input);
       const branch = requirePublishBranch(input.branch, binding.project_default_branch);
       const commitMessage = requireCommitMessage(input.commitMessage);
       const existing = pendingPublishes.get(destination);
       if (existing) return existing;
       const operation = (async () => {
         if (!existsSync(destination) || !lstatSync(destination).isDirectory() || !existsSync(join(destination, ".git"))) {
-          throw new Error("project workspace is not prepared; call project.ensure first");
+          throw new Error("project workspace is not prepared; run /sync first");
         }
         cleanupManagedProjectDotenv(userRoot, destination, binding.project_directory);
         await assertSafeLocalGitConfig(destination);
         const originalCommit = await resolveRevision(destination);
+        const expectedBaseCommit = readProjectSyncBaseline(userRoot, binding.project_directory);
+        if (originalCommit !== expectedBaseCommit) {
+          throw new Error(
+            "project workspace contains a commit not created by project.publish; run /sync before publishing",
+          );
+        }
         const originalBranch = (await runGit(["-C", destination, "branch", "--show-current"])).trim();
         const changedPaths = await listPublishableChanges(destination);
-        if (changedPaths.length === 0) {
-          throw new Error("project workspace has no changes to publish");
+        if (changedPaths.length > 0) {
+          // 有未 commit 的改动：建分支 → add → commit → push
+          const publishBranch = await preparePublishBranch(destination, branch, originalBranch);
+          try {
+            await runGit(["-C", destination, "add", "--all"]);
+            const stagedPaths = parseNulSeparated(await runGit([
+              "-C", destination, "diff", "--cached", "--name-only", "-z",
+            ]));
+            validatePublishPaths(destination, stagedPaths);
+            await runGit([
+              "-C", destination,
+              "-c", "user.name=IM Test Hub Bot",
+              "-c", "user.email=im-test-hub-bot@users.noreply.github.com",
+              "-c", "core.hooksPath=/dev/null",
+              "-c", "commit.gpgsign=false",
+              "commit", "-m", commitMessage,
+            ]);
+            await pushBranch(destination, binding.project_repository_url, publishBranch, binding.access_token);
+            const commit = await resolveRevision(destination);
+            writeProjectSyncBaseline(userRoot, binding.project_directory, commit);
+            const githubUrl = githubBranchUrl(binding.project_repository_url, publishBranch);
+            return {
+              project_key: binding.project_key,
+              branch: publishBranch,
+              commit,
+              changed_paths: stagedPaths.sort(),
+              ...(githubUrl ? { github_url: githubUrl } : {}),
+            };
+          } catch (error) {
+            await rollbackPublish(destination, originalBranch, originalCommit, publishBranch);
+            throw error;
+          }
         }
-        if (await gitRefExists(destination, `refs/heads/${branch}`)) {
-          throw new Error(`publish branch already exists locally: ${branch}`);
-        }
-        await runGit(["-C", destination, "switch", "-c", branch]);
-        try {
-          await runGit(["-C", destination, "add", "--all"]);
-          const stagedPaths = parseNulSeparated(await runGit([
-            "-C", destination, "diff", "--cached", "--name-only", "-z",
-          ]));
-          validatePublishPaths(destination, stagedPaths);
-          await runGit([
-            "-C", destination,
-            "-c", "user.name=IM Test Hub Bot",
-            "-c", "user.email=im-test-hub-bot@users.noreply.github.com",
-            "-c", "core.hooksPath=/dev/null",
-            "-c", "commit.gpgsign=false",
-            "commit", "-m", commitMessage,
-          ]);
-          await pushBranch(destination, binding.project_repository_url, branch, binding.access_token);
-          const commit = await resolveRevision(destination);
-          const githubUrl = githubBranchUrl(binding.project_repository_url, branch);
-          return {
-            project_key: binding.project_key,
-            branch,
-            commit,
-            changed_paths: stagedPaths.sort(),
-            ...(githubUrl ? { github_url: githubUrl } : {}),
-          };
-        } catch (error) {
-          await rollbackPublish(destination, originalBranch, originalCommit, branch);
-          throw error;
-        }
+
+        throw new Error("project workspace has no uncommitted changes to publish");
       })().finally(() => pendingPublishes.delete(destination));
       pendingPublishes.set(destination, operation);
       return operation;
@@ -279,9 +192,44 @@ export function createProjectManager(options: CreateProjectManagerOptions): Proj
   };
 }
 
-interface PreparedBaseline {
-  path: string;
-  commit: string;
+function projectSyncStatePath(userRoot: string, projectDirectory: string): string {
+  const runtimeRoot = ensureSafeDirectory(join(userRoot, ".runtime"));
+  const syncRoot = ensureSafeDirectory(join(runtimeRoot, "project-sync"));
+  const statePath = resolve(syncRoot, `${requireSafeSegment(projectDirectory, "project_directory")}.json`);
+  assertPathInside(syncRoot, statePath);
+  return statePath;
+}
+
+function writeProjectSyncBaseline(userRoot: string, projectDirectory: string, commit: string): void {
+  const statePath = projectSyncStatePath(userRoot, projectDirectory);
+  if (existsSync(statePath)) {
+    const stat = lstatSync(statePath);
+    if (stat.isSymbolicLink() || !stat.isFile()) {
+      throw new Error("project sync state path is unsafe");
+    }
+  }
+  writeFileSync(statePath, `${JSON.stringify({ base_commit: requireGitCommit(commit) })}\n`, { mode: 0o600 });
+}
+
+function readProjectSyncBaseline(userRoot: string, projectDirectory: string): string {
+  const statePath = projectSyncStatePath(userRoot, projectDirectory);
+  if (!existsSync(statePath)) {
+    throw new Error("project workspace is not synchronized; run /sync first");
+  }
+  const stat = lstatSync(statePath);
+  if (stat.isSymbolicLink() || !stat.isFile()) {
+    throw new Error("project sync state path is unsafe");
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(readFileSync(statePath, "utf8"));
+  } catch {
+    throw new Error("project sync state is invalid; run /sync first");
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    throw new Error("project sync state is invalid; run /sync first");
+  }
+  return requireGitCommit((parsed as { base_commit?: unknown }).base_commit);
 }
 
 function cleanupManagedProjectDotenv(
@@ -308,38 +256,16 @@ function cleanupManagedProjectDotenv(
   rmSync(marker);
 }
 
-function cleanupLegacyManagedProjectDotenv(
-  conversationRoot: string,
-  destination: string,
-  projectDirectory: string,
-): void {
-  const runtimePath = resolve(conversationRoot, ".runtime");
-  const marker = resolve(runtimePath, `${projectDirectory}.dotenv-managed`);
-  const dotenvPath = resolve(destination, ".env");
-  assertPathInside(conversationRoot, runtimePath);
-  assertPathInside(runtimePath, marker);
-  assertPathInside(destination, dotenvPath);
-  if (!existsSync(marker)) return;
-  if (existsSync(dotenvPath)) {
-    const stat = lstatSync(dotenvPath);
-    if (stat.isSymbolicLink() || !stat.isFile()) {
-      throw new Error("legacy project .env path is unsafe");
-    }
-    rmSync(dotenvPath);
-  }
-  rmSync(marker);
-}
-
 function projectResult(
   config: UserProjectBinding,
-  conversationRoot: string,
+  userRoot: string,
   destination: string,
   reused: boolean,
   baseCommit: string,
 ): EnsureProjectResult {
   return {
     project_key: config.project_key,
-    path: relative(conversationRoot, destination),
+    path: relative(userRoot, destination),
     branch: config.project_default_branch,
     base_commit: baseCommit,
     reused,
@@ -382,31 +308,9 @@ async function loadUserProjectBinding(
   };
 }
 
-function ensureUserProjectRoots(
-  workspaceRoot: string,
-  botId: string,
-  userId: string,
-  conversationId: string,
-): { userRoot: string; conversationRoot: string } {
-  const botRoot = ensureSafeDirectory(join(workspaceRoot, botId));
-  const usersRoot = ensureSafeDirectory(join(botRoot, "users"));
-  const userRoot = ensureSafeDirectory(join(usersRoot, hashUserId(userId)));
-  const conversationsRoot = ensureSafeDirectory(join(userRoot, "conversations"));
-  return {
-    userRoot,
-    conversationRoot: ensureSafeDirectory(join(conversationsRoot, conversationId)),
-  };
-}
-
 function initializeWorkspaceRoot(configuredRoot: string): string {
   const root = resolve(configuredRoot);
   mkdirSync(root, { recursive: true });
-  return realpathSync(root);
-}
-
-function initializeRepositoryCacheRoot(configuredRoot: string): string {
-  const root = resolve(configuredRoot);
-  mkdirSync(root, { recursive: true, mode: 0o700 });
   return realpathSync(root);
 }
 
@@ -454,6 +358,14 @@ function requireGitRef(value: unknown, field: string): string {
     throw new Error(`${field} must be a safe Git branch name`);
   }
   return ref;
+}
+
+function requireGitCommit(value: unknown): string {
+  const commit = requireText(value, "base_commit");
+  if (!/^[0-9a-f]{40}$/i.test(commit)) {
+    throw new Error("project sync state is invalid; run /sync first");
+  }
+  return commit;
 }
 
 function requirePublishBranch(value: unknown, defaultBranch: string): string {
@@ -563,6 +475,18 @@ function parseNulSeparated(value: string): string[] {
   return value.split("\0").filter(Boolean);
 }
 
+async function preparePublishBranch(
+  repositoryPath: string,
+  targetBranch: string,
+  currentBranch: string,
+): Promise<string> {
+  if (await gitRefExists(repositoryPath, `refs/heads/${targetBranch}`)) {
+    throw new Error(`publish branch already exists locally: ${targetBranch}`);
+  }
+  await runGit(["-C", repositoryPath, "switch", "-c", targetBranch]);
+  return targetBranch;
+}
+
 async function gitRefExists(repositoryPath: string, ref: string): Promise<boolean> {
   try {
     await runGit(["-C", repositoryPath, "show-ref", "--verify", "--quiet", ref]);
@@ -657,34 +581,6 @@ function gitCredentialEnv(accessToken: string): Record<string, string> {
     GIT_CONFIG_KEY_0: "http.https://github.com/.extraheader",
     GIT_CONFIG_VALUE_0: `AUTHORIZATION: basic ${Buffer.from(`x-access-token:${token}`, "utf8").toString("base64")}`,
   };
-}
-
-async function cloneWorkspaceFromBaseline(
-  baselinePath: string,
-  branch: string,
-  destination: string,
-): Promise<void> {
-  await runGit(["clone", "--shared", "--branch", requireGitRef(branch, "branch"), "--", baselinePath, destination]);
-}
-
-async function refreshGitRepository(repositoryPath: string, branch: string, accessToken?: string): Promise<void> {
-  const safeBranch = requireGitRef(branch, "branch");
-  await runGit([
-    "-C",
-    repositoryPath,
-    "fetch",
-    "--depth",
-    "1",
-    "origin",
-    `+refs/heads/${safeBranch}:refs/remotes/origin/${safeBranch}`,
-  ], accessToken);
-  await runGit([
-    "-C",
-    repositoryPath,
-    "reset",
-    "--hard",
-    `refs/remotes/origin/${safeBranch}`,
-  ]);
 }
 
 async function pushGitBranch(

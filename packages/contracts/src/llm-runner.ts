@@ -1,4 +1,4 @@
-export type RuntimeName = "mock" | "kiro";
+export type RuntimeName = "mock" | "kiro" | "claude-code";
 
 export interface ChatRequest {
   bot_id: string;
@@ -34,8 +34,8 @@ export function parseChatRequest(value: unknown): ChatRequest {
     }
   }
 
-  if (record.runtime !== "mock" && record.runtime !== "kiro") {
-    throw new Error("runtime must be mock or kiro");
+  if (record.runtime !== "mock" && record.runtime !== "kiro" && record.runtime !== "claude-code") {
+    throw new Error("runtime must be mock, kiro, or claude-code");
   }
 
   return {

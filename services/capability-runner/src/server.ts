@@ -19,7 +19,7 @@ export interface CapabilityDispatchContext {
 export interface CreateCapabilityRunnerServerOptions {
   dispatch?(context: CapabilityDispatchContext): void | Promise<void>;
   listSkills?(): unknown | Promise<unknown>;
-  ensureProject?(context: {
+  syncProject?(context: {
     botId: string;
     userId: string;
     conversationId: string;
@@ -41,7 +41,7 @@ export function createCapabilityRunnerServer(
 ): CapabilityRunnerServer {
   const dispatch = options.dispatch;
   const listSkills = options.listSkills;
-  const ensureProject = options.ensureProject;
+  const syncProject = options.syncProject;
   const publishProject = options.publishProject;
 
   return {
@@ -56,20 +56,20 @@ export function createCapabilityRunnerServer(
         return jsonResponse({ items: await listSkills?.() ?? [] });
       }
 
-      const projectEnsureRouteMatch = url.pathname.match(
-        /^\/internal\/bots\/([^/]+)\/projects\/ensure$/,
+      const projectSyncRouteMatch = url.pathname.match(
+        /^\/internal\/bots\/([^/]+)\/projects\/sync$/,
       );
-      if (request.method === "POST" && projectEnsureRouteMatch) {
+      if (request.method === "POST" && projectSyncRouteMatch) {
         if (!matchesToken(
           request.headers.get("x-project-runner-token"),
           options.projectRunnerToken,
         )) {
           return jsonResponse({ error: "project runner token is invalid" }, 401);
         }
-        return withDecodedBotId(projectEnsureRouteMatch[1], async (botId) => {
+        return withDecodedBotId(projectSyncRouteMatch[1], async (botId) => {
           try {
             const payload = requireRecord(await readJsonPayload(request));
-            const result = await ensureProject?.({
+            const result = await syncProject?.({
               botId,
               userId: requireString(payload.user_id, "user_id"),
               conversationId: requireString(payload.conversation_id, "conversation_id"),
@@ -78,7 +78,7 @@ export function createCapabilityRunnerServer(
             return jsonResponse(result ?? { error: "project manager is not configured" }, result ? 200 : 503);
           } catch (error) {
             return jsonResponse({
-              error: error instanceof Error ? error.message : "project ensure failed",
+              error: error instanceof Error ? error.message : "project sync failed",
             }, 400);
           }
         });

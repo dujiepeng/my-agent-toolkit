@@ -14,25 +14,6 @@ describe("project client", () => {
       }),
     });
 
-    await expect(client.ensure({
-      bot_id: "qa-bot",
-      user_id: "user-a",
-      conversation_id: "conv-1",
-      runtime: "kiro",
-    })).resolves.toEqual({
-      path: "projects/im-test-hub",
-      reused: false,
-    });
-
-    expect(requests[0].url).toBe(
-      "http://capability-runner:8700/internal/bots/qa-bot/projects/ensure",
-    );
-    expect(requests[0].headers.get("x-project-runner-token")).toBe("runner-secret");
-    await expect(requests[0].json()).resolves.toEqual({
-      user_id: "user-a",
-      conversation_id: "conv-1",
-    });
-
     await client.publish({
       bot_id: "qa-bot",
       user_id: "user-a",
@@ -43,11 +24,11 @@ describe("project client", () => {
       branch: "bot/add-case",
       commitMessage: "test: add case",
     });
-    expect(requests[1].url).toBe(
+    expect(requests[0].url).toBe(
       "http://capability-runner:8700/internal/bots/qa-bot/projects/publish",
     );
-    expect(requests[1].headers.get("x-project-runner-token")).toBe("runner-secret");
-    await expect(requests[1].json()).resolves.toEqual({
+    expect(requests[0].headers.get("x-project-runner-token")).toBe("runner-secret");
+    await expect(requests[0].json()).resolves.toEqual({
       user_id: "user-a",
       conversation_id: "conv-1",
       project_key: "im-test-hub",

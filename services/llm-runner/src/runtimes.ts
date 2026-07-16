@@ -1,4 +1,5 @@
 import { spawn } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import type { ChatRequest, RuntimeName } from "@my-agent-toolkit/contracts";
 import { redactStreamText, redactText } from "./redact.js";
 
@@ -15,6 +16,7 @@ export interface RuntimeStreamResult {
 }
 
 export interface CliRuntimeConfig {
+  provider?: "kiro" | "claude-code";
   command: string;
   args: string[];
   timeout_ms: number;
@@ -102,7 +104,8 @@ function runProcess(
 ): Promise<{ output: string; provider_session_id?: string }> {
   return new Promise((resolve, reject) => {
     const exactSecrets = credentialSecretValues(config.env);
-    const args = argsForRunnerSession(config.args, config.provider_session_id);
+    const session = runtimeSession(config);
+    const args = argsForRunnerSession(config.args, session.id, session.resume, config.provider);
     const child = spawn(config.command, args, {
       env: { ...process.env, ...config.env },
       stdio: ["pipe", "pipe", "pipe"],
@@ -178,8 +181,8 @@ function runProcess(
 
       resolve({
         output: redactText(Buffer.concat(stdout).toString(), exactSecrets),
-        ...(runtimeStderr.provider_session_id ?? config.provider_session_id
-          ? { provider_session_id: runtimeStderr.provider_session_id ?? config.provider_session_id }
+        ...(runtimeStderr.provider_session_id ?? session.id
+          ? { provider_session_id: runtimeStderr.provider_session_id ?? session.id }
           : {}),
       });
     });
@@ -199,7 +202,8 @@ function streamProcess(
   const exactSecrets = credentialSecretValues(config.env);
   const stream = new ReadableStream<string>({
     start(controller) {
-      const args = argsForRunnerSession(config.args, config.provider_session_id);
+      const session = runtimeSession(config);
+      const args = argsForRunnerSession(config.args, session.id, session.resume, config.provider);
       const child = spawn(config.command, args, {
         env: { ...process.env, ...config.env },
         stdio: ["pipe", "pipe", "pipe"],
@@ -267,7 +271,7 @@ function streamProcess(
           return;
         }
         resolveProviderSessionId(
-          runtimeStderr.provider_session_id ?? config.provider_session_id,
+          runtimeStderr.provider_session_id ?? session.id,
         );
         controller.close();
       });
@@ -295,7 +299,35 @@ function credentialSecretValues(env: Record<string, string> | undefined): string
     .map(([, value]) => value);
 }
 
-function argsForRunnerSession(args: string[], providerSessionId?: string): string[] {
+function runtimeSession(config: CliRuntimeConfig): { id?: string; resume: boolean } {
+  if (config.provider === "claude-code") {
+    return {
+      id: config.provider_session_id ?? randomUUID(),
+      resume: Boolean(config.provider_session_id),
+    };
+  }
+  return { id: config.provider_session_id, resume: Boolean(config.provider_session_id) };
+}
+
+function argsForRunnerSession(
+  args: string[],
+  providerSessionId: string | undefined,
+  resume: boolean,
+  provider: CliRuntimeConfig["provider"] = "kiro",
+): string[] {
+  if (provider === "claude-code") {
+    if (args.includes("--resume") || args.includes("--session-id")) {
+      throw new RuntimeExecutionError(
+        "runtime_session_error",
+        500,
+        "claude runtime args must not contain a fixed session",
+      );
+    }
+    if (!providerSessionId || !isProviderSessionId(providerSessionId)) {
+      throw new RuntimeExecutionError("runtime_session_error", 500, "invalid provider session id");
+    }
+    return [...args, resume ? "--resume" : "--session-id", providerSessionId];
+  }
   if (args.includes("--resume")) {
     throw new RuntimeExecutionError(
       "runtime_session_error",
@@ -313,7 +345,7 @@ function argsForRunnerSession(args: string[], providerSessionId?: string): strin
   if (!providerSessionId) {
     return [...args];
   }
-  if (!isKiroSessionId(providerSessionId)) {
+  if (!isProviderSessionId(providerSessionId)) {
     throw new RuntimeExecutionError(
       "runtime_session_error",
       500,
@@ -353,7 +385,7 @@ function parseRuntimeStderr(stderr: string): {
       const metadata = JSON.parse(line.slice(runtimeMetadataPrefix.length)) as {
         provider_session_id?: unknown;
       };
-      if (isKiroSessionId(metadata.provider_session_id)) {
+      if (isProviderSessionId(metadata.provider_session_id)) {
         providerSessionId = metadata.provider_session_id;
       }
     } catch {
@@ -370,6 +402,6 @@ function isRuntimeTimeoutDiagnostic(diagnostics: string): boolean {
   return /runtime timed out|超过时间限制/.test(diagnostics);
 }
 
-function isKiroSessionId(value: unknown): value is string {
+function isProviderSessionId(value: unknown): value is string {
   return typeof value === "string" && kiroSessionIdPattern.test(value);
 }

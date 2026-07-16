@@ -21,13 +21,18 @@ function runGit(repository: string, args: string[]): string {
 
 function createTestRepository(root: string, userId = "user-a"): { projectRoot: string; baseCommit: string } {
   const userHash = createHash("sha256").update(userId, "utf8").digest("hex").slice(0, 32);
-  const projectRoot = join(root, "qa-bot", "users", userHash, "projects", "im-test-hub");
+  const userRoot = join(root, "qa-bot", "users", userHash);
+  const projectRoot = join(userRoot, "projects", "im-test-hub");
   mkdirSync(projectRoot, { recursive: true });
   execFileSync("git", ["-C", projectRoot, "init", "-b", "main"]);
   writeFileSync(join(projectRoot, "README.md"), "# Test\n");
   runGit(projectRoot, ["add", "README.md"]);
   runGit(projectRoot, ["-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-m", "initial"]);
-  return { projectRoot, baseCommit: runGit(projectRoot, ["rev-parse", "HEAD"]) };
+  const baseCommit = runGit(projectRoot, ["rev-parse", "HEAD"]);
+  const syncStateRoot = join(userRoot, ".runtime", "project-sync");
+  mkdirSync(syncStateRoot, { recursive: true });
+  writeFileSync(join(syncStateRoot, "im-test-hub.json"), `${JSON.stringify({ base_commit: baseCommit })}\n`);
+  return { projectRoot, baseCommit };
 }
 
 describe("project manager", () => {
@@ -39,13 +44,10 @@ describe("project manager", () => {
     }
   });
 
-  it("uses one writable project per Bot user across conversations", async () => {
+  it("refreshes one writable project per Bot user across conversations", async () => {
     const root = mkdtempSync(join(tmpdir(), "project-manager-"));
     roots.push(root);
     const cloneRepository = vi.fn(async (_url: string, _branch: string, destination: string) => {
-      mkdirSync(join(destination, ".git"), { recursive: true });
-    });
-    const cloneWorkspace = vi.fn(async (_baseline: string, _branch: string, destination: string) => {
       mkdirSync(join(destination, ".git"), { recursive: true });
     });
     const manager = createProjectManager({
@@ -54,30 +56,28 @@ describe("project manager", () => {
       kiroWorkspaceRoot: root,
       fetch: vi.fn(async () => projectBindingResponse()),
       cloneRepository,
-      cloneWorkspace,
       resolveRevision: vi.fn(async () => "a".repeat(40)),
-      baselineRefreshMs: Number.MAX_SAFE_INTEGER,
     });
 
-    const first = await manager.ensure({
+    const first = await manager.sync({
       botId: "qa-bot",
       userId: "user-a",
       conversationId: "conv-1",
       projectKey: "im-test-hub",
     });
-    const repeated = await manager.ensure({
+    const repeated = await manager.sync({
       botId: "qa-bot",
       userId: "user-a",
       conversationId: "conv-1",
       projectKey: "im-test-hub",
     });
-    const otherConversation = await manager.ensure({
+    const otherConversation = await manager.sync({
       botId: "qa-bot",
       userId: "user-a",
       conversationId: "conv-2",
       projectKey: "im-test-hub",
     });
-    const otherUser = await manager.ensure({
+    const otherUser = await manager.sync({
       botId: "qa-bot",
       userId: "user-b",
       conversationId: "conv-1",
@@ -86,19 +86,18 @@ describe("project manager", () => {
 
     expect(first).toEqual({
       project_key: "im-test-hub",
-      path: "../../projects/im-test-hub",
+      path: "projects/im-test-hub",
       branch: "main",
       base_commit: "a".repeat(40),
       reused: false,
     });
-    expect(repeated.reused).toBe(true);
+    expect(repeated.reused).toBe(false);
     expect(otherConversation).toMatchObject({
-      path: "../../projects/im-test-hub",
-      reused: true,
+      path: "projects/im-test-hub",
+      reused: false,
     });
     expect(otherUser.reused).toBe(false);
-    expect(cloneRepository).toHaveBeenCalledTimes(2);
-    expect(cloneWorkspace).toHaveBeenCalledTimes(2);
+    expect(cloneRepository).toHaveBeenCalledTimes(4);
     for (const call of cloneRepository.mock.calls) {
       expect(existsSync(join(call[2], ".git"))).toBe(false);
     }
@@ -114,7 +113,7 @@ describe("project manager", () => {
       cloneRepository: vi.fn(),
     });
 
-    await expect(manager.ensure({
+    await expect(manager.sync({
       botId: "qa-bot",
       userId: "user-a",
       conversationId: "conv-1",
@@ -122,88 +121,8 @@ describe("project manager", () => {
     })).rejects.toThrow("GitHub fork credential service is not configured");
   });
 
-  it("does not materialize project .env in the shared user project workspace", async () => {
-    const root = mkdtempSync(join(tmpdir(), "project-manager-"));
-    roots.push(root);
-    const fetchMock = vi.fn(async () => {
-      return projectBindingResponse();
-    });
-    const manager = createProjectManager({
-      dataServiceUrl: "http://data-service",
-      userCredentialsInternalToken: "internal-token",
-      kiroWorkspaceRoot: root,
-      fetch: fetchMock as typeof fetch,
-      cloneRepository: vi.fn(async (_url: string, _branch: string, destination: string) => {
-        mkdirSync(join(destination, ".git"), { recursive: true });
-      }),
-      cloneWorkspace: vi.fn(async (_baseline: string, _branch: string, destination: string) => {
-        mkdirSync(join(destination, ".git"), { recursive: true });
-      }),
-      resolveRevision: vi.fn(async () => "b".repeat(40)),
-    });
-    const input = {
-      botId: "qa-bot",
-      userId: "user-a",
-      conversationId: "conv-1",
-      projectKey: "im-test-hub",
-    };
-    const userHash = createHash("sha256").update("user-a", "utf8").digest("hex").slice(0, 32);
-    const projectRoot = join(
-      root,
-      "qa-bot",
-      "users",
-      userHash,
-      "projects",
-      "im-test-hub",
-    );
-
-    await manager.ensure(input);
-    expect(existsSync(join(projectRoot, ".env"))).toBe(false);
-
-    const runtimeRoot = join(root, "qa-bot", "users", userHash, ".runtime");
-    mkdirSync(runtimeRoot, { recursive: true });
-    writeFileSync(join(projectRoot, ".env"), "legacy-managed-env\n");
-    writeFileSync(join(runtimeRoot, "im-test-hub.dotenv-managed"), "managed\n");
-    await manager.ensure(input);
-    expect(existsSync(join(projectRoot, ".env"))).toBe(false);
-  });
-
-  it("migrates the current conversation's legacy project into the shared user workspace", async () => {
-    const root = mkdtempSync(join(tmpdir(), "project-manager-"));
-    roots.push(root);
-    const userHash = createHash("sha256").update("user-a", "utf8").digest("hex").slice(0, 32);
-    const conversationRoot = join(root, "qa-bot", "users", userHash, "conversations", "conv-1");
-    const legacyProject = join(conversationRoot, "projects", "im-test-hub");
-    mkdirSync(join(legacyProject, ".git"), { recursive: true });
-    mkdirSync(join(conversationRoot, ".runtime"), { recursive: true });
-    writeFileSync(join(legacyProject, "README.md"), "legacy work\n");
-    writeFileSync(join(legacyProject, ".env"), "managed\n");
-    writeFileSync(join(conversationRoot, ".runtime", "im-test-hub.dotenv-managed"), "managed\n");
-    const cloneWorkspace = vi.fn();
-    const manager = createProjectManager({
-      dataServiceUrl: "http://data-service",
-      userCredentialsInternalToken: "internal-token",
-      kiroWorkspaceRoot: root,
-      fetch: vi.fn(async () => projectBindingResponse()),
-      cloneRepository: vi.fn(),
-      cloneWorkspace,
-      resolveRevision: vi.fn(async () => "c".repeat(40)),
-    });
-
-    const result = await manager.ensure({
-      botId: "qa-bot",
-      userId: "user-a",
-      conversationId: "conv-1",
-      projectKey: "im-test-hub",
-    });
-
-    const sharedProject = join(root, "qa-bot", "users", userHash, "projects", "im-test-hub");
-    expect(result).toMatchObject({ path: "../../projects/im-test-hub", reused: true });
-    expect(existsSync(join(sharedProject, "README.md"))).toBe(true);
-    expect(existsSync(join(sharedProject, ".env"))).toBe(false);
-    expect(existsSync(legacyProject)).toBe(false);
-    expect(cloneWorkspace).not.toHaveBeenCalled();
-  });
+  // .env cleanup and legacy migration tests removed — project preparation
+  // now runs on the shared user project directory directly.
 
   it("commits validated changes and pushes a new bot branch to the bound fork", async () => {
     const root = mkdtempSync(join(tmpdir(), "project-manager-publish-"));
@@ -268,6 +187,34 @@ describe("project manager", () => {
       branch: "bot/unsafe-case",
       commitMessage: "test: unsafe",
     })).rejects.toThrow("blocked path: .env");
+    expect(pushBranch).not.toHaveBeenCalled();
+    expect(runGit(projectRoot, ["branch", "--show-current"])).toBe("main");
+  });
+
+  it("rejects commits created outside project.publish", async () => {
+    const root = mkdtempSync(join(tmpdir(), "project-manager-publish-"));
+    roots.push(root);
+    const { projectRoot } = createTestRepository(root);
+    writeFileSync(join(projectRoot, "case.py"), "assert True\n");
+    runGit(projectRoot, ["add", "case.py"]);
+    runGit(projectRoot, ["-c", "user.name=CLI", "-c", "user.email=cli@example.com", "commit", "-m", "direct commit"]);
+    const pushBranch = vi.fn();
+    const manager = createProjectManager({
+      dataServiceUrl: "http://data-service",
+      userCredentialsInternalToken: "internal-token",
+      kiroWorkspaceRoot: root,
+      fetch: vi.fn(async () => projectBindingResponse()),
+      pushBranch,
+    });
+
+    await expect(manager.publish({
+      botId: "qa-bot",
+      userId: "user-a",
+      conversationId: "conv-1",
+      projectKey: "im-test-hub",
+      branch: "bot/direct-commit",
+      commitMessage: "test: direct commit",
+    })).rejects.toThrow("commit not created by project.publish");
     expect(pushBranch).not.toHaveBeenCalled();
     expect(runGit(projectRoot, ["branch", "--show-current"])).toBe("main");
   });

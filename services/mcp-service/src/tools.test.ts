@@ -17,33 +17,13 @@ describe("document MCP tools", () => {
     runtime: "kiro",
   };
 
-  it("prepares the configured project using trusted conversation context", async () => {
-    const ensure = vi.fn().mockResolvedValue({ path: "projects/im-test-hub" });
-    const deps = createNoopDeps();
-    deps.projectClient = {
-      ensure,
-      publish: vi.fn(),
-    };
-
-    const result = await callMcpTool(context, deps, {
-      tool: "project.ensure",
-      input: {},
-    });
-
-    expect(result).toEqual({
-      ok: true,
-      result: { path: "projects/im-test-hub" },
-    });
-    expect(ensure).toHaveBeenCalledWith(context, undefined);
-  });
-
   it("publishes the configured project using trusted user context", async () => {
     const publish = vi.fn().mockResolvedValue({
       branch: "bot/add-case",
       commit: "a".repeat(40),
     });
     const deps = createNoopDeps();
-    deps.projectClient = { ensure: vi.fn(), publish };
+    deps.projectClient = { publish };
 
     const result = await callMcpTool(context, deps, {
       tool: "project.publish",
@@ -1009,7 +989,6 @@ describe("MCP tool discovery", () => {
       "memory.search",
       "memory.stats",
       "search.query",
-      "project.ensure",
       "project.publish",
     ]);
     expect(manifest.tools.find((tool) => tool.name === "document.create")).toMatchObject({
@@ -1031,9 +1010,7 @@ describe("MCP tool discovery", () => {
         },
       },
     });
-    expect(manifest.tools.find((tool) => tool.name === "project.ensure")).toMatchObject({
-      input_schema: { required: [] },
-    });
+    expect(manifest.tools.find((tool) => tool.name === "project.ensure")).toBeUndefined();
     expect(manifest.tools.find((tool) => tool.name === "project.publish")).toMatchObject({
       input_schema: { required: ["project_key", "branch", "commit_message"] },
     });

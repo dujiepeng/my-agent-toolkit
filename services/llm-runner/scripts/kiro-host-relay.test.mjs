@@ -24,10 +24,17 @@ before(async () => {
     env: {
       ...process.env,
       KIRO_COMMAND: process.execPath,
+      CLAUDE_CODE_COMMAND: process.execPath,
       KIRO_HOST_RELAY_HOST: "127.0.0.1",
       KIRO_HOST_RELAY_PORT: String(port),
       KIRO_TIMEOUT_MS: "2000",
       KIRO_WORKSPACE_ROOT: workspaceRoot,
+      GITHUB_TOKEN: "host-github-token",
+      GH_TOKEN: "host-gh-token",
+      GIT_CONFIG_COUNT: "1",
+      GIT_CONFIG_KEY_0: "http.https://github.com/.extraheader",
+      GIT_CONFIG_VALUE_0: "AUTHORIZATION: basic host-token",
+      SSH_AUTH_SOCK: "/tmp/host-ssh-agent.sock",
     },
     stdio: ["ignore", "pipe", "pipe"],
   });
@@ -83,6 +90,74 @@ test("host relay returns the Kiro session id from the process exit hint", async 
   assert.equal(response.status, 200);
   assert.deepEqual(await response.json(), {
     output: "answer",
+    provider_session_id: providerSessionId,
+  });
+});
+
+test("host relay strips Git credentials from the CLI child process", async () => {
+  const script = [
+    "process.stdin.resume();",
+    "process.stdin.on('end', () => { process.stdout.write(JSON.stringify({",
+    "  github: process.env.GITHUB_TOKEN ?? null,",
+    "  gh: process.env.GH_TOKEN ?? null,",
+    "  configCount: process.env.GIT_CONFIG_COUNT ?? null,",
+    "  configKey: process.env.GIT_CONFIG_KEY_0 ?? null,",
+    "  sshAuthSock: process.env.SSH_AUTH_SOCK ?? null,",
+    "  terminalPrompt: process.env.GIT_TERMINAL_PROMPT,",
+    "  askPass: process.env.GIT_ASKPASS,",
+    "  globalConfig: process.env.GIT_CONFIG_GLOBAL,",
+    "  directCommitBlocked: (() => { try { require('node:child_process').execFileSync('git', ['commit', '-m', 'blocked']); return false; } catch (error) { return error.status === 126; } })(),",
+    `})); process.stderr.write('Resume with: kiro-cli chat --resume-id ${providerSessionId}\\n'); });`,
+  ].join(" ");
+  const response = await fetch(`${relayUrl}/v1/kiro/chat`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      bot_id: "bot-a",
+      user_id: userId,
+      conversation_id: "conv-git-env",
+      prompt: "hello",
+      args: ["-e", script],
+    }),
+  });
+
+  assert.equal(response.status, 200);
+  const body = await response.json();
+  assert.equal(body.provider_session_id, providerSessionId);
+  assert.deepEqual(JSON.parse(body.output), {
+    github: null,
+    gh: null,
+    configCount: null,
+    configKey: null,
+    sshAuthSock: null,
+    terminalPrompt: "0",
+    askPass: "/bin/false",
+    globalConfig: "/dev/null",
+    directCommitBlocked: true,
+  });
+});
+
+test("host relay executes Claude Code with the explicit session id", async () => {
+  const script = [
+    "process.stdin.resume();",
+    "process.stdin.on('end', () => process.stdout.write('claude answer'));",
+  ].join(" ");
+  const response = await fetch(`${relayUrl}/v1/kiro/chat`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      bot_id: "bot-a",
+      user_id: userId,
+      conversation_id: "conv-claude",
+      provider: "claude-code",
+      prompt: "hello",
+      args: ["-e", script, "--", "--session-id", providerSessionId],
+    }),
+  });
+
+  assert.equal(response.status, 200);
+  assert.deepEqual(await response.json(), {
+    output: "claude answer",
     provider_session_id: providerSessionId,
   });
 });

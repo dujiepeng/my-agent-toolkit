@@ -36,19 +36,19 @@ describe("capability-runner server", () => {
   });
 
   it("prepares a configured project with trusted workspace identifiers", async () => {
-    const ensureProject = vi.fn().mockResolvedValue({
+    const syncProject = vi.fn().mockResolvedValue({
       project_key: "im-test-hub",
       path: "projects/im-test-hub",
       branch: "main",
       reused: false,
     });
     const server = createCapabilityRunnerServer({
-      ensureProject,
+      syncProject,
       projectRunnerToken: "runner-secret",
     });
 
     const response = await server.fetch(new Request(
-      "http://localhost/internal/bots/qa-bot/projects/ensure",
+      "http://localhost/internal/bots/qa-bot/projects/sync",
       {
         method: "POST",
         headers: { "x-project-runner-token": "runner-secret" },
@@ -62,7 +62,7 @@ describe("capability-runner server", () => {
 
     expect(response.status).toBe(200);
     await expect(response.json()).resolves.toMatchObject({ path: "projects/im-test-hub" });
-    expect(ensureProject).toHaveBeenCalledWith({
+    expect(syncProject).toHaveBeenCalledWith({
       botId: "qa-bot",
       userId: "user-a",
       conversationId: "conv-1",
@@ -71,19 +71,19 @@ describe("capability-runner server", () => {
   });
 
   it("rejects project preparation without the internal runner token", async () => {
-    const ensureProject = vi.fn();
+    const syncProject = vi.fn();
     const server = createCapabilityRunnerServer({
-      ensureProject,
+      syncProject,
       projectRunnerToken: "runner-secret",
     });
 
     const response = await server.fetch(new Request(
-      "http://localhost/internal/bots/qa-bot/projects/ensure",
+      "http://localhost/internal/bots/qa-bot/projects/sync",
       { method: "POST", body: "{}" },
     ));
 
     expect(response.status).toBe(401);
-    expect(ensureProject).not.toHaveBeenCalled();
+    expect(syncProject).not.toHaveBeenCalled();
   });
 
   it("publishes a project with trusted user and conversation identifiers", async () => {

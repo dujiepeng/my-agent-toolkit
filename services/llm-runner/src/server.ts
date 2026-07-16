@@ -74,7 +74,7 @@ async function handleRuntimeCancellation(
     const botId = requireCancellationText(payload.bot_id, "bot_id", 128);
     const userId = requireCancellationText(payload.user_id, "user_id", 256);
     const conversationId = requireCancellationText(payload.conversation_id, "conversation_id", 128);
-    if (payload.runtime !== "kiro") {
+    if (payload.runtime !== "kiro" && payload.runtime !== "claude-code") {
       return jsonResponse({ cancelled: false });
     }
     if (!config.kiro_relay_cancel_url) {
@@ -273,6 +273,8 @@ async function continueAfterMcpToolCalls(
     return replaceUnavailableMcpCall(runtimeResult);
   }
   let currentResult = runtimeResult;
+  const requiresProjectPublish = isExplicitProjectPublishRequest(chatRequest.prompt);
+  let publishRetryIssued = false;
   for (let round = 0; round < getMaxMcpToolRounds(config); round += 1) {
     const completedOutput = outputAfterMcpToolCall(currentResult.output);
     if (completedOutput) {
@@ -286,6 +288,17 @@ async function continueAfterMcpToolCalls(
           prompt: invalidMcpMarkupFeedback(),
         });
         continue;
+      }
+      if (requiresProjectPublish && !publishRetryIssued) {
+        publishRetryIssued = true;
+        currentResult = await runRuntime(config, {
+          ...chatRequest,
+          prompt: projectPublishRequiredFeedback(),
+        });
+        continue;
+      }
+      if (requiresProjectPublish) {
+        return { ...currentResult, output: projectPublishMissingOutcome() };
       }
       return currentResult;
     }
@@ -301,6 +314,9 @@ async function continueAfterMcpToolCalls(
       ...chatRequest,
       prompt: await resolveMcpToolResult(config, chatRequest, toolRequest),
     });
+  }
+  if (requiresProjectPublish) {
+    return { ...currentResult, output: projectPublishMissingOutcome() };
   }
   const finalResult = await runRuntime(config, {
     ...chatRequest,
@@ -324,6 +340,8 @@ async function continueAfterMcpToolCallsStream(
     return replaceUnavailableMcpCallOutput(await collectRuntimeStream(runtimeResult.stream));
   }
   let currentResult = runtimeResult;
+  const requiresProjectPublish = isExplicitProjectPublishRequest(chatRequest.prompt);
+  let publishRetryIssued = false;
   for (let round = 0; round < getMaxMcpToolRounds(config); round += 1) {
     const output = await collectRuntimeStream(currentResult.stream);
     const completedOutput = outputAfterMcpToolCall(output);
@@ -339,6 +357,17 @@ async function continueAfterMcpToolCallsStream(
         });
         continue;
       }
+      if (requiresProjectPublish && !publishRetryIssued) {
+        publishRetryIssued = true;
+        currentResult = await runRuntimeStreamResolved(config, {
+          ...chatRequest,
+          prompt: projectPublishRequiredFeedback(),
+        });
+        continue;
+      }
+      if (requiresProjectPublish) {
+        return projectPublishMissingOutcome();
+      }
       return output;
     }
     if (toolRequest.status === "call" && toolRequest.call.tool === "project.publish") {
@@ -350,6 +379,9 @@ async function continueAfterMcpToolCallsStream(
       ...chatRequest,
       prompt: await resolveMcpToolResult(config, chatRequest, toolRequest),
     });
+  }
+  if (requiresProjectPublish) {
+    return projectPublishMissingOutcome();
   }
   const finalResult = await runRuntimeStreamResolved(config, {
     ...chatRequest,
@@ -425,6 +457,36 @@ function invalidMcpMarkupFeedback(): string {
   });
 }
 
+function isExplicitProjectPublishRequest(message: string): boolean {
+  const text = lastUserMessage(message).trim();
+  if (!text || /(?:不要|别|暂不|先不|无需|不需要).{0,12}(?:提交|推送|发布|commit|push|publish)/i.test(text)) {
+    return false;
+  }
+  const command = text.replace(/^(?:(?:请帮我|麻烦你|请你|请|帮我|麻烦|现在|直接|可以)\s*)+/, "");
+  if (/(?:怎么|如何|为何|为什么|是否|能否|可否|要不要|会不会|会怎样|吗|么|\?)/i.test(command)) {
+    return false;
+  }
+  return /^(?:(?:把|将).{0,160})?(?:给我\s*)?(?:提交|推送|发布(?:代码|改动|分支|到\s*(?:github|git))|commit|push|publish)/i.test(command);
+}
+
+function lastUserMessage(prompt: string): string {
+  const messages = [...prompt.matchAll(/<user-message>\s*([\s\S]*?)\s*<\/user-message>/gi)];
+  return messages.length > 0 ? messages.at(-1)?.[1] ?? prompt : prompt;
+}
+
+function projectPublishRequiredFeedback(): string {
+  return [
+    "PUBLISH_GATE: the latest user message explicitly authorizes committing and pushing the prepared changes.",
+    "Your previous response did not call project.publish, so no verified commit or Push exists.",
+    "Do not run Git or shell commands. Reply with exactly one project.publish MCP call and no prose.",
+    '<mcp_tool_call>{"tool":"project.publish","input":{"project_key":"...","branch":"bot/meaningful-task-name","commit_message":"..."}}</mcp_tool_call>',
+  ].join("\n");
+}
+
+function projectPublishMissingOutcome(): string {
+  return "提交未执行：机器人没有调用 project.publish，未创建或推送经验证的 Commit。请重试。";
+}
+
 async function resolveMcpToolResult(
   config: RunnerConfig,
   chatRequest: ReturnType<typeof parseChatRequest>,
@@ -465,6 +527,12 @@ async function executeMcpToolCallResult(
     return {
       ok: false,
       error: "mcp is not configured",
+    };
+  }
+  if (toolCall.tool === "project.publish" && !isExplicitProjectPublishRequest(chatRequest.prompt)) {
+    return {
+      ok: false,
+      error: "project.publish requires an explicit user request to submit or Push code",
     };
   }
   try {
@@ -536,52 +604,13 @@ async function enrichChatRequest(
       ...config.mcp,
       ...(config.fetch ? { fetch: config.fetch } : {}),
     }, trustedContext);
-    const projectResult = chatRequest.runtime === "kiro"
-      && manifest.tools.some((tool) => tool.name === "project.ensure")
-      ? await callMcpTool({
-        ...config.mcp,
-        ...(config.fetch ? { fetch: config.fetch } : {}),
-      }, trustedContext, {
-        tool: "project.ensure",
-        input: {},
-      })
-      : undefined;
-    const modelManifest = {
-      ...manifest,
-      tools: manifest.tools.filter((tool) => tool.name !== "project.ensure"),
-    };
-    const prompt = projectResult?.ok
-      ? injectPreparedProjectContext(chatRequest.prompt, projectResult.result)
-      : chatRequest.prompt;
     return {
       ...chatRequest,
-      prompt: injectMcpPromptSection(prompt, modelManifest),
+      prompt: injectMcpPromptSection(chatRequest.prompt, manifest),
     };
   } catch {
     return chatRequest;
   }
-}
-
-function injectPreparedProjectContext(prompt: string, value: unknown): string {
-  if (!value || typeof value !== "object" || Array.isArray(value)) return prompt;
-  const result = value as Record<string, unknown>;
-  const projectKey = typeof result.project_key === "string" ? result.project_key : "";
-  const path = typeof result.path === "string" ? result.path : "";
-  const branch = typeof result.branch === "string" ? result.branch : "";
-  const baseCommit = typeof result.base_commit === "string" ? result.base_commit : "";
-  if (!projectKey || !path || !branch || !/^[0-9a-f]{40}$/i.test(baseCommit)) return prompt;
-  return [
-    "<project_context>",
-    `The runner already prepared the current user's ${projectKey} repository.`,
-    `Project root: ${path}`,
-    `Current branch: ${branch}`,
-    `Current commit: ${baseCommit}`,
-    "Use native CLI file, search, edit, Git status, Python, and test commands only inside this project root.",
-    "Do not call project.ensure, clone another repository, scan parent directories, or infer a host path.",
-    "</project_context>",
-    "",
-    prompt,
-  ].join("\n");
 }
 
 async function runRuntime(
@@ -596,11 +625,12 @@ async function runRuntime(
     return runMockRuntime(chatRequest);
   }
 
-  if (chatRequest.runtime === "kiro" && config.kiro) {
+  const cliConfig = cliRuntimeConfig(config, chatRequest.runtime);
+  if (cliConfig) {
     const runtimeSession = await getPersistedRuntimeSession(config, chatRequest);
     const runtimeResult = await runCliRuntime(
       {
-        ...(await withBotEnv(config, chatRequest)),
+        ...(await withBotEnv(config, chatRequest, cliConfig)),
         ...(runtimeSession?.provider_session_id
           ? { provider_session_id: runtimeSession.provider_session_id }
           : {}),
@@ -631,7 +661,7 @@ function runRuntimeStream(
     return runMockRuntimeStream(chatRequest);
   }
 
-  if (chatRequest.runtime === "kiro" && config.kiro) {
+  if (cliRuntimeConfig(config, chatRequest.runtime)) {
     throw new Error("stream runtime requires env-enriched path");
   }
 
@@ -650,11 +680,12 @@ async function runRuntimeStreamResolved(
     return runMockRuntimeStream(chatRequest);
   }
 
-  if (chatRequest.runtime === "kiro" && config.kiro) {
+  const cliConfig = cliRuntimeConfig(config, chatRequest.runtime);
+  if (cliConfig) {
     const runtimeSession = await getPersistedRuntimeSession(config, chatRequest);
     const runtimeResult = runCliRuntimeStream(
       {
-        ...(await withBotEnv(config, chatRequest)),
+        ...(await withBotEnv(config, chatRequest, cliConfig)),
         ...(runtimeSession?.provider_session_id
           ? { provider_session_id: runtimeSession.provider_session_id }
           : {}),
@@ -670,6 +701,7 @@ async function runRuntimeStreamResolved(
 async function withBotEnv(
   config: RunnerConfig,
   chatRequest: ReturnType<typeof parseChatRequest>,
+  cliConfig: NonNullable<RunnerConfig["kiro"]>,
 ) {
   const botEnv = config.resolveBotEnvVars
     ? await config.resolveBotEnvVars(chatRequest.bot_id)
@@ -679,15 +711,17 @@ async function withBotEnv(
     : await resolveUserCredentialEnv(config, chatRequest.bot_id, chatRequest.user_id);
   const projectEnv = await resolveProjectRuntimeEnv(config, chatRequest.bot_id);
   return {
-    ...config.kiro!,
+    ...cliConfig,
     env: {
-      ...(config.kiro?.env ?? {}),
+      ...(cliConfig.env ?? {}),
       ...botEnv,
       ...userEnv,
       ...projectEnv,
       KIRO_RELAY_BOT_ID: chatRequest.bot_id,
       KIRO_RELAY_USER_ID: chatRequest.user_id,
       KIRO_RELAY_CONVERSATION_ID: chatRequest.conversation_id,
+      KIRO_RELAY_RUNTIME: chatRequest.runtime,
+      MY_AGENT_CLI_PROVIDER: chatRequest.runtime,
     },
   };
 }
@@ -807,7 +841,7 @@ async function persistRuntimeSession(
   if (!config.data_service_url) {
     return;
   }
-  if (chatRequest.runtime === "kiro" && !providerSessionId) {
+  if (chatRequest.runtime !== "mock" && !providerSessionId) {
     throw new RuntimeExecutionError(
       "runtime_session_error",
       502,
@@ -912,7 +946,7 @@ async function acquireRuntimeSessionLock(
   sessionLocks: RuntimeSessionLocks,
   chatRequest: ReturnType<typeof parseChatRequest>,
 ): Promise<() => void> {
-  if (chatRequest.runtime !== "kiro") {
+  if (chatRequest.runtime === "mock") {
     return () => {};
   }
   return sessionLocks.acquire([
@@ -920,6 +954,12 @@ async function acquireRuntimeSessionLock(
     chatRequest.bot_id,
     chatRequest.user_id,
   ].join(":"));
+}
+
+function cliRuntimeConfig(config: RunnerConfig, runtime: ReturnType<typeof parseChatRequest>["runtime"]) {
+  if (runtime === "kiro") return config.kiro;
+  if (runtime === "claude-code") return config.claude_code;
+  return undefined;
 }
 
 async function fetchWithConfig(config: RunnerConfig, request: Request): Promise<Response> {

@@ -1,6 +1,7 @@
 import {
   applyAndConfirmPendingGeneratedDocuments,
   createConversation,
+  syncBotProject,
   getBotRuntimePolicy,
   cancelPendingGeneratedDocuments,
   clearInitializationSession,
@@ -39,6 +40,7 @@ export interface BotHostConfig {
   dataServiceUrl: string;
   llmRunnerUrl: string;
   capabilityRunnerUrl?: string;
+  projectRunnerToken?: string;
   logServiceUrl?: string;
   fetch: typeof fetch;
   /** Per worker state used to suppress the terminal error from a run stopped by /stop. */
@@ -52,7 +54,7 @@ export interface WeComMessageInput {
   wecom_user_id: string;
   conversation_id?: string;
   text: string;
-  runtime: "mock" | "kiro";
+  runtime: "mock" | "kiro" | "claude-code";
 }
 
 export interface StreamBotMessageConfig extends BotHostConfig {
@@ -210,6 +212,32 @@ export async function streamBotMessage(
   config: StreamBotMessageConfig,
   wecomConversationId: string,
 ): Promise<void> {
+  const capabilityCommand = parseCapabilityCommand(input.text);
+  if (capabilityCommand) {
+    const context = await resolveMessageContext(config, input);
+    if (!context.allowed) {
+      await config.wecomClient.sendText(wecomConversationId, `处理失败：${context.reason}。`);
+      return;
+    }
+    if (capabilityCommand.kind === "project_sync") {
+      // Keep the WeCom passive reply stream open while a fresh clone runs.
+      // The completed sync result below will replace this progress message and
+      // close the same stream.
+      await config.wecomClient.sendText(wecomConversationId, "正在同步项目，请稍候…", { finish: false });
+      const result = await handleCapabilityCommand(input, config, context, capabilityCommand);
+      const output = String(result.output ?? "");
+      if (output) {
+        await config.wecomClient.sendText(wecomConversationId, output, { finish: true });
+      }
+      return;
+    }
+    const result = await handleCapabilityCommand(input, config, context, capabilityCommand);
+    const output = String(result.output ?? "");
+    if (output) {
+      await config.wecomClient.sendText(wecomConversationId, output, { finish: true });
+    }
+    return;
+  }
   return streamAllowedWeComMessage(input, config, wecomConversationId);
 }
 
@@ -224,6 +252,10 @@ export async function shouldHandleWizardConfirmationAsync(
 
 export function isCapabilityQuery(text: string): boolean {
   return parseCapabilityCommand(text) !== undefined;
+}
+
+export function isProjectSyncCommand(text: string): boolean {
+  return parseCapabilityCommand(text)?.kind === "project_sync";
 }
 
 export async function shouldStreamReply(
@@ -392,31 +424,70 @@ async function processWeComMessage(
       input,
       config,
       context.conversation.conversation_id,
+      context.project_key,
     );
+}
+
+interface ProjectContext {
+  path?: string;
+  branch?: string;
+  key?: string;
 }
 
 function buildPrompt(
   text: string,
   memoryDocuments: ScopedMemoryDocument[],
+  project?: ProjectContext,
 ): string {
-  if (memoryDocuments.length === 0) {
-    return text;
+  const parts: string[] = [];
+
+  if (project) {
+    if (project.path) {
+      parts.push(...[
+        "<project>",
+        `  <root>${project.path}</root>`,
+        ...(project.branch ? [`  <branch>${project.branch}</branch>`] : []),
+        "</project>",
+        "This checkout is prepared by /sync. Work only inside it. If it is unavailable, ask the user to run /sync; never clone, scan parent directories, or infer a host path.",
+        "",
+      ]);
+    } else if (project.key) {
+      parts.push(...[
+        `<project key="${project.key}" />`,
+        "",
+      ]);
+    }
   }
 
-  return [
-    "<memory>",
-    ...memoryDocuments.flatMap((document) => [
-      document.version === undefined
-        ? `[${document.scope}/${document.owner_id}] ${document.title}`
-        : `[${document.scope}/${document.owner_id} v${document.version}] ${document.title}`,
-      document.content,
-    ]),
-    "</memory>",
-    "",
-    "<user-message>",
-    text,
-    "</user-message>",
-  ].join("\n");
+  if (memoryDocuments.length > 0) {
+    parts.push(...[
+      "<memory>",
+      ...memoryDocuments.flatMap((document) => [
+        document.version === undefined
+          ? `[${document.scope}/${document.owner_id}] ${document.title}`
+          : `[${document.scope}/${document.owner_id} v${document.version}] ${document.title}`,
+        document.content,
+      ]),
+      "</memory>",
+      "",
+    ]);
+  }
+
+  parts.push("<user-message>", text, "</user-message>");
+  return parts.join("\n");
+}
+
+function projectContextFromKey(projectKey?: string): ProjectContext | undefined {
+  const key = projectKey?.trim();
+  if (!key || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(key)) {
+    return undefined;
+  }
+  // The host relay runs from users/<user>/conversations/<conversation>.
+  // `/sync` writes the shared checkout to the sibling projects directory.
+  return {
+    key,
+    path: `../../projects/${key}`,
+  };
 }
 
 export async function startInitializationWizard(
@@ -781,6 +852,7 @@ async function processAllowedWeComMessage(
   input: WeComMessageInput,
   config: BotHostConfig,
   conversationId?: string,
+  projectKey?: string,
 ): Promise<{
   conversation_id: string;
   run_id: string;
@@ -804,7 +876,7 @@ async function processAllowedWeComMessage(
     input,
     resolvedConversationId,
   );
-  const prompt = buildPrompt(input.text, memoryDocuments);
+  const prompt = buildPrompt(input.text, memoryDocuments, projectContextFromKey(projectKey));
 
   const result = await postJson<{
     run_id: string;
@@ -1020,7 +1092,12 @@ async function streamAllowedWeComMessage(
     input,
     resolvedConversationId,
   );
-  const prompt = buildPrompt(input.text, memoryDocuments);
+  const context = await resolveMessageContext(config, input);
+  const prompt = buildPrompt(
+    input.text,
+    memoryDocuments,
+    projectContextFromKey(context.project_key),
+  );
   const response = await config.fetch(
     new Request(`${config.llmRunnerUrl}/v1/chat/stream`, {
       method: "POST",
@@ -1584,6 +1661,7 @@ function parseCapabilityCommand(
   | { kind: "mcps_summary" }
   | { kind: "mcp_install"; name: string }
   | { kind: "mcp_delete"; name: string }
+  | { kind: "project_sync" }
   | { kind: "capability_summary" }
   | { kind: "install_skill"; intent: InstallSkillIntent }
   | undefined {
@@ -1656,6 +1734,9 @@ function parseCapabilityCommand(
       kind: "mcp_delete",
       name: mcpDeleteMatch[1],
     };
+  }
+  if (trimmed === "/sync" || trimmed === "/project sync") {
+    return { kind: "project_sync" };
   }
   if (trimmed === "/capability") {
     return { kind: "capability_summary" };
@@ -1814,6 +1895,9 @@ async function handleCapabilityCommand(
   config: BotHostConfig,
   context: {
     is_admin?: boolean;
+    conversation?: {
+      conversation_id: string;
+    };
   },
   command:
     | { kind: "help" }
@@ -1827,6 +1911,7 @@ async function handleCapabilityCommand(
     | { kind: "mcps_summary" }
     | { kind: "mcp_install"; name: string }
     | { kind: "mcp_delete"; name: string }
+    | { kind: "project_sync" }
     | { kind: "capability_summary" }
     | { kind: "install_skill"; intent: InstallSkillIntent },
 ): Promise<Record<string, unknown>> {
@@ -1914,6 +1999,24 @@ async function handleCapabilityCommand(
     ]);
     return {
       output: buildCapabilitySummary(policy, skills, mcps, logs),
+    };
+  }
+
+  if (command.kind === "project_sync") {
+    const result = await syncBotProject(
+      config,
+      input.bot_id,
+      input.wecom_user_id,
+      context.conversation?.conversation_id ?? "",
+    );
+    if (!result) {
+      return { output: "当前 Bot 未配置项目或 GitHub fork 尚未绑定。请先发送 /github bind 绑定你的 fork。" };
+    }
+    if ("error" in result) {
+      return { output: `项目同步失败：${result.error}。请重新 /github bind。` };
+    }
+    return {
+      output: `项目已同步：\n- 路径：${result.path}\n- 分支：${result.branch}\n- 提交：${result.base_commit.slice(0, 7)}`,
     };
   }
 
@@ -2091,7 +2194,7 @@ async function requestRuntimeCancellation(
     bot_id: string;
     user_id: string;
     conversation_id: string;
-    runtime: "mock" | "kiro";
+    runtime: "mock" | "kiro" | "claude-code";
   },
 ): Promise<boolean> {
   const response = await config.fetch(
@@ -2156,6 +2259,7 @@ function buildHelpTable(): string {
     "| `/github status` | 查看个人 GitHub fork 绑定状态 |",
     "| `/github unbind` | 解除个人 GitHub fork 绑定 |",
     "| `/claim_admin <认领码>` | 认领管理员身份 |",
+    "| `/sync` | 克隆/同步项目代码 |",
     "| `/help` | 显示本帮助 |",
   ].join("\n");
 }
@@ -2918,6 +3022,7 @@ export async function resolveMessageContext(
   conversation?: {
     conversation_id: string;
   };
+  project_key?: string;
 }> {
   return postJson(config, `${config.dataServiceUrl}/v1/message-context/resolve`, {
     bot_id: input.bot_id,

@@ -2292,7 +2292,7 @@ function renderChannelWorkbenchPage(): string {
           <input name="bot_id" type="hidden">
           <div class="row-2">
             <label>名称<input name="name" required placeholder="PRD Bot"></label>
-            <label>LLM<select name="runtime"><option value="kiro">kiro</option><option value="mock">mock</option></select></label>
+            <label>LLM<select name="runtime"><option value="kiro">Kiro CLI</option><option value="claude-code">Claude Code</option><option value="mock">mock</option></select></label>
           </div>
           <label>企业微信Bot ID<input name="wecom_bot_id" required placeholder="企业微信后台的 Bot ID"></label>
           <label>企业微信 Secret<input name="wecom_secret" type="password" autocomplete="new-password" placeholder="新建必填；更新时留空不修改"></label>
@@ -2337,7 +2337,6 @@ function renderChannelWorkbenchPage(): string {
       "memory.search",
       "memory.stats",
       "search.query",
-      "project.ensure",
       "project.publish",
     ];
 
@@ -2670,7 +2669,7 @@ function renderChannelWorkbenchPage(): string {
         '<input name="bot_id" type="hidden">' +
         '<div class="row-2">' +
           '<label>名称<input name="name" required placeholder="PRD Bot"></label>' +
-          '<label>LLM<select name="runtime"><option value="kiro">kiro</option><option value="mock">mock</option></select></label>' +
+          '<label>LLM<select name="runtime"><option value="kiro">Kiro CLI</option><option value="claude-code">Claude Code</option><option value="mock">mock</option></select></label>' +
         '</div>' +
         '<label>企业微信Bot ID<input name="wecom_bot_id" required placeholder="企业微信后台的 Bot ID"></label>' +
         '<label>企业微信 Secret<input name="wecom_secret" type="password" autocomplete="new-password" placeholder="新建必填；更新时留空不修改"></label>' +
@@ -2696,6 +2695,7 @@ function renderChannelWorkbenchPage(): string {
     function renderProjectConfig(bot, projectEnv) {
       const values = splitProjectEnvContent(projectEnv.content);
       return '<div class="form-grid">' +
+        '<form id="projectForm" class="form-grid" style="display:none"></form>' +
         '<div class="test-env-summary"><div><strong>用户仓库</strong><div class="subtle">由用户在企业微信发送 <code>/github bind</code> 绑定个人 Fork。</div></div><span class="badge ok">按用户隔离</span></div>' +
         '<fieldset class="field-group test-env-card"><legend>本机测试环境</legend>' +
           '<div class="subtle">仅保存执行测试所需配置。保存后可直接查看和编辑，不会提交到用户仓库。</div>' +
@@ -2865,7 +2865,7 @@ function renderChannelWorkbenchPage(): string {
       if (button.dataset.action !== "delete-project-env" || !state.selectedChannelId) return;
       const detail = state.details.get(state.selectedChannelId);
       const botId = detail?.bot?.bot_id;
-      if (!botId || !confirm("确认删除该 Bot 的项目 .env 文件配置？现有会话仓库会在下次 project.ensure 时清理。")) return;
+      if (!botId || !confirm("确认删除该 Bot 的项目 .env 文件配置？现有会话仓库会在下次自动准备项目时清理。")) return;
       try {
         await requestJson("/v1/bots/" + encodeURIComponent(botId) + "/project-env", {
           method: "DELETE",

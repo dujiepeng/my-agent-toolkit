@@ -5857,7 +5857,7 @@ describe("bot-host server", () => {
     expect(calls).not.toContain("http://llm-runner/v1/chat/stream");
   });
 
-  it("streams llm chunks to real wecom messages", async () => {
+  it("streams the /sync project context with llm chunks to real wecom messages", async () => {
     const sent: Array<{ conversationId: string; text: string; finish: boolean }> = [];
     let messageHandler:
       | ((message: {
@@ -5888,6 +5888,7 @@ describe("bot-host server", () => {
             conversation: {
               conversation_id: "conv-1",
             },
+            project_key: "im-test-hub",
           });
         }
 
@@ -5910,6 +5911,9 @@ describe("bot-host server", () => {
             user_id: "user-a",
             conversation_id: "conv-1",
             runtime: "kiro",
+          });
+          expect(body).toMatchObject({
+            prompt: expect.stringContaining("<root>../../projects/im-test-hub</root>"),
           });
           return new Response([
             JSON.stringify({ type: "run", run_id: "run-1", runner_session_id: "kiro:prd-bot:user-a:conv-1" }),
@@ -6026,6 +6030,68 @@ describe("bot-host server", () => {
       {
         conversationId: "conversation-a",
         text: expect.stringContaining("当前 bot 已安装的 Skills"),
+        finish: true,
+      },
+    ]);
+  });
+
+  it("keeps the WeCom reply stream open while /sync clones the project", async () => {
+    const sent: Array<{ conversationId: string; text: string; finish: boolean }> = [];
+    let messageHandler:
+      | ((message: { conversationId: string; userId: string; text: string }) => Promise<void>)
+      | undefined;
+    const worker = createBotHostWorker({
+      botId: "prd-bot",
+      runtime: "kiro",
+      dataServiceUrl: "http://data-service",
+      llmRunnerUrl: "http://llm-runner",
+      capabilityRunnerUrl: "http://capability-runner",
+      fetch: async (request) => {
+        if (!(request instanceof Request)) {
+          throw new Error("expected Request");
+        }
+        if (request.url === "http://data-service/v1/message-context/resolve") {
+          return Response.json({
+            allowed: true,
+            reason: "ready",
+            conversation: { conversation_id: "conv-1" },
+          });
+        }
+        if (request.url === "http://capability-runner/internal/bots/prd-bot/projects/sync") {
+          return Response.json({
+            project_key: "im-test-hub",
+            path: "projects/im-test-hub",
+            branch: "dev",
+            base_commit: "1234567890abcdef",
+            reused: false,
+          });
+        }
+        return Response.json({ error: "unexpected", url: request.url }, { status: 500 });
+      },
+      wecomClient: {
+        async connect() {},
+        disconnect() {},
+        onMessage(handler) {
+          messageHandler = handler;
+        },
+        async sendText(conversationId, text, options) {
+          sent.push({ conversationId, text, finish: options?.finish ?? true });
+        },
+      },
+    });
+
+    await worker.start();
+    await messageHandler?.({
+      conversationId: "conversation-a",
+      userId: "user-a",
+      text: "/sync",
+    });
+
+    expect(sent).toEqual([
+      { conversationId: "conversation-a", text: "正在同步项目，请稍候…", finish: false },
+      {
+        conversationId: "conversation-a",
+        text: expect.stringContaining("项目已同步"),
         finish: true,
       },
     ]);
