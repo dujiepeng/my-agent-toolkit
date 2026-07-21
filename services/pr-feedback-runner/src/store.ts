@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
 
@@ -14,6 +15,8 @@ export interface ProjectSession {
   head_sha: string;
   repository_id?: string;
   pr_number?: number;
+  lease_id?: string;
+  lease_expires_at?: string;
   updated_at: string;
 }
 
@@ -35,8 +38,12 @@ export interface ProjectSessionStore {
   upsert(session: ProjectSession): Promise<ProjectSession>;
   bind(projectId: string, repositoryId: string, prNumber: number, now: string): Promise<ProjectSession | undefined>;
   find(repositoryId: string, prNumber: number): Promise<ProjectSession | undefined>;
+  findByKey(flowId: string, repository: string, jiraKey: string): Promise<ProjectSession | undefined>;
+  acquire(projectId: string, owner: string, leaseSeconds: number, now: Date): Promise<{ session?: ProjectSession; lease_id?: string }>;
+  release(projectId: string, leaseId: string): Promise<void>;
   record(event: FeedbackEvent): Promise<{ duplicate: boolean; event: FeedbackEvent }>;
   next(): Promise<FeedbackEvent | undefined>;
+  defer(deliveryId: string): Promise<void>;
   complete(deliveryId: string, status: "succeeded" | "failed", error?: string): Promise<void>;
 }
 
@@ -83,6 +90,21 @@ export function createJsonFileProjectSessionStore(filePath: string): ProjectSess
       await load();
       return state.sessions.find((item) => item.repository_id === repositoryId && item.pr_number === prNumber);
     },
+    findByKey: async (flowId, repository, jiraKey) => {
+      await load();
+      return state.sessions.find((item) => item.flow_id === flowId && item.repository === repository && item.jira_key === jiraKey);
+    },
+    acquire: (projectId, owner, leaseSeconds, now) => mutate(() => {
+      const session = state.sessions.find((item) => item.project_id === projectId);
+      if (!session || (session.lease_id && Date.parse(session.lease_expires_at ?? "") > now.getTime())) return {};
+      const leaseId = `${owner}:${randomUUID()}`;
+      Object.assign(session, { lease_id: leaseId, lease_expires_at: new Date(now.getTime() + leaseSeconds * 1_000).toISOString() });
+      return { session, lease_id: leaseId };
+    }),
+    release: (projectId, leaseId) => mutate(() => {
+      const session = state.sessions.find((item) => item.project_id === projectId);
+      if (session?.lease_id === leaseId) Object.assign(session, { lease_id: undefined, lease_expires_at: undefined });
+    }),
     record: (event) => mutate(() => {
       const existing = state.events.find((item) => item.delivery_id === event.delivery_id);
       if (existing) return { duplicate: true, event: existing };
@@ -93,6 +115,10 @@ export function createJsonFileProjectSessionStore(filePath: string): ProjectSess
       const event = state.events.find((item) => item.status === "pending");
       if (event) event.status = "running";
       return event;
+    }),
+    defer: (deliveryId) => mutate(() => {
+      const event = state.events.find((item) => item.delivery_id === deliveryId);
+      if (event?.status === "running") event.status = "pending";
     }),
     complete: (deliveryId, status, error) => mutate(() => {
       const event = state.events.find((item) => item.delivery_id === deliveryId);

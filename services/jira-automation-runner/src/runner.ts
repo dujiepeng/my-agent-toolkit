@@ -78,14 +78,17 @@ async function withSavedSettings(config: JiraAutomationRunnerConfig): Promise<Ji
 async function execute(config: JiraAutomationRunnerConfig, event: AutomationEvent, fetchImpl: typeof fetch): Promise<void> {
   let failure: string | undefined;
   let cliDispatcher: Agent | undefined;
+  let projectLease: { projectId: string; leaseId: string } | undefined;
   try {
     if (!config.repositoryUrl) throw new Error("JIRA_AUTOMATION_REPOSITORY_URL is not configured");
     if (!event.lease_id) throw new Error("event lease is missing");
     const workspace = await prepareWorkspace(config, event);
+    const existingSession = config.prFeedbackUrl ? await findProjectSession(config, event, fetchImpl) : undefined;
+    if (existingSession) projectLease = await acquireProjectLease(config, existingSession.project_id, event.event_id, fetchImpl);
     const prompt = buildPrompt(event, config.autoExecute === true);
     const endpoint = `${config.llmRunnerUrl}/v1/system-runs`;
     const headers = { "content-type": "application/json", authorization: `Bearer ${config.internalToken}`, "x-trace-id": event.event_id };
-    const body = JSON.stringify({ flow_id: config.flowId, run_id: workspace.runId, workspace_id: workspace.projectId, runtime: config.runtime, prompt, trace_id: event.event_id, runtime_env: parseRuntimeEnv(config.runtimeEnv), auto_execute: config.autoExecute === true });
+    const body = JSON.stringify({ flow_id: config.flowId, run_id: workspace.runId, workspace_id: workspace.projectId, runtime: config.runtime, prompt, trace_id: event.event_id, runtime_env: parseRuntimeEnv(config.runtimeEnv), auto_execute: config.autoExecute === true, ...(existingSession?.provider_session_id ? { provider_session_id: existingSession.provider_session_id } : {}) });
     const signal = AbortSignal.timeout(config.executionTimeoutMs);
     const request = new Request(endpoint, {
       method: "POST", headers, body, signal,
@@ -107,7 +110,10 @@ async function execute(config: JiraAutomationRunnerConfig, event: AutomationEven
     if (config.autoPublish) await publishJiraProject(config, workspace.repository, event.issue_key);
     if (config.prFeedbackUrl) await registerProjectSession(config, workspace, event, result, fetchImpl);
   } catch (error) { failure = describeError(error); }
-  finally { await cliDispatcher?.close().catch(() => {}); }
+  finally {
+    await cliDispatcher?.close().catch(() => {});
+    if (projectLease) await releaseProjectLease(config, projectLease, fetchImpl).catch(() => {});
+  }
   const completed = await fetchImpl(new Request(`${config.ingressUrl}/internal/events/${encodeURIComponent(event.event_id)}/complete`, {
     method: "POST", headers: internalHeaders(config), body: JSON.stringify({ lease_id: event.lease_id, status: failure ? "failed" : "succeeded", ...(failure ? { error: failure } : {}) }),
   }));
@@ -166,6 +172,37 @@ async function registerProjectSession(
     }),
   }));
   if (!response.ok) throw new Error(`project session registration failed (${response.status})`);
+}
+
+interface ExistingProjectSession { project_id: string; provider_session_id?: string; }
+
+async function findProjectSession(config: JiraAutomationRunnerConfig, event: AutomationEvent, fetchImpl: typeof fetch): Promise<ExistingProjectSession | undefined> {
+  const endpoint = new URL(`${config.prFeedbackUrl}/internal/project-sessions`);
+  endpoint.searchParams.set("flow_id", config.flowId);
+  endpoint.searchParams.set("repository", config.repositoryUrl!);
+  endpoint.searchParams.set("jira_key", event.issue_key);
+  const response = await fetchImpl(new Request(endpoint, { headers: internalHeaders(config) }));
+  if (response.status === 404) return undefined;
+  if (!response.ok) throw new Error(`project session lookup failed (${response.status})`);
+  const body = await response.json() as { session?: ExistingProjectSession };
+  if (!body.session?.project_id) throw new Error("project session lookup returned invalid data");
+  return body.session;
+}
+
+async function acquireProjectLease(config: JiraAutomationRunnerConfig, projectId: string, owner: string, fetchImpl: typeof fetch): Promise<{ projectId: string; leaseId: string }> {
+  const response = await fetchImpl(new Request(`${config.prFeedbackUrl}/internal/project-sessions/${encodeURIComponent(projectId)}/lease`, {
+    method: "POST", headers: internalHeaders(config), body: JSON.stringify({ owner: `jira:${owner}`, lease_seconds: config.leaseSeconds }),
+  }));
+  if (!response.ok) throw new Error(response.status === 409 ? "project session is busy" : `project session lease failed (${response.status})`);
+  const body = await response.json() as { lease_id?: unknown };
+  if (typeof body.lease_id !== "string" || !body.lease_id) throw new Error("project session lease is invalid");
+  return { projectId, leaseId: body.lease_id };
+}
+
+async function releaseProjectLease(config: JiraAutomationRunnerConfig, lease: { projectId: string; leaseId: string }, fetchImpl: typeof fetch): Promise<void> {
+  await fetchImpl(new Request(`${config.prFeedbackUrl}/internal/project-sessions/${encodeURIComponent(lease.projectId)}/release`, {
+    method: "POST", headers: internalHeaders(config), body: JSON.stringify({ lease_id: lease.leaseId }),
+  }));
 }
 
 async function materializeRuntimeEnv(repository: string, runtimeEnv?: string): Promise<void> {

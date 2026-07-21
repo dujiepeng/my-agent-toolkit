@@ -36,7 +36,14 @@ export function createPrFeedbackRunner(config: PrFeedbackRunnerConfig) {
       try {
         const session = await config.store.find(event.repository_id, event.pr_number);
         if (!session) throw new Error("project session is no longer bound to this PR");
-        await resumeProject(config, session, event, fetchImpl);
+        const lease = await config.store.acquire(session.project_id, `github:${event.delivery_id}`, 1200, now());
+        if (!lease.lease_id) {
+          await config.store.defer(event.delivery_id);
+          setTimeout(() => { void processNext(); }, 1_000).unref?.();
+          return;
+        }
+        try { await resumeProject(config, session, event, fetchImpl); }
+        finally { await config.store.release(session.project_id, lease.lease_id); }
         await config.store.complete(event.delivery_id, "succeeded");
       } catch (error) {
         await config.store.complete(event.delivery_id, "failed", describeError(error));
@@ -55,6 +62,15 @@ export function createPrFeedbackRunner(config: PrFeedbackRunnerConfig) {
         const session = parseProjectSession(input, config.workspaceRoot, now().toISOString());
         return Response.json({ session: await config.store.upsert(session) }, { status: 201 });
       }
+      if (request.method === "GET" && url.pathname === "/internal/project-sessions") {
+        if (!hasInternalToken(request, config.internalToken)) return Response.json({ error: "unauthorized" }, { status: 401 });
+        const session = await config.store.findByKey(
+          readProjectId(url.searchParams.get("flow_id")),
+          readText(url.searchParams.get("repository"), "repository"),
+          readProjectId(url.searchParams.get("jira_key")),
+        );
+        return session ? Response.json({ session }) : Response.json({ error: "project session not found" }, { status: 404 });
+      }
       const bind = url.pathname.match(/^\/internal\/project-sessions\/([^/]+)\/bind-pr$/);
       if (request.method === "POST" && bind) {
         if (!hasInternalToken(request, config.internalToken)) return Response.json({ error: "unauthorized" }, { status: 401 });
@@ -63,6 +79,22 @@ export function createPrFeedbackRunner(config: PrFeedbackRunnerConfig) {
         const prNumber = readPrNumber(body?.pr_number);
         const session = await config.store.bind(decodeURIComponent(bind[1]), repositoryId, prNumber, now().toISOString());
         return session ? Response.json({ session }) : Response.json({ error: "project session not found" }, { status: 404 });
+      }
+      const lease = url.pathname.match(/^\/internal\/project-sessions\/([^/]+)\/lease$/);
+      if (request.method === "POST" && lease) {
+        if (!hasInternalToken(request, config.internalToken)) return Response.json({ error: "unauthorized" }, { status: 401 });
+        const body = await request.json().catch(() => undefined) as Record<string, unknown> | undefined;
+        const leaseSeconds = Number(body?.lease_seconds);
+        if (!Number.isInteger(leaseSeconds) || leaseSeconds < 30 || leaseSeconds > 3600) return Response.json({ error: "lease_seconds is invalid" }, { status: 400 });
+        const acquired = await config.store.acquire(decodeURIComponent(lease[1]), readId(body?.owner, "owner"), leaseSeconds, now());
+        return acquired.lease_id ? Response.json(acquired) : Response.json({ error: "project session is busy" }, { status: 409 });
+      }
+      const release = url.pathname.match(/^\/internal\/project-sessions\/([^/]+)\/release$/);
+      if (request.method === "POST" && release) {
+        if (!hasInternalToken(request, config.internalToken)) return Response.json({ error: "unauthorized" }, { status: 401 });
+        const body = await request.json().catch(() => undefined) as Record<string, unknown> | undefined;
+        await config.store.release(decodeURIComponent(release[1]), readText(body?.lease_id, "lease_id"));
+        return Response.json({ released: true });
       }
       if (request.method !== "POST" || url.pathname !== "/webhooks/github") return Response.json({ error: "not found" }, { status: 404 });
       const raw = await request.text();
