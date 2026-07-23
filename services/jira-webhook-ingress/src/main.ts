@@ -1,14 +1,11 @@
 import { createServer } from "node:http";
-import { createJsonFileJiraWebhookEventStore } from "./eventStore.js";
 import { createJiraWebhookIngressServer } from "./server.js";
 
 const port = positiveInteger(process.env.PORT, 9000);
 const app = createJiraWebhookIngressServer({
-  eventStore: createJsonFileJiraWebhookEventStore(
-    process.env.JIRA_WEBHOOK_EVENT_STORE_FILE ?? "/data/jira-events.json",
-  ),
+  runnerUrl: (process.env.JIRA_AUTOMATION_RUNNER_URL ?? "http://jira-automation-runner:8910").replace(/\/+$/, ""),
   sharedSecret: process.env.JIRA_WEBHOOK_SHARED_SECRET,
-  internalToken: process.env.JIRA_AUTOMATION_INTERNAL_TOKEN,
+  internalToken: process.env.JIRA_AUTOMATION_INTERNAL_TOKEN ?? "",
 });
 
 const server = createServer(async (req, res) => {

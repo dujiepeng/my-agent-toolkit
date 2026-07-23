@@ -38,12 +38,33 @@ describe("control-api server", () => {
     expect(html).toContain("Jira 自动化测试");
     expect(html).toContain("运行环境（.env）");
     expect(html).toContain("GITHUB_TOKEN");
+    expect(html).toContain("GITHUB_WEBHOOK_SECRET");
+    expect(html).toContain("/automation/jira/settings/github-webhook");
+    expect(html).toContain("注册/更新 GitHub Webhook");
     expect(html).toContain("准入通过后自动创建并执行自动化项目");
     expect(html).toContain("完成后提交并 Push 当前 Jira 项目");
+    expect(html).toContain("测试项目需要的变量");
+    expect(html).toContain("NGI_BASE_URL");
+    expect(html).toContain("自动映射");
     expect(html).toContain("jira-flow-skill-files");
     expect(html).toContain("/automation/jira/settings/skills/upload");
     expect(html).toContain("overflow-x:hidden");
     expect(html).toContain("@media(max-width:640px)");
+  });
+
+  it("renders the Jira automation task center without exposing internal services", async () => {
+    const server = createControlApiServer({
+      dataServiceUrl: "http://data-service",
+      logServiceUrl: "http://log-service",
+      fetch: async () => new Response("not used", { status: 500 }),
+    });
+    const response = await server.fetch(new Request("http://localhost/automation/jira"));
+    const html = await response.text();
+    expect(response.status).toBe(200);
+    expect(html).toContain("Jira 自动化任务");
+    expect(html).toContain("当前没有正在执行的 Jira 自动化任务");
+    expect(html).toContain("Flow 设置");
+    expect(html).not.toContain("Host Relay");
   });
 
   it("serves the setup page", async () => {

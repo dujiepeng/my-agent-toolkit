@@ -1,13 +1,13 @@
 import { createHash, timingSafeEqual } from "node:crypto";
-import type { JiraWebhookEventStore } from "./eventStore.js";
 
 const MAX_PAYLOAD_BYTES = 1024 * 1024;
 
 export interface JiraWebhookIngressConfig {
-  eventStore: JiraWebhookEventStore;
+  runnerUrl: string;
+  internalToken: string;
   sharedSecret?: string;
-  internalToken?: string;
   now?: () => Date;
+  fetch?: typeof fetch;
 }
 
 export interface JiraWebhookIngressServer {
@@ -17,32 +17,12 @@ export interface JiraWebhookIngressServer {
 export function createJiraWebhookIngressServer(config: JiraWebhookIngressConfig): JiraWebhookIngressServer {
   const sharedSecret = config.sharedSecret?.trim();
   const now = config.now ?? (() => new Date());
+  const fetchImpl = config.fetch ?? fetch;
   return {
     async fetch(request): Promise<Response> {
       const url = new URL(request.url);
       if (request.method === "GET" && url.pathname === "/health") {
         return Response.json({ service: "jira-webhook-ingress", status: "ok" });
-      }
-      if (request.method === "POST" && url.pathname === "/internal/events/lease") {
-        if (!hasValidInternalToken(request, config.internalToken)) return Response.json({ error: "unauthorized" }, { status: 401 });
-        const body = await request.json().catch(() => undefined) as { worker_id?: unknown; lease_seconds?: unknown } | undefined;
-        const workerId = typeof body?.worker_id === "string" ? body.worker_id.trim() : "";
-        const leaseSeconds = typeof body?.lease_seconds === "number" ? body.lease_seconds : 0;
-        if (!/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(workerId) || !Number.isInteger(leaseSeconds) || leaseSeconds < 30 || leaseSeconds > 3600) {
-          return Response.json({ error: "invalid lease request" }, { status: 400 });
-        }
-        const event = await config.eventStore.lease(workerId, leaseSeconds, now());
-        return event ? Response.json({ event }) : new Response(null, { status: 204 });
-      }
-      const completeMatch = url.pathname.match(/^\/internal\/events\/([^/]+)\/complete$/);
-      if (request.method === "POST" && completeMatch) {
-        if (!hasValidInternalToken(request, config.internalToken)) return Response.json({ error: "unauthorized" }, { status: 401 });
-        const body = await request.json().catch(() => undefined) as { lease_id?: unknown; status?: unknown; error?: unknown } | undefined;
-        const leaseId = typeof body?.lease_id === "string" ? body.lease_id : "";
-        const status = body?.status === "succeeded" || body?.status === "failed" ? body.status : undefined;
-        if (!leaseId || !status) return Response.json({ error: "invalid completion request" }, { status: 400 });
-        const event = await config.eventStore.complete(decodeURIComponent(completeMatch[1]), leaseId, status, now(), typeof body?.error === "string" ? body.error.slice(0, 4000) : undefined);
-        return event ? Response.json({ event }) : Response.json({ error: "lease not found" }, { status: 409 });
       }
       if (request.method !== "POST" || url.pathname !== "/webhooks/jira") {
         return Response.json({ error: "not found" }, { status: 404 });
@@ -68,20 +48,33 @@ export function createJiraWebhookIngressServer(config: JiraWebhookIngressConfig)
       const sourceEventId = request.headers.get("x-jira-webhook-id")
         ?? findText(payload, ["webhook_id", "event_id", "id"]);
       const eventId = sourceEventId?.trim() || createEventId(issueKey, eventType, payload, rawBody);
-      const recorded = await config.eventStore.record({
+      const event = {
         event_id: eventId,
         issue_key: issueKey,
         event_type: eventType,
         received_at: now().toISOString(),
         payload,
-      });
+      };
+      let response: Response;
+      try {
+        response = await fetchImpl(new Request(`${config.runnerUrl.replace(/\/+$/, "")}/internal/events`, {
+          method: "POST",
+          headers: { "content-type": "application/json", authorization: `Bearer ${config.internalToken}` },
+          body: JSON.stringify(event),
+          signal: AbortSignal.timeout(10_000),
+        }));
+      } catch {
+        return Response.json({ error: "automation runner is unavailable" }, { status: 503 });
+      }
+      if (!response.ok) return Response.json({ error: "automation runner rejected the event" }, { status: 502 });
+      const result = await response.json().catch(() => ({})) as { accepted?: unknown; reason?: unknown };
+      const accepted = result.accepted === true;
       return Response.json({
-        accepted: !recorded.duplicate,
-        duplicate: recorded.duplicate,
-        event_id: recorded.event.event_id,
-        issue_key: recorded.event.issue_key,
-        status: "pending_route",
-      }, { status: recorded.duplicate ? 200 : 202 });
+        accepted,
+        event_id: event.event_id,
+        issue_key: event.issue_key,
+        status: accepted ? "started" : result.reason === "busy" ? "dropped_busy" : "disabled",
+      }, { status: 202 });
     },
   };
 }
@@ -135,13 +128,6 @@ function createEventId(
     ?? findNestedText(payload, ["issue", "fields", "updated"])
     ?? createHash("sha256").update(rawBody, "utf8").digest("hex");
   return `jira:${issueKey}:${eventType}:${updated}`;
-}
-
-function hasValidInternalToken(request: Request, expected: string | undefined): boolean {
-  const token = expected?.trim();
-  if (!token) return false;
-  const provided = request.headers.get("authorization")?.replace(/^Bearer\s+/i, "");
-  return Boolean(provided) && provided === token;
 }
 
 function findNestedText(payload: Record<string, unknown>, path: string[]): string | undefined {

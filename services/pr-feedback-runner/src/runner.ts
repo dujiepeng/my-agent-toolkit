@@ -1,5 +1,6 @@
 import { createHmac, timingSafeEqual } from "node:crypto";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { execFile } from "node:child_process";
+import { mkdir, readFile, readdir, writeFile } from "node:fs/promises";
 import { resolve, relative, join } from "node:path";
 import { Agent, fetch as undiciFetch } from "undici";
 import type { FeedbackEvent, ProjectSession, ProjectSessionStore } from "./store.js";
@@ -8,6 +9,7 @@ const maxPayloadBytes = 1024 * 1024;
 const idPattern = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/;
 const projectPattern = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
 const sessionPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const agentFeedbackMarker = "<!-- agentlattice:feedback -->";
 
 export interface PrFeedbackRunnerConfig {
   store: ProjectSessionStore;
@@ -25,37 +27,21 @@ export interface PrFeedbackRunnerConfig {
 export function createPrFeedbackRunner(config: PrFeedbackRunnerConfig) {
   const now = config.now ?? (() => new Date());
   const fetchImpl = config.fetch ?? fetch;
-  let active = false;
+  const activeProjectIds = new Set<string>();
 
-  const processNext = async (): Promise<void> => {
-    if (active) return;
-    active = true;
+  const dispatch = async (event: FeedbackEvent, session: ProjectSession): Promise<boolean> => {
+    if (activeProjectIds.has(session.project_id)) return false;
+    activeProjectIds.add(session.project_id);
     try {
-      const event = await config.store.next();
-      if (!event) return;
-      try {
-        const session = await config.store.find(event.repository_id, event.pr_number);
-        if (!session) throw new Error("project session is no longer bound to this PR");
-        const lease = await config.store.acquire(session.project_id, `github:${event.delivery_id}`, 1200, now());
-        if (!lease.lease_id) {
-          await config.store.defer(event.delivery_id);
-          setTimeout(() => { void processNext(); }, 1_000).unref?.();
-          return;
-        }
-        try { await resumeProject(config, session, event, fetchImpl); }
-        finally { await config.store.release(session.project_id, lease.lease_id); }
-        await config.store.complete(event.delivery_id, "succeeded");
-      } catch (error) {
-        await config.store.complete(event.delivery_id, "failed", describeError(error));
-        throw error;
-      }
-    } catch (error) { config.onError?.(error); } finally { active = false; }
+      await resumeProject(config, session, event, fetchImpl);
+    } catch (error) { config.onError?.(error); } finally { activeProjectIds.delete(session.project_id); }
+    return true;
   };
 
   return {
     async fetch(request: Request): Promise<Response> {
       const url = new URL(request.url);
-      if (request.method === "GET" && url.pathname === "/health") return Response.json({ service: "pr-feedback-runner", status: "ok", active });
+      if (request.method === "GET" && url.pathname === "/health") return Response.json({ service: "pr-feedback-runner", status: "ok", active: activeProjectIds.size > 0, active_project_count: activeProjectIds.size });
       if (request.method === "POST" && url.pathname === "/internal/project-sessions") {
         if (!hasInternalToken(request, config.internalToken)) return Response.json({ error: "unauthorized" }, { status: 401 });
         const input = await request.json().catch(() => undefined);
@@ -80,44 +66,46 @@ export function createPrFeedbackRunner(config: PrFeedbackRunnerConfig) {
         const session = await config.store.bind(decodeURIComponent(bind[1]), repositoryId, prNumber, now().toISOString());
         return session ? Response.json({ session }) : Response.json({ error: "project session not found" }, { status: 404 });
       }
-      const lease = url.pathname.match(/^\/internal\/project-sessions\/([^/]+)\/lease$/);
-      if (request.method === "POST" && lease) {
+      const bindIssue = url.pathname.match(/^\/internal\/project-sessions\/([^/]+)\/bind-issue$/);
+      if (request.method === "POST" && bindIssue) {
         if (!hasInternalToken(request, config.internalToken)) return Response.json({ error: "unauthorized" }, { status: 401 });
         const body = await request.json().catch(() => undefined) as Record<string, unknown> | undefined;
-        const leaseSeconds = Number(body?.lease_seconds);
-        if (!Number.isInteger(leaseSeconds) || leaseSeconds < 30 || leaseSeconds > 3600) return Response.json({ error: "lease_seconds is invalid" }, { status: 400 });
-        const acquired = await config.store.acquire(decodeURIComponent(lease[1]), readId(body?.owner, "owner"), leaseSeconds, now());
-        return acquired.lease_id ? Response.json(acquired) : Response.json({ error: "project session is busy" }, { status: 409 });
-      }
-      const release = url.pathname.match(/^\/internal\/project-sessions\/([^/]+)\/release$/);
-      if (request.method === "POST" && release) {
-        if (!hasInternalToken(request, config.internalToken)) return Response.json({ error: "unauthorized" }, { status: 401 });
-        const body = await request.json().catch(() => undefined) as Record<string, unknown> | undefined;
-        await config.store.release(decodeURIComponent(release[1]), readText(body?.lease_id, "lease_id"));
-        return Response.json({ released: true });
+        const repositoryId = readId(body?.repository_id, "repository_id");
+        const issueNumber = readPrNumber(body?.issue_number);
+        const session = await config.store.bindIssue(decodeURIComponent(bindIssue[1]), repositoryId, issueNumber, now().toISOString());
+        return session ? Response.json({ session }) : Response.json({ error: "project session not found" }, { status: 404 });
       }
       if (request.method !== "POST" || url.pathname !== "/webhooks/github") return Response.json({ error: "not found" }, { status: 404 });
       const raw = await request.text();
       if (Buffer.byteLength(raw, "utf8") > maxPayloadBytes) return Response.json({ error: "payload is too large" }, { status: 413 });
-      if (!hasValidGithubSignature(raw, request.headers.get("x-hub-signature-256"), config.webhookSecret)) return Response.json({ error: "unauthorized" }, { status: 401 });
+      const webhookSecret = await loadWebhookSecret(config.settingsFile, config.webhookSecret);
+      if (!hasValidGithubSignature(raw, request.headers.get("x-hub-signature-256"), webhookSecret)) return Response.json({ error: "unauthorized" }, { status: 401 });
       if (request.headers.get("x-github-event") !== "issue_comment") return Response.json({ accepted: false, ignored: "event is not issue_comment" }, { status: 202 });
       const parsed = parseGithubComment(raw, request.headers.get("x-github-delivery"), now().toISOString());
-      if (!parsed) return Response.json({ accepted: false, ignored: "not a human PR comment" }, { status: 202 });
-      if (!await config.store.find(parsed.repository_id, parsed.pr_number)) {
-        return Response.json({ accepted: false, ignored: "PR is not bound to a project session" }, { status: 202 });
+      if (!parsed) return Response.json({ accepted: false, ignored: "not a human GitHub comment" }, { status: 202 });
+      const session = parsed.target_type === "pull_request"
+        ? await config.store.find(parsed.repository_id, parsed.target_number)
+        : await config.store.findIssue(parsed.repository_id, parsed.target_number);
+      if (!session) {
+        return Response.json({ accepted: false, ignored: `${parsed.target_type} is not bound to a project session` }, { status: 202 });
       }
-      const recorded = await config.store.record(parsed);
-      if (!recorded.duplicate) void processNext();
-      return Response.json({ accepted: !recorded.duplicate, duplicate: recorded.duplicate, delivery_id: parsed.delivery_id, status: recorded.event.status }, { status: recorded.duplicate ? 200 : 202 });
+      if (activeProjectIds.has(session.project_id)) return Response.json({ accepted: false, delivery_id: parsed.delivery_id, status: "dropped_busy" }, { status: 202 });
+      void dispatch(parsed, session);
+      return Response.json({ accepted: true, delivery_id: parsed.delivery_id, status: "started" }, { status: 202 });
     },
-    processNext,
-    status: () => ({ active }),
+    dispatch,
+    status: () => ({ active: activeProjectIds.size > 0, active_project_count: activeProjectIds.size }),
   };
 }
 
 async function resumeProject(config: PrFeedbackRunnerConfig, session: ProjectSession, event: FeedbackEvent, fetchImpl: typeof fetch): Promise<void> {
-  const runId = `pr-${session.project_id}-${event.comment_id}`.replace(/[^A-Za-z0-9._-]/g, "-").slice(0, 128);
-  const prompt = `你正在恢复 Project Agent Session，不是普通 Bot，也不与用户聊天。\n\n项目：${session.project_id}\nJira：${session.jira_key}\nPR：#${event.pr_number}\n分支：${session.branch}\n\n当前 GitHub PR 评论：\n${event.comment_body}\n\n规则：\n1. 这是同一持久工作目录和同一 CLI 对话的后续回合；先阅读当前 repository/ 代码与已有报告。\n2. 仅处理该评论明确要求的事项；若范围不明确，写出澄清问题到 feedback/ 报告，禁止猜测。\n3. 本地验证阶段允许修改 repository/${session.jira_key}/ 并执行测试，但不得 push、创建 PR 或调用 GitHub API。\n4. 将本轮结论写入 feedback/${event.comment_id}.md，包含评论、修改、测试结果及待办。`;
+  const targetLabel = event.target_type === "pull_request" ? `PR #${event.target_number}` : `Issue #${event.target_number}`;
+  const runKind = event.target_type === "pull_request" ? "pr" : "issue";
+  const runId = `${runKind}-${session.project_id}-${event.comment_id}`.replace(/[^A-Za-z0-9._-]/g, "-").slice(0, 128);
+  const issuePromotionRule = event.target_type === "issue"
+    ? `\n5. 此 Issue 是 Jira 测试准入阻塞项。必须基于本次补充重新输出测试准入结论；若为“测试准入：通过”，必须继续使用 easemob-qa-automation-project 创建/完善 repository/${session.jira_key}/ 自动化项目、执行真实测试并写入 reports/，不得只给用例草稿或停在分析。若仍不通过，明确最小缺失项与风险。`
+    : "";
+  const prompt = `你正在恢复 Project Agent Session，不是普通 Bot，也不与用户聊天。\n\n项目：${session.project_id}\nJira：${session.jira_key}\nGitHub ${targetLabel}\n分支：${session.branch}\n\n当前 GitHub ${targetLabel} 评论：\n${event.comment_body}\n\n规则：\n1. 这是同一持久工作目录和同一 CLI 对话的后续回合；先阅读当前 repository/ 代码与已有报告。\n2. 仅处理该评论明确要求的事项；若范围不明确，写出澄清问题到 feedback/ 报告，禁止猜测。\n3. 本地验证阶段允许修改 repository/${session.jira_key}/ 并执行测试，但不得 push、创建 PR 或调用 GitHub API。\n4. 将本轮结论写入 feedback/${event.target_type}-${event.target_number}-${event.comment_id}.md，包含评论、修改、测试结果及待办。${issuePromotionRule}`;
   const dispatcher = config.fetch ? undefined : new Agent({ headersTimeout: config.executionTimeoutMs + 30_000, bodyTimeout: config.executionTimeoutMs + 30_000 });
   try {
     const endpoint = `${config.llmRunnerUrl.replace(/\/+$/, "")}/v1/system-runs`;
@@ -128,7 +116,11 @@ async function resumeProject(config: PrFeedbackRunnerConfig, session: ProjectSes
     const result = await response.json() as { output?: unknown; provider_session_id?: unknown };
     const reportDir = join(session.workspace_root, "feedback");
     await mkdir(reportDir, { recursive: true, mode: 0o700 });
-    await writeFile(join(reportDir, `${event.comment_id}.md`), `# PR #${event.pr_number} Feedback\n\nComment: ${event.comment_body}\n\n## Agent output\n\n${String(result.output ?? "CLI completed")}\n`, { mode: 0o600 });
+    const output = String(result.output ?? "CLI completed");
+    const reportName = `${event.target_type}-${event.target_number}-${event.comment_id}.md`;
+    await writeFile(join(reportDir, reportName), `# GitHub ${targetLabel} Feedback\n\nComment: ${event.comment_body}\n\n## Agent output\n\n${output}\n`, { mode: 0o600 });
+    const promotion = event.target_type === "issue" ? await promoteUnblockedIssue(config, session, event, output, fetchImpl) : undefined;
+    await postGitHubFeedback(config, session, event, output, reportName, promotion, fetchImpl);
     if (typeof result.provider_session_id === "string" && sessionPattern.test(result.provider_session_id)) {
       await config.store.upsert({ ...session, provider_session_id: result.provider_session_id, updated_at: new Date().toISOString() });
     }
@@ -174,6 +166,164 @@ async function loadRuntimeEnv(settingsFile?: string): Promise<Record<string, str
   }
 }
 
+async function loadWebhookSecret(settingsFile: string | undefined, fallback: string | undefined): Promise<string | undefined> {
+  if (!settingsFile) return fallback;
+  try {
+    const settings = JSON.parse(await readFile(settingsFile, "utf8")) as { github_webhook_secret?: unknown };
+    return typeof settings.github_webhook_secret === "string" && settings.github_webhook_secret.trim()
+      ? settings.github_webhook_secret
+      : fallback;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return fallback;
+    throw error;
+  }
+}
+
+async function postGitHubFeedback(
+  config: PrFeedbackRunnerConfig,
+  session: ProjectSession,
+  event: FeedbackEvent,
+  output: string,
+  reportName: string,
+  promotion: GitHubPullRequest | undefined,
+  fetchImpl: typeof fetch,
+): Promise<void> {
+  const token = await loadGitHubToken(config.settingsFile);
+  if (!token) return;
+  const repository = parseGitHubRepository(session.repository);
+  const pullRequest = promotion ? `\n\n已创建/更新自动化测试 PR：${promotion.html_url}` : "";
+  const body = `${agentFeedbackMarker}\n## AgentLattice QA Agent 回复\n\n已处理 GitHub ${event.target_type === "issue" ? "Issue" : "PR"} #${event.target_number} 的补充信息。${pullRequest}\n\n${redactGitHubFeedback(output)}\n\n---\n本地完整报告：\`${reportName}\``;
+  const response = await fetchImpl(new Request(`https://api.github.com/repos/${repository.owner}/${repository.name}/issues/${event.target_number}/comments`, {
+    method: "POST",
+    headers: {
+      accept: "application/vnd.github+json",
+      authorization: `Bearer ${token}`,
+      "content-type": "application/json",
+      "user-agent": "AgentLattice-Jira-Flow",
+    },
+    body: JSON.stringify({ body }),
+  }));
+  if (!response.ok) throw new Error(`GitHub feedback comment failed (${response.status}): ${await response.text()}`);
+}
+
+interface GitHubFlowSettings { github_token?: string; repository_branch?: string; auto_publish?: boolean; }
+interface GitHubPullRequest { number: number; html_url: string; }
+
+async function promoteUnblockedIssue(
+  config: PrFeedbackRunnerConfig,
+  session: ProjectSession,
+  event: FeedbackEvent,
+  output: string,
+  fetchImpl: typeof fetch,
+): Promise<GitHubPullRequest | undefined> {
+  if (!isReadinessApproved(output)) return undefined;
+  const settings = await loadGitHubFlowSettings(config.settingsFile);
+  if (!settings.auto_publish) return undefined;
+  if (!settings.github_token) throw new Error("GITHUB_TOKEN is required to publish an unblocked Jira Flow Issue");
+  const repositoryRoot = join(session.workspace_root, "repository");
+  const reports = await readdir(join(repositoryRoot, session.jira_key, "reports"), { withFileTypes: true }).catch(() => []);
+  if (!reports.some((entry) => entry.isFile() && entry.name.endsWith(".md"))) {
+    throw new Error(`cannot publish ${session.jira_key}: no current Run Markdown report was created`);
+  }
+  await git(["-C", repositoryRoot, "add", "--", session.jira_key], settings.github_token);
+  if (!await gitSucceeds(["-C", repositoryRoot, "diff", "--cached", "--quiet"], settings.github_token)) {
+    await git(["-C", repositoryRoot, "-c", "user.name=AgentLattice Jira Flow", "-c", "user.email=agentlattice-jira-flow@localhost", "commit", "-m", `test(${session.jira_key}): resolve QA blocked Issue`], settings.github_token);
+    await git(["-C", repositoryRoot, "push", "origin", `HEAD:refs/heads/${session.branch}`], settings.github_token);
+  }
+  const pullRequest = await ensureGitHubPullRequest(session, event, settings, fetchImpl);
+  await config.store.bind(session.project_id, event.repository_id, pullRequest.number, new Date().toISOString());
+  return pullRequest;
+}
+
+async function ensureGitHubPullRequest(
+  session: ProjectSession,
+  event: FeedbackEvent,
+  settings: GitHubFlowSettings,
+  fetchImpl: typeof fetch,
+): Promise<GitHubPullRequest> {
+  const token = settings.github_token!;
+  const repository = parseGitHubRepository(session.repository);
+  const headers = githubHeaders(token);
+  const base = settings.repository_branch?.trim() || "main";
+  const existingUrl = new URL(`https://api.github.com/repos/${repository.owner}/${repository.name}/pulls`);
+  existingUrl.searchParams.set("state", "open");
+  existingUrl.searchParams.set("head", `${repository.owner}:${session.branch}`);
+  existingUrl.searchParams.set("base", base);
+  const existingResponse = await fetchImpl(new Request(existingUrl, { headers }));
+  if (!existingResponse.ok) throw new Error(`GitHub Pull Request lookup failed (${existingResponse.status}): ${await existingResponse.text()}`);
+  const existing = await existingResponse.json() as Array<Partial<GitHubPullRequest>>;
+  if (existing[0] && typeof existing[0].number === "number" && typeof existing[0].html_url === "string") return { number: existing[0].number, html_url: existing[0].html_url };
+  const response = await fetchImpl(new Request(`https://api.github.com/repos/${repository.owner}/${repository.name}/pulls`, {
+    method: "POST", headers,
+    body: JSON.stringify({ title: `[${session.jira_key}] 自动化测试结果`, head: session.branch, base, body: `Jira: ${session.jira_key}\n\n由阻塞 Issue #${event.target_number} 补充信息后自动创建。` }),
+  }));
+  if (!response.ok) throw new Error(`GitHub Pull Request creation failed (${response.status}): ${await response.text()}`);
+  const payload = await response.json() as Partial<GitHubPullRequest>;
+  if (typeof payload.number !== "number" || typeof payload.html_url !== "string") throw new Error("GitHub Pull Request creation returned invalid payload");
+  return { number: payload.number, html_url: payload.html_url };
+}
+
+async function loadGitHubToken(settingsFile?: string): Promise<string | undefined> {
+  if (!settingsFile) return undefined;
+  try {
+    const settings = JSON.parse(await readFile(settingsFile, "utf8")) as { github_token?: unknown };
+    return typeof settings.github_token === "string" && settings.github_token.trim() ? settings.github_token : undefined;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+    throw error;
+  }
+}
+
+async function loadGitHubFlowSettings(settingsFile?: string): Promise<GitHubFlowSettings> {
+  if (!settingsFile) return {};
+  try {
+    const settings = JSON.parse(await readFile(settingsFile, "utf8")) as GitHubFlowSettings;
+    return {
+      github_token: typeof settings.github_token === "string" && settings.github_token.trim() ? settings.github_token : undefined,
+      repository_branch: typeof settings.repository_branch === "string" ? settings.repository_branch : undefined,
+      auto_publish: settings.auto_publish === true,
+    };
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return {};
+    throw error;
+  }
+}
+
+function isReadinessApproved(output: string): boolean {
+  const normalized = output.replace(/[\s*_`]/g, "");
+  return normalized.includes("测试准入：通过") || normalized.includes("测试准入:通过");
+}
+
+function parseGitHubRepository(url: string): { owner: string; name: string } {
+  const match = url.match(/^https:\/\/github\.com\/([^/]+)\/([^/]+?)(?:\.git)?$/);
+  if (!match) throw new Error("project session repository is not a GitHub HTTPS URL");
+  return { owner: match[1], name: match[2] };
+}
+
+function githubHeaders(token: string): Record<string, string> {
+  return { accept: "application/vnd.github+json", authorization: `Bearer ${token}`, "content-type": "application/json", "user-agent": "AgentLattice-Jira-Flow" };
+}
+
+async function git(args: string[], token: string): Promise<void> {
+  await new Promise<void>((resolve, reject) => execFile("git", args, {
+    env: { ...process.env, GITHUB_TOKEN: token, GIT_ASKPASS: "/usr/local/bin/git-askpass", GIT_TERMINAL_PROMPT: "0" },
+  }, (error) => error ? reject(error) : resolve()));
+}
+
+async function gitSucceeds(args: string[], token: string): Promise<boolean> {
+  return new Promise((resolve) => execFile("git", args, {
+    env: { ...process.env, GITHUB_TOKEN: token, GIT_ASKPASS: "/usr/local/bin/git-askpass", GIT_TERMINAL_PROMPT: "0" },
+  }, (error) => resolve(!error)));
+}
+
+function redactGitHubFeedback(output: string): string {
+  const redacted = output
+    .replace(/\b([A-Z][A-Z0-9_]*(?:TOKEN|SECRET|PASSWORD|API_KEY|ACCESS_KEY))\s*=\s*[^\s]+/g, "$1=***")
+    .replace(/([?&](?:token|access_token|password)=)[^\s&#]+/gi, "$1***");
+  const maxLength = 6_000;
+  return redacted.length <= maxLength ? redacted : `${redacted.slice(0, maxLength)}\n\n> 回复过长，已截断；请查看本地完整报告。`;
+}
+
 function parseGithubComment(raw: string, delivery: string | null, receivedAt: string): FeedbackEvent | undefined {
   if (!delivery || !idPattern.test(delivery)) throw new Error("x-github-delivery is required");
   const payload = JSON.parse(raw) as Record<string, unknown>;
@@ -181,8 +331,9 @@ function parseGithubComment(raw: string, delivery: string | null, receivedAt: st
   const repository = payload.repository as Record<string, unknown> | undefined;
   const comment = payload.comment as Record<string, unknown> | undefined;
   const sender = payload.sender as Record<string, unknown> | undefined;
-  if (!issue?.pull_request || sender?.type === "Bot" || !repository || !comment) return undefined;
-  return { delivery_id: delivery, event_type: "issue_comment", repository_id: readId(repository.id, "repository.id"), pr_number: readPrNumber(issue.number), comment_id: readId(comment.id, "comment.id"), comment_body: readText(comment.body, "comment.body"), received_at: receivedAt, status: "pending" };
+  if (sender?.type === "Bot" || !repository || !comment || !issue || typeof comment.body === "string" && comment.body.includes(agentFeedbackMarker)) return undefined;
+  const targetType = issue.pull_request ? "pull_request" : "issue";
+  return { delivery_id: delivery, event_type: "issue_comment", repository_id: readId(repository.id, "repository.id"), target_type: targetType, target_number: readPrNumber(issue.number), comment_id: readId(comment.id, "comment.id"), comment_body: readText(comment.body, "comment.body"), received_at: receivedAt, status: "pending" };
 }
 
 function hasValidGithubSignature(raw: string, signature: string | null, secret: string | undefined): boolean {

@@ -38,8 +38,18 @@ export function createControlApiServer(config: ControlApiConfig): ControlApiServ
       if (request.method === "GET" && url.pathname === "/automation/jira/settings") {
         return handleJiraAutomationSettingsPage(config, url);
       }
+      if (request.method === "GET" && url.pathname === "/automation/jira") {
+        return handleJiraAutomationRunsPage(config);
+      }
+      const jiraAutomationRunMatch = url.pathname.match(/^\/automation\/jira\/runs\/([^/]+)$/);
+      if (request.method === "GET" && jiraAutomationRunMatch) {
+        return handleJiraAutomationRunDetailPage(config, decodeURIComponent(jiraAutomationRunMatch[1]));
+      }
       if (request.method === "POST" && url.pathname === "/automation/jira/settings") {
         return handleJiraAutomationSettingsSave(request, config);
+      }
+      if (request.method === "POST" && url.pathname === "/automation/jira/settings/github-webhook") {
+        return handleJiraAutomationGitHubWebhookRegister(request, config);
       }
       if (request.method === "POST" && url.pathname === "/automation/jira/settings/skills/upload") {
         return handleJiraAutomationSkillUpload(request, config);
@@ -777,7 +787,16 @@ interface JiraAutomationSettings {
   auto_publish: boolean;
   skills: string[];
   github_token: string;
+  github_webhook_secret: string;
+  github_webhook_url: string;
   runtime_env: string;
+}
+
+interface JiraAutomationRunStep { stage: string; status: "running" | "succeeded" | "blocked" | "failed"; message: string; created_at: string; }
+interface JiraAutomationRun {
+  run_id: string; jira_key: string; title: string; runtime: string; status: "running" | "succeeded" | "blocked" | "failed";
+  current_stage: string; workspace_id: string; branch: string; started_at: string; finished_at?: string;
+  issue_url?: string; pull_request_url?: string; report_path?: string; steps: JiraAutomationRunStep[];
 }
 
 const DEFAULT_JIRA_AUTOMATION_SETTINGS: JiraAutomationSettings = {
@@ -791,13 +810,47 @@ const DEFAULT_JIRA_AUTOMATION_SETTINGS: JiraAutomationSettings = {
   auto_publish: false,
   skills: [],
   github_token: "",
+  github_webhook_secret: "",
+  github_webhook_url: "",
   runtime_env: "",
 };
 
 async function handleJiraAutomationSettingsPage(config: ControlApiConfig, url: URL): Promise<Response> {
   const [settings, localSkills] = await Promise.all([readJiraAutomationSettings(config), listJiraAutomationSkills(config)]);
   const saved = url.searchParams.get("saved") === "1";
-  return htmlResponse(renderJiraAutomationSettingsPage(settings, saved, undefined, localSkills));
+  const webhookRegistered = url.searchParams.get("hook") === "1";
+  return htmlResponse(renderJiraAutomationSettingsPage(settings, saved, undefined, localSkills, webhookRegistered ? "GitHub Webhook 已注册或更新。" : undefined));
+}
+
+async function handleJiraAutomationRunsPage(config: ControlApiConfig): Promise<Response> {
+  return htmlResponse(renderJiraAutomationRunsPage(await readJiraAutomationRuns(config)));
+}
+
+async function handleJiraAutomationRunDetailPage(config: ControlApiConfig, runId: string): Promise<Response> {
+  const run = (await readJiraAutomationRuns(config)).find((item) => item.run_id === runId);
+  return run ? htmlResponse(renderJiraAutomationRunDetailPage(run)) : htmlResponseWithStatus(pageShell("Jira 自动化任务", `<section class="card stack"><h1>任务不存在</h1><a class="btn" href="/automation/jira">返回任务中心</a></section>`), 404);
+}
+
+async function readJiraAutomationRuns(config: ControlApiConfig): Promise<JiraAutomationRun[]> {
+  const settingsFile = config.jiraAutomationSettingsFile;
+  if (!settingsFile) return [];
+  try {
+    const parsed = JSON.parse(await readFile(join(dirname(settingsFile), "runs.json"), "utf8")) as { runs?: unknown };
+    if (!Array.isArray(parsed.runs)) return [];
+    return parsed.runs.filter(isJiraAutomationRun).sort((left, right) => right.started_at.localeCompare(left.started_at));
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return [];
+    throw error;
+  }
+}
+
+function isJiraAutomationRun(value: unknown): value is JiraAutomationRun {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const run = value as Record<string, unknown>;
+  const text = (key: string) => typeof run[key] === "string" && run[key].length > 0;
+  return text("run_id") && text("jira_key") && text("title") && text("runtime") && text("status") && text("current_stage") && text("workspace_id") && text("branch") && text("started_at")
+    && ["running", "succeeded", "blocked", "failed"].includes(String(run.status))
+    && (!run.steps || Array.isArray(run.steps));
 }
 
 async function handleJiraAutomationSettingsSave(request: Request, config: ControlApiConfig): Promise<Response> {
@@ -811,6 +864,14 @@ async function handleJiraAutomationSettingsSave(request: Request, config: Contro
   if (!/^[A-Za-z0-9][A-Za-z0-9._/-]{0,127}$/.test(repositoryBranch)) {
     return htmlResponseWithStatus(renderJiraAutomationSettingsPage(await readJiraAutomationSettings(config), false, "分支名称不合法。"), 400);
   }
+  const webhookUrl = (form.github_webhook_url ?? "").trim();
+  const webhookSecret = form.github_webhook_secret ?? "";
+  if (webhookUrl && !/^https:\/\/[^\s/]+(?:\/[^\s]*)?\/webhooks\/github$/.test(webhookUrl)) {
+    return htmlResponseWithStatus(renderJiraAutomationSettingsPage(await readJiraAutomationSettings(config), false, "GitHub Webhook 地址必须是 HTTPS 且以 /webhooks/github 结尾。"), 400);
+  }
+  if (webhookSecret && (webhookSecret.length < 16 || webhookSecret.length > 512)) {
+    return htmlResponseWithStatus(renderJiraAutomationSettingsPage(await readJiraAutomationSettings(config), false, "GitHub Webhook Secret 长度必须为 16 到 512 个字符。"), 400);
+  }
   const settings: JiraAutomationSettings = {
     enabled: form.enabled === "true",
     repository_url: repositoryUrl,
@@ -822,6 +883,8 @@ async function handleJiraAutomationSettingsSave(request: Request, config: Contro
     auto_publish: form.auto_publish === "true",
     skills: formData.getAll("skills").map(String).filter((name) => /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(name)),
     github_token: form.github_token ?? "",
+    github_webhook_secret: webhookSecret,
+    github_webhook_url: webhookUrl,
     runtime_env: form.runtime_env ?? "",
   };
   await writeJiraAutomationSettings(config, settings);
@@ -844,12 +907,73 @@ async function readJiraAutomationSettings(config: ControlApiConfig): Promise<Jir
       auto_publish: parsed.auto_publish === true,
       skills: Array.isArray(parsed.skills) ? parsed.skills.filter((name): name is string => typeof name === "string" && /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(name)) : [],
       github_token: typeof parsed.github_token === "string" ? parsed.github_token : "",
+      github_webhook_secret: typeof parsed.github_webhook_secret === "string" ? parsed.github_webhook_secret : "",
+      github_webhook_url: typeof parsed.github_webhook_url === "string" ? parsed.github_webhook_url : "",
       runtime_env: typeof parsed.runtime_env === "string" ? parsed.runtime_env : "",
     };
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === "ENOENT") return { ...DEFAULT_JIRA_AUTOMATION_SETTINGS };
     throw error;
   }
+}
+
+async function handleJiraAutomationGitHubWebhookRegister(request: Request, config: ControlApiConfig): Promise<Response> {
+  const saved = await readJiraAutomationSettings(config);
+  const formData = await request.formData();
+  const form = Object.fromEntries([...formData.entries()].map(([key, value]) => [key, String(value)]));
+  const settings: JiraAutomationSettings = {
+    ...saved,
+    enabled: form.enabled === "true",
+    repository_url: (form.repository_url ?? saved.repository_url).trim(),
+    repository_branch: (form.repository_branch ?? saved.repository_branch).trim(),
+    runtime: form.runtime === "kiro" ? "kiro" : "claude-code",
+    notify_reporter: form.notify_reporter === "true",
+    auto_execute: form.auto_execute === "true",
+    auto_publish: form.auto_publish === "true",
+    skills: formData.getAll("skills").map(String).filter((name) => /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(name)),
+    github_token: form.github_token ?? saved.github_token,
+    github_webhook_secret: form.github_webhook_secret ?? saved.github_webhook_secret,
+    github_webhook_url: (form.github_webhook_url ?? saved.github_webhook_url).trim(),
+    runtime_env: form.runtime_env ?? saved.runtime_env,
+  };
+  if (settings.github_webhook_url && !/^https:\/\/[^\s/]+(?:\/[^\s]*)?\/webhooks\/github$/.test(settings.github_webhook_url)) {
+    return htmlResponseWithStatus(renderJiraAutomationSettingsPage(settings, false, "GitHub Webhook 地址必须是 HTTPS 且以 /webhooks/github 结尾。"), 400);
+  }
+  if (settings.github_webhook_secret && (settings.github_webhook_secret.length < 16 || settings.github_webhook_secret.length > 512)) {
+    return htmlResponseWithStatus(renderJiraAutomationSettingsPage(settings, false, "GitHub Webhook Secret 长度必须为 16 到 512 个字符。"), 400);
+  }
+  await writeJiraAutomationSettings(config, settings);
+  if (!settings.repository_url || !settings.github_token || !settings.github_webhook_url || !settings.github_webhook_secret) {
+    return htmlResponseWithStatus(renderJiraAutomationSettingsPage(settings, false, "请先保存仓库地址、GITHUB_TOKEN、Webhook 地址和 Webhook Secret。"), 400);
+  }
+  try {
+    const repository = parseGitHubRepositoryUrl(settings.repository_url);
+    const headers = {
+      accept: "application/vnd.github+json",
+      authorization: `Bearer ${settings.github_token}`,
+      "content-type": "application/json",
+      "user-agent": "AgentLattice-Jira-Flow",
+    };
+    const base = `https://api.github.com/repos/${repository.owner}/${repository.name}/hooks`;
+    const list = await config.fetch(new Request(base, { headers }));
+    if (!list.ok) throw new Error(`GitHub Hook 查询失败（${list.status}）：${await list.text()}`);
+    const hooks = await list.json() as Array<{ id?: unknown; config?: { url?: unknown } }>;
+    const existing = hooks.find((hook) => hook.config?.url === settings.github_webhook_url);
+    const payload = JSON.stringify({ name: "web", active: true, events: ["issue_comment"], config: { url: settings.github_webhook_url, content_type: "json", secret: settings.github_webhook_secret, insecure_ssl: "0" } });
+    const response = existing?.id
+      ? await config.fetch(new Request(`${base}/${encodeURIComponent(String(existing.id))}`, { method: "PATCH", headers, body: payload }))
+      : await config.fetch(new Request(base, { method: "POST", headers, body: payload }));
+    if (!response.ok) throw new Error(`GitHub Hook 注册失败（${response.status}）：${await response.text()}`);
+    return redirectResponse("/automation/jira/settings?saved=1&hook=1");
+  } catch (error) {
+    return htmlResponseWithStatus(renderJiraAutomationSettingsPage(settings, false, error instanceof Error ? error.message : "GitHub Hook 注册失败。"), 400);
+  }
+}
+
+function parseGitHubRepositoryUrl(url: string): { owner: string; name: string } {
+  const match = url.match(/^https:\/\/github\.com\/([^/]+)\/([^/]+?)(?:\.git)?$/);
+  if (!match) throw new Error("仓库地址必须是 HTTPS GitHub 地址。");
+  return { owner: match[1], name: match[2] };
 }
 
 async function listJiraAutomationSkills(config: ControlApiConfig): Promise<string[]> {
@@ -2498,24 +2622,74 @@ function renderJiraAutomationSettingsPage(
   saved: boolean,
   error?: string,
   localSkills: string[] = [],
+  successMessage?: string,
 ): string {
   const checked = (value: boolean) => value ? " checked" : "";
   const selectedSkills = new Set(settings.skills);
+  const runtimeEnvGuide = renderJiraRuntimeEnvGuide(settings.runtime_env);
   const skillChoices = localSkills.length > 0
     ? localSkills.map((name) => `<label class="skill-choice"><input type="checkbox" name="skills" value="${escapeHtmlValue(name)}"${selectedSkills.has(name) ? " checked" : ""}><span><strong>${escapeHtmlValue(name)}</strong><small>本地上传到此 Jira Automation Flow 的 Skill</small></span></label>`).join("")
     : `<div class="notice">尚未添加本地 Skill。请选择一个包含 SKILL.md 的目录上传。</div>`;
   return `<!doctype html>
 <html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Jira 自动化 Flow 设置</title>
 <style>
-:root{--ink:#17202e;--muted:#687588;--line:#dce3ea;--canvas:#f4f7f8;--panel:#fff;--accent:#176b5c;--accent-soft:#e9f6f1;--warn:#976000}*{box-sizing:border-box}body{margin:0;background:var(--canvas);color:var(--ink);font:15px/1.5 Inter,ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif;overflow-x:hidden}.shell{width:min(100% - 32px,1040px);margin:0 auto;padding:28px 0 42px}.top{display:flex;justify-content:space-between;gap:16px;align-items:flex-start;margin-bottom:18px}.crumb{color:var(--accent);text-decoration:none;font-weight:700}.eyebrow{margin:14px 0 4px;color:var(--accent);font-size:12px;font-weight:800;letter-spacing:.08em;text-transform:uppercase}h1{margin:0;font-size:30px;letter-spacing:-.04em}h2{margin:0;font-size:17px}.lead{max-width:690px;margin:9px 0 0;color:var(--muted)}.status{display:inline-flex;align-items:center;gap:7px;flex:none;padding:8px 11px;border:1px solid var(--line);border-radius:999px;background:#fff;font-size:13px;font-weight:750}.dot{width:8px;height:8px;border-radius:999px;background:${settings.enabled ? "#15936a" : "#9aa6b4"}}form{display:grid;gap:16px}.card{background:var(--panel);border:1px solid var(--line);border-radius:16px;padding:20px;box-shadow:0 8px 30px rgba(28,45,66,.045)}.section-head{display:flex;justify-content:space-between;gap:16px;align-items:flex-start;margin-bottom:16px}.section-head p,.hint{margin:5px 0 0;color:var(--muted);font-size:13px}.fields{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}.full{grid-column:1/-1}label{display:grid;gap:7px;color:#3e4a59;font-size:13px;font-weight:700}input,select,textarea{width:100%;min-width:0;border:1px solid #cfd9e2;border-radius:9px;background:#fff;color:var(--ink);font:inherit}input,select{height:42px;padding:0 11px}textarea{min-height:190px;padding:11px;resize:vertical;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:13px;line-height:1.55}input:focus,select:focus,textarea:focus{outline:3px solid rgba(23,107,92,.16);border-color:var(--accent)}.switch{display:flex;gap:10px;align-items:center;min-height:42px;border:1px solid var(--line);border-radius:10px;padding:10px 12px;background:#fbfcfd}.switch input{width:18px;height:18px;accent-color:var(--accent)}.switch strong{display:block}.switch small{display:block;color:var(--muted);font-weight:500}.skill-options{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px}.skill-choice{display:flex;gap:9px;align-items:flex-start;min-width:0;border:1px solid var(--line);border-radius:10px;padding:10px;background:#fbfcfd;color:var(--ink)}.skill-choice input{width:18px;height:18px;min-height:18px;flex:none;accent-color:var(--accent)}.skill-choice strong{display:block;overflow-wrap:anywhere}.skill-choice small{display:block;margin-top:2px;color:var(--muted);font-weight:500;overflow-wrap:anywhere}.upload-row{display:flex;flex-wrap:wrap;gap:10px;align-items:center;margin-top:12px}.upload-row input{min-width:0;max-width:100%;height:auto;padding:7px;background:#fff}.notice{padding:12px 14px;border-radius:10px;background:#fff8e9;color:#74521a;font-size:13px}.saved{padding:12px 14px;border-radius:10px;background:var(--accent-soft);color:#145846;font-weight:700}.error{padding:12px 14px;border-radius:10px;background:#fff0ed;color:#a3382e;font-weight:700}.actions{display:flex;justify-content:flex-end;gap:10px;align-items:center}.button{min-height:42px;border:0;border-radius:9px;padding:0 16px;background:var(--accent);color:#fff;font:inherit;font-weight:800;cursor:pointer}.button:hover{background:#105247}.secondary{color:var(--ink);background:#fff;border:1px solid var(--line);text-decoration:none;display:inline-flex;align-items:center;padding:0 14px;border-radius:9px;min-height:42px;font-weight:700}@media(max-width:640px){.shell{width:min(100% - 20px,1040px);padding-top:18px}.top{flex-direction:column}h1{font-size:26px}.fields,.skill-options{grid-template-columns:1fr}.card{padding:16px}.section-head{flex-direction:column}.upload-row{align-items:stretch}.upload-row>*{width:100%}.actions{justify-content:stretch}.actions>*{flex:1;text-align:center;justify-content:center}}
-</style></head><body><main class="shell"><div class="top"><div><a class="crumb" href="/">← Bot 控制台</a><p class="eyebrow">Automation Flow</p><h1>Jira 自动化测试</h1><p class="lead">Webhook 触发系统 QA 执行器。它不使用任何用户 Bot、对话上下文或用户环境变量。</p></div><span class="status"><i class="dot"></i>${settings.enabled ? "已启用" : "未启用"}</span></div>
-${saved ? '<div class="saved">设置已保存；新 Jira 事件会使用这份配置。</div>' : ""}${error ? `<div class="error">${escapeHtmlValue(error)}</div>` : ""}
+:root{--ink:#17202e;--muted:#687588;--line:#dce3ea;--canvas:#f4f7f8;--panel:#fff;--accent:#176b5c;--accent-soft:#e9f6f1;--warn:#976000}*{box-sizing:border-box}body{margin:0;background:var(--canvas);color:var(--ink);font:15px/1.5 Inter,ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif;overflow-x:hidden}.shell{width:min(100% - 32px,1040px);margin:0 auto;padding:28px 0 42px}.top{display:flex;justify-content:space-between;gap:16px;align-items:flex-start;margin-bottom:18px}.crumb{color:var(--accent);text-decoration:none;font-weight:700}.eyebrow{margin:14px 0 4px;color:var(--accent);font-size:12px;font-weight:800;letter-spacing:.08em;text-transform:uppercase}h1{margin:0;font-size:30px;letter-spacing:-.04em}h2{margin:0;font-size:17px}.lead{max-width:690px;margin:9px 0 0;color:var(--muted)}.status{display:inline-flex;align-items:center;gap:7px;flex:none;padding:8px 11px;border:1px solid var(--line);border-radius:999px;background:#fff;font-size:13px;font-weight:750}.dot{width:8px;height:8px;border-radius:999px;background:${settings.enabled ? "#15936a" : "#9aa6b4"}}form{display:grid;gap:16px}.card{background:var(--panel);border:1px solid var(--line);border-radius:16px;padding:20px;box-shadow:0 8px 30px rgba(28,45,66,.045)}.section-head{display:flex;justify-content:space-between;gap:16px;align-items:flex-start;margin-bottom:16px}.section-head p,.hint{margin:5px 0 0;color:var(--muted);font-size:13px}.fields{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}.full{grid-column:1/-1}label{display:grid;gap:7px;color:#3e4a59;font-size:13px;font-weight:700}input,select,textarea{width:100%;min-width:0;border:1px solid #cfd9e2;border-radius:9px;background:#fff;color:var(--ink);font:inherit}input,select{height:42px;padding:0 11px}textarea{min-height:190px;padding:11px;resize:vertical;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:13px;line-height:1.55}input:focus,select:focus,textarea:focus{outline:3px solid rgba(23,107,92,.16);border-color:var(--accent)}.switch{display:flex;gap:10px;align-items:center;min-height:42px;border:1px solid var(--line);border-radius:10px;padding:10px 12px;background:#fbfcfd}.switch input{width:18px;height:18px;accent-color:var(--accent)}.switch strong{display:block}.switch small{display:block;color:var(--muted);font-weight:500}.skill-options{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px}.skill-choice{display:flex;gap:9px;align-items:flex-start;min-width:0;border:1px solid var(--line);border-radius:10px;padding:10px;background:#fbfcfd;color:var(--ink)}.skill-choice input{width:18px;height:18px;min-height:18px;flex:none;accent-color:var(--accent)}.skill-choice strong{display:block;overflow-wrap:anywhere}.skill-choice small{display:block;margin-top:2px;color:var(--muted);font-weight:500;overflow-wrap:anywhere}.upload-row{display:flex;flex-wrap:wrap;gap:10px;align-items:center;margin-top:12px}.upload-row input{min-width:0;max-width:100%;height:auto;padding:7px;background:#fff}.env-guide{margin:12px 0;border:1px solid var(--line);border-radius:10px;overflow:hidden}.env-guide table{width:100%;border-collapse:collapse;font-size:13px}.env-guide th,.env-guide td{padding:8px 10px;border-bottom:1px solid var(--line);text-align:left}.env-guide tr:last-child td{border-bottom:0}.env-guide th{background:#f7faf9;color:var(--muted);font-weight:750}.env-ok{color:#0a7353;font-weight:750}.env-map{color:#976000;font-weight:750}.env-missing{color:#a3382e;font-weight:750}.notice{padding:12px 14px;border-radius:10px;background:#fff8e9;color:#74521a;font-size:13px}.saved{padding:12px 14px;border-radius:10px;background:var(--accent-soft);color:#145846;font-weight:700}.error{padding:12px 14px;border-radius:10px;background:#fff0ed;color:#a3382e;font-weight:700}.actions{display:flex;justify-content:flex-end;gap:10px;align-items:center}.button{min-height:42px;border:0;border-radius:9px;padding:0 16px;background:var(--accent);color:#fff;font:inherit;font-weight:800;cursor:pointer}.button:hover{background:#105247}.secondary{color:var(--ink);background:#fff;border:1px solid var(--line);text-decoration:none;display:inline-flex;align-items:center;padding:0 14px;border-radius:9px;min-height:42px;font-weight:700}@media(max-width:640px){.shell{width:min(100% - 20px,1040px);padding-top:18px}.top{flex-direction:column}h1{font-size:26px}.fields,.skill-options{grid-template-columns:1fr}.card{padding:16px}.section-head{flex-direction:column}.upload-row{align-items:stretch}.upload-row>*{width:100%}.actions{justify-content:stretch}.actions>*{flex:1;text-align:center;justify-content:center}.env-guide{overflow-x:auto}}
+</style></head><body><main class="shell"><div class="top"><div><a class="crumb" href="/">← Bot 控制台</a><p class="eyebrow">Automation Flow</p><h1>Jira 自动化测试</h1><p class="lead">Webhook 触发系统 QA 执行器。它不使用任何用户 Bot、对话上下文或用户环境变量。</p></div><div class="actions"><a class="secondary" href="/automation/jira">任务中心</a><span class="status"><i class="dot"></i>${settings.enabled ? "已启用" : "未启用"}</span></div></div>
+${saved ? `<div class="saved">${escapeHtmlValue(successMessage ?? "设置已保存；新 Jira 事件会使用这份配置。")}</div>` : ""}${error ? `<div class="error">${escapeHtmlValue(error)}</div>` : ""}
 <form method="post" action="/automation/jira/settings"><section class="card"><div class="section-head"><div><h2>执行开关与仓库</h2><p>一次 Jira Run 只允许修改仓库内同名的 Jira 目录。</p></div></div><div class="fields"><label class="full"><span class="switch"><input name="enabled" value="true" type="checkbox"${checked(settings.enabled)}><span><strong>启用 Jira 自动化 Flow</strong><small>关闭时仍接收 Webhook，但不会启动 CLI。</small></span></span></label><label class="full">GitHub 仓库 HTTPS 地址<input name="repository_url" type="url" value="${escapeHtmlValue(settings.repository_url)}" placeholder="https://github.com/org/qa-auto-test.git"></label><label>基线分支<input name="repository_branch" value="${escapeHtmlValue(settings.repository_branch)}" maxlength="128" required></label><label>系统 Runtime<select name="runtime"><option value="claude-code"${settings.runtime === "claude-code" ? " selected" : ""}>Claude Code</option><option value="kiro"${settings.runtime === "kiro" ? " selected" : ""}>Kiro CLI</option></select></label></div></section>
 <section class="card"><div class="section-head"><div><h2>执行 Skills</h2><p>从本机选择 Skill 文件夹上传；上传后勾选本 Flow 本次要注入的项。</p></div></div><div class="skill-options">${skillChoices}</div><div class="upload-row"><input id="jira-flow-skill-files" type="file" webkitdirectory directory multiple><button class="secondary" id="jira-flow-skill-upload" type="button">添加本地 Skill 文件夹</button></div></section>
 <section class="card"><div class="section-head"><div><h2>执行策略</h2><p>自动执行和发布都是管理员对当前 Flow 的预授权；普通 Bot 的人工确认与 GitHub 绑定不受影响。</p></div></div><div class="fields"><label class="full"><span class="switch"><input name="auto_execute" value="true" type="checkbox"${checked(settings.auto_execute)}><span><strong>准入通过后自动创建并执行自动化项目</strong><small>关闭：只生成用例草稿。开启：通过后生成代码、校验环境并运行真实测试。</small></span></span></label><label class="full"><span class="switch"><input name="auto_publish" value="true" type="checkbox"${checked(settings.auto_publish)}><span><strong>完成后提交并 Push 当前 Jira 项目</strong><small>仅提交 <code>${"<JIRA-KEY>"}/</code> 和其中报告；固定推送到 <code>bot/&lt;JIRA-KEY&gt;</code>。</small></span></span></label><label class="full"><span class="switch"><input name="notify_reporter" value="true" type="checkbox"${checked(settings.notify_reporter)}><span><strong>完成后通知 Jira 报告人</strong><small>通知通道会在 Runner 结果落库后执行。</small></span></span></label></div><div class="notice">CLI 无权自行提交或 Push；发布由 Runner 在真实报告存在后执行。Jira 评论、PR 创建仍固定关闭。</div></section>
-<section class="card"><div class="section-head"><div><h2>运行环境（.env）</h2><p>管理员在这里填写当前 Flow 的测试环境变量；每个 Jira Run 会生成私有的 <code>repository/.env</code>。</p></div></div><label>环境变量<textarea name="runtime_env" spellcheck="false" placeholder="API_BASE_URL=https://test.example.com&#10;ORG_NAME=your_org&#10;APP_KEY=your_app_key&#10;TEST_USERNAME=test_user&#10;TEST_PASSWORD=test_password">${escapeHtmlValue(settings.runtime_env)}</textarea></label><p class="hint">可直接填写 Base URL、APP_KEY、账号、Token 等。该文件不会提交 Git；代码需要从 <code>.env</code> 读取这些变量。</p></section>
-<section class="card"><div class="section-head"><div><h2>GitHub 凭证</h2><p>仅用于系统 clone、fetch 和后续 push，不注入 LLM 的运行环境。</p></div></div><div class="fields"><label class="full">GITHUB_TOKEN<input name="github_token" value="${escapeHtmlValue(settings.github_token)}" autocomplete="off" spellcheck="false"></label></div><p class="hint">值保存在 AgentLattice 的 Flow 配置卷中，不写入 Git 或日志。</p></section>
-<div class="actions"><a class="secondary" href="/">取消</a><button class="button" type="submit">保存 Flow 设置</button></div></form><script>document.getElementById("jira-flow-skill-upload")?.addEventListener("click",async()=>{const input=document.getElementById("jira-flow-skill-files");if(!(input instanceof HTMLInputElement)||input.files.length===0){alert("请选择包含 SKILL.md 的 Skill 文件夹。");return}const data=new FormData;for(const file of input.files){data.append("files",file,file.name);data.append("paths",file.webkitRelativePath||file.name)}const response=await fetch("/automation/jira/settings/skills/upload",{method:"POST",body:data});if(response.redirected){location.assign(response.url);return}alert(await response.text())});</script></main></body></html>`;
+<section class="card"><div class="section-head"><div><h2>运行环境（.env）</h2><p>填写一次，Flow 会注入 CLI 进程，并写入每个 Jira 项目的私有 <code>repository/&lt;JIRA-KEY&gt;/.env</code>。</p></div></div>${runtimeEnvGuide}<label>环境变量<textarea name="runtime_env" spellcheck="false" placeholder="EASEMOB_JIRA_USERNAME=your_jira_username&#10;EASEMOB_JIRA_PASSWORD=your_jira_password&#10;NGI_BASE_URL=https://ngi-a1.easemob.com&#10;NGI_APPKEY=easemob-demo#test&#10;NGI_CLIENT_ID=...&#10;NGI_CLIENT_SECRET=...&#10;NGI_FUSION_WS_URL=wss://...">${escapeHtmlValue(settings.runtime_env)}</textarea></label><p class="hint">保留你现有的 <code>NGI_*</code> 命名即可；平台会自动映射为生成测试项目使用的 <code>EASEMOB_*</code> 名称。值不会出现在引导、日志或 Git 提交中。</p></section>
+<section class="card"><div class="section-head"><div><h2>GitHub 凭证与 Webhook</h2><p>Token 用于 GitHub API；Webhook Secret 只校验 GitHub 回调签名，均不注入 LLM。</p></div></div><div class="fields"><label class="full">GITHUB_TOKEN<input name="github_token" value="${escapeHtmlValue(settings.github_token)}" autocomplete="off" spellcheck="false"></label><label class="full">GitHub Webhook 公网地址<input name="github_webhook_url" type="url" value="${escapeHtmlValue(settings.github_webhook_url)}" placeholder="https://agent.example.com/webhooks/github" autocomplete="off" spellcheck="false"></label><label class="full">GITHUB_WEBHOOK_SECRET<input name="github_webhook_secret" type="password" value="${escapeHtmlValue(settings.github_webhook_secret)}" autocomplete="new-password" spellcheck="false"></label></div><p class="hint">先保存设置，再点击“注册/更新 GitHub Webhook”。Token 需有 Webhooks: Read and write 权限。</p></section>
+<div class="actions"><a class="secondary" href="/">取消</a><button class="secondary" type="submit" formaction="/automation/jira/settings/github-webhook" formmethod="post">注册/更新 GitHub Webhook</button><button class="button" type="submit">保存 Flow 设置</button></div></form><script>document.getElementById("jira-flow-skill-upload")?.addEventListener("click",async()=>{const input=document.getElementById("jira-flow-skill-files");if(!(input instanceof HTMLInputElement)||input.files.length===0){alert("请选择包含 SKILL.md 的 Skill 文件夹。");return}const data=new FormData;for(const file of input.files){data.append("files",file,file.name);data.append("paths",file.webkitRelativePath||file.name)}const response=await fetch("/automation/jira/settings/skills/upload",{method:"POST",body:data});if(response.redirected){location.assign(response.url);return}alert(await response.text())});</script></main></body></html>`;
+}
+
+function renderJiraAutomationRunsPage(runs: JiraAutomationRun[]): string {
+  const active = runs.filter((run) => run.status === "running");
+  const recent = runs.slice(0, 20);
+  const cards = active.length > 0 ? active.map(renderJiraAutomationRunCard).join("") : `<div class="empty">当前没有正在执行的 Jira 自动化任务。</div>`;
+  const rows = recent.length > 0 ? recent.map((run) => `<tr><td><a href="/automation/jira/runs/${encodeURIComponent(run.run_id)}"><strong>${escapeHtmlValue(run.jira_key)}</strong></a><small>${escapeHtmlValue(run.title)}</small></td><td>${renderRunBadge(run.status)}</td><td>${escapeHtmlValue(stageLabel(run.current_stage))}</td><td>${formatBeijingTime(run.started_at)}</td><td>${renderRunArtifacts(run)}</td></tr>`).join("") : `<tr><td colspan="5" class="empty">尚未收到 Jira Webhook。</td></tr>`;
+  return jiraAutomationShell("Jira 自动化任务", `<header class="topbar"><div><a class="crumb" href="/">← Bot 控制台</a><h1>Jira 自动化任务</h1><p>查看当前执行、最近结果和自动化产物。</p></div><div class="actions"><a class="button secondary" href="/automation/jira/settings">Flow 设置</a><button class="button" type="button" onclick="location.reload()">刷新</button></div></header><section><div class="section-title"><h2>正在运行</h2><span>${active.length} 个任务</span></div><div class="cards">${cards}</div></section><section class="panel"><div class="section-title"><h2>最近任务</h2><span>保留最近 ${Math.min(runs.length, 100)} 次执行记录</span></div><div class="table-wrap"><table><thead><tr><th>Jira</th><th>状态</th><th>当前/最终阶段</th><th>开始时间</th><th>产物</th></tr></thead><tbody>${rows}</tbody></table></div></section><script>if(${active.length}>0)setTimeout(()=>location.reload(),2000)</script>`);
+}
+
+function renderJiraAutomationRunDetailPage(run: JiraAutomationRun): string {
+  const steps = run.steps.map((step) => `<li><span class="step-dot ${escapeHtmlValue(step.status)}"></span><div><strong>${escapeHtmlValue(stageLabel(step.stage))}</strong><p>${escapeHtmlValue(step.message)}</p><small>${formatBeijingTime(step.created_at)}</small></div></li>`).join("");
+  return jiraAutomationShell(`${run.jira_key} - Jira 自动化任务`, `<header class="topbar"><div><a class="crumb" href="/automation/jira">← Jira 自动化任务</a><h1>${escapeHtmlValue(run.jira_key)}</h1><p>${escapeHtmlValue(run.title)}</p></div>${renderRunBadge(run.status)}</header><section class="panel facts"><div><small>工作目录</small><code>${escapeHtmlValue(run.workspace_id)}</code></div><div><small>分支</small><code>${escapeHtmlValue(run.branch)}</code></div><div><small>Runtime</small><strong>${escapeHtmlValue(run.runtime)}</strong></div><div><small>开始时间</small><strong>${formatBeijingTime(run.started_at)}</strong></div></section><section class="panel"><div class="section-title"><h2>执行时间线</h2><span>${escapeHtmlValue(stageLabel(run.current_stage))}</span></div><ol class="timeline">${steps}</ol></section><section class="panel"><div class="section-title"><h2>产物</h2></div><div class="artifacts">${renderRunArtifacts(run) || `<span class="empty">尚无可访问产物。</span>`}${run.report_path ? `<code>${escapeHtmlValue(run.report_path)}</code>` : ""}</div></section>`);
+}
+
+function renderJiraAutomationRunCard(run: JiraAutomationRun): string {
+  const latest = run.steps.at(-1);
+  return `<article class="run-card"><div class="run-head"><div><a href="/automation/jira/runs/${encodeURIComponent(run.run_id)}"><h3>${escapeHtmlValue(run.jira_key)}</h3></a><p>${escapeHtmlValue(run.title)}</p></div>${renderRunBadge(run.status)}</div><p class="stage">${escapeHtmlValue(stageLabel(run.current_stage))}${latest ? ` · ${escapeHtmlValue(latest.message)}` : ""}</p><div class="run-foot"><span>已运行 ${formatDuration(run.started_at)}</span><a href="/automation/jira/runs/${encodeURIComponent(run.run_id)}">查看详情 →</a></div></article>`;
+}
+
+function renderRunBadge(status: JiraAutomationRun["status"]): string { return `<span class="badge ${status}">${({ running: "执行中", succeeded: "已完成", blocked: "等待补充", failed: "执行失败" } as Record<string, string>)[status]}</span>`; }
+function renderRunArtifacts(run: JiraAutomationRun): string {
+  const links = [run.issue_url ? `<a href="${escapeHtmlValue(run.issue_url)}" target="_blank" rel="noreferrer">GitHub Issue</a>` : "", run.pull_request_url ? `<a href="${escapeHtmlValue(run.pull_request_url)}" target="_blank" rel="noreferrer">Pull Request</a>` : ""].filter(Boolean);
+  return links.join(" · ");
+}
+function stageLabel(stage: string): string { return ({ received: "已接收 Jira 事件", workspace: "准备项目工作目录", cli: "CLI 分析与执行", publish: "提交与发布", waiting_feedback: "等待 GitHub 补充", completed: "已完成", failed: "执行失败" } as Record<string, string>)[stage] ?? stage; }
+function formatDuration(startedAt: string): string { const milliseconds = Date.now() - Date.parse(startedAt); if (!Number.isFinite(milliseconds) || milliseconds < 0) return "刚刚开始"; const minutes = Math.floor(milliseconds / 60_000); return minutes < 1 ? "不足 1 分钟" : `${minutes} 分钟`; }
+function jiraAutomationShell(title: string, content: string): string { return `<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${escapeHtmlValue(title)}</title><style>:root{--ink:#17202e;--muted:#687588;--line:#dce3ea;--canvas:#f4f7f8;--panel:#fff;--accent:#176b5c}*{box-sizing:border-box}body{margin:0;background:var(--canvas);color:var(--ink);font:15px/1.5 Inter,ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif}.shell{width:min(100% - 32px,1040px);margin:auto;padding:28px 0 42px;display:grid;gap:18px}.topbar,.run-head,.section-title,.run-foot{display:flex;justify-content:space-between;gap:16px;align-items:flex-start}.crumb{color:var(--accent);font-weight:750;text-decoration:none}h1{margin:10px 0 3px;font-size:30px;letter-spacing:-.04em}h2,h3{margin:0}h2{font-size:18px}.topbar p,.run-head p,.stage{margin:4px 0 0;color:var(--muted)}.actions{display:flex;gap:8px;flex-wrap:wrap}.button{border:0;border-radius:9px;min-height:40px;padding:0 14px;background:var(--accent);color:#fff;text-decoration:none;font:inherit;font-weight:750;cursor:pointer}.button.secondary{border:1px solid var(--line);background:#fff;color:var(--ink)}.cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(290px,1fr));gap:12px}.run-card,.panel{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:18px}.run-card h3{font-size:18px}.run-card a{color:inherit}.run-foot{margin-top:16px;align-items:center;color:var(--muted);font-size:13px}.run-foot a{color:var(--accent);font-weight:750;text-decoration:none}.badge{display:inline-flex;white-space:nowrap;border-radius:999px;padding:4px 9px;font-size:12px;font-weight:750}.badge.running{background:#e8f0ff;color:#2450a4}.badge.succeeded{background:#e8f7ef;color:#14734b}.badge.blocked{background:#fff5dc;color:#8b5b00}.badge.failed{background:#ffede9;color:#a1372b}.section-title{margin-bottom:12px;align-items:center}.section-title span,small{color:var(--muted);font-size:13px}table{width:100%;border-collapse:collapse}th,td{padding:11px 8px;border-bottom:1px solid var(--line);text-align:left;vertical-align:top}th{color:var(--muted);font-size:12px}td small{display:block;margin-top:2px}.empty{color:var(--muted);padding:16px 0}.facts{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:16px}.facts div{display:grid;gap:4px}.facts code,.artifacts code{overflow-wrap:anywhere}.timeline{display:grid;gap:16px;margin:0;padding:0 0 0 8px;list-style:none;border-left:2px solid var(--line)}.timeline li{display:flex;gap:10px;margin-left:-7px}.timeline p{margin:2px 0;color:var(--muted)}.step-dot{width:12px;height:12px;flex:none;margin-top:5px;border-radius:50%;background:#a2acb9;border:2px solid #fff;box-shadow:0 0 0 1px var(--line)}.step-dot.running{background:#3867df}.step-dot.succeeded{background:#179667}.step-dot.blocked{background:#ce8b11}.step-dot.failed{background:#c7473b}.artifacts{display:flex;gap:12px;flex-wrap:wrap;align-items:center}.artifacts a{color:var(--accent);font-weight:750}@media(max-width:640px){.shell{width:min(100% - 20px,1040px);padding-top:18px}.topbar{flex-direction:column}h1{font-size:26px}.table-wrap table,.table-wrap thead,.table-wrap tbody,.table-wrap tr,.table-wrap th,.table-wrap td{display:block;width:100%}.table-wrap thead{display:none}.table-wrap tr{padding:10px 0;border-bottom:1px solid var(--line)}.table-wrap td{padding:4px 0;border:0}.table-wrap td:nth-child(2)::before{content:"状态：";color:var(--muted)}.table-wrap td:nth-child(3)::before{content:"阶段：";color:var(--muted)}.table-wrap td:nth-child(4)::before{content:"开始：";color:var(--muted)}.table-wrap td:nth-child(5)::before{content:"产物：";color:var(--muted)}.run-head{gap:10px}}</style></head><body><main class="shell">${content}</main></body></html>`; }
+
+function renderJiraRuntimeEnvGuide(runtimeEnv: string): string {
+  const keys = new Set(
+    runtimeEnv.split(/\r?\n/)
+      .map((line) => line.trim().match(/^(?:export\s+)?([A-Z][A-Z0-9_]{0,127})=/)?.[1])
+      .filter((key): key is string => Boolean(key)),
+  );
+  const requirements = [
+    ["EASEMOB_BASE_URL", "NGI_BASE_URL"],
+    ["EASEMOB_APPKEY", "NGI_APPKEY"],
+    ["EASEMOB_CLIENT_ID", "NGI_CLIENT_ID"],
+    ["EASEMOB_CLIENT_SECRET", "NGI_CLIENT_SECRET"],
+    ["EASEMOB_FUSION_WS_URL", "NGI_FUSION_WS_URL"],
+  ] as const;
+  const rows = requirements.map(([target, alias]) => {
+    if (keys.has(target)) return `<tr><td><code>${target}</code></td><td class="env-ok">已配置</td></tr>`;
+    if (keys.has(alias)) return `<tr><td><code>${target}</code></td><td class="env-map">将由 <code>${alias}</code> 自动映射</td></tr>`;
+    return `<tr><td><code>${target}</code></td><td class="env-missing">待配置（可填写 <code>${target}</code> 或 <code>${alias}</code>）</td></tr>`;
+  }).join("");
+  return `<div class="env-guide"><table><thead><tr><th>测试项目需要的变量</th><th>当前 Flow 状态（仅键名）</th></tr></thead><tbody>${rows}</tbody></table></div>`;
 }
 
 interface AgentLatticeWorkbenchView {
@@ -3275,6 +3449,7 @@ function renderChannelWorkbenchPage(): string {
       </div>
       <div class="tools">
         <a href="/agent-lattice">AgentLattice</a>
+        <a href="/automation/jira">Jira 任务</a>
         <a href="/automation/jira/settings">Jira 自动化</a>
         <a href="/admin/global-documents">全局配置</a>
         <a href="/admin/roles">角色管理</a>

@@ -1,5 +1,16 @@
 # 更新日志
 
+## 2026-07-23
+
+- Jira 与 GitHub Feedback Flow 改为直连执行
+- 同一 Jira 项目内存互斥，不同 Jira 项目可并行运行独立 CLI 与工作目录
+- 新增Jira webhook任务可视化    
+
+## 2026-07-22
+
+- Jira 准入不通过时自动创建并关联 GitHub Issue；用户评论可恢复同一 QA Agent Session
+- `pr-feedback-runner` 支持区分并处理 PR 评论与普通 GitHub Issue 评论
+
 ## 2026-07-21
 
 - 新增 Jira System Flow：按 Jira 隔离项目、运行环境和 Skill，并支持自动执行与报告输出
