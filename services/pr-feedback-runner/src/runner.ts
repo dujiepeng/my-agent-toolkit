@@ -119,8 +119,10 @@ async function resumeProject(config: PrFeedbackRunnerConfig, session: ProjectSes
     const output = String(result.output ?? "CLI completed");
     const reportName = `${event.target_type}-${event.target_number}-${event.comment_id}.md`;
     await writeFile(join(reportDir, reportName), `# GitHub ${targetLabel} Feedback\n\nComment: ${event.comment_body}\n\n## Agent output\n\n${output}\n`, { mode: 0o600 });
-    const promotion = event.target_type === "issue" ? await promoteUnblockedIssue(config, session, event, output, fetchImpl) : undefined;
-    await postGitHubFeedback(config, session, event, output, reportName, promotion, fetchImpl);
+    const publication = event.target_type === "issue"
+      ? await promoteUnblockedIssue(config, session, event, output, fetchImpl)
+      : await publishPullRequestFeedback(config, session);
+    await postGitHubFeedback(config, session, event, output, reportName, publication, fetchImpl);
     if (typeof result.provider_session_id === "string" && sessionPattern.test(result.provider_session_id)) {
       await config.store.upsert({ ...session, provider_session_id: result.provider_session_id, updated_at: new Date().toISOString() });
     }
@@ -185,14 +187,17 @@ async function postGitHubFeedback(
   event: FeedbackEvent,
   output: string,
   reportName: string,
-  promotion: GitHubPullRequest | undefined,
+  publication: GitHubPublication | undefined,
   fetchImpl: typeof fetch,
 ): Promise<void> {
   const token = await loadGitHubToken(config.settingsFile);
   if (!token) return;
   const repository = parseGitHubRepository(session.repository);
-  const pullRequest = promotion ? `\n\n已创建/更新自动化测试 PR：${promotion.html_url}` : "";
-  const body = `${agentFeedbackMarker}\n## AgentLattice QA Agent 回复\n\n已处理 GitHub ${event.target_type === "issue" ? "Issue" : "PR"} #${event.target_number} 的补充信息。${pullRequest}\n\n${redactGitHubFeedback(output)}\n\n---\n本地完整报告：\`${reportName}\``;
+  const pullRequest = publication?.pull_request ? `\n\n已创建/更新自动化测试 PR：${publication.pull_request.html_url}` : "";
+  const pushed = event.target_type === "pull_request" && publication?.pushed
+    ? "\n\n本轮已验证的变更已提交并推送到当前 PR 分支。"
+    : "";
+  const body = `${agentFeedbackMarker}\n## AgentLattice QA Agent 回复\n\n已处理 GitHub ${event.target_type === "issue" ? "Issue" : "PR"} #${event.target_number} 的补充信息。${pullRequest}${pushed}\n\n${redactGitHubFeedback(output)}\n\n---\n本地完整报告：\`${reportName}\``;
   const response = await fetchImpl(new Request(`https://api.github.com/repos/${repository.owner}/${repository.name}/issues/${event.target_number}/comments`, {
     method: "POST",
     headers: {
@@ -208,6 +213,7 @@ async function postGitHubFeedback(
 
 interface GitHubFlowSettings { github_token?: string; repository_branch?: string; auto_publish?: boolean; }
 interface GitHubPullRequest { number: number; html_url: string; }
+interface GitHubPublication { pull_request?: GitHubPullRequest; pushed?: boolean; }
 
 async function promoteUnblockedIssue(
   config: PrFeedbackRunnerConfig,
@@ -215,7 +221,7 @@ async function promoteUnblockedIssue(
   event: FeedbackEvent,
   output: string,
   fetchImpl: typeof fetch,
-): Promise<GitHubPullRequest | undefined> {
+): Promise<GitHubPublication | undefined> {
   if (!isReadinessApproved(output)) return undefined;
   const settings = await loadGitHubFlowSettings(config.settingsFile);
   if (!settings.auto_publish) return undefined;
@@ -232,7 +238,31 @@ async function promoteUnblockedIssue(
   }
   const pullRequest = await ensureGitHubPullRequest(session, event, settings, fetchImpl);
   await config.store.bind(session.project_id, event.repository_id, pullRequest.number, new Date().toISOString());
-  return pullRequest;
+  return { pull_request: pullRequest, pushed: true };
+}
+
+async function publishPullRequestFeedback(
+  config: PrFeedbackRunnerConfig,
+  session: ProjectSession,
+): Promise<GitHubPublication | undefined> {
+  const settings = await loadGitHubFlowSettings(config.settingsFile);
+  if (!settings.auto_publish) return undefined;
+  if (!settings.github_token) throw new Error("GITHUB_TOKEN is required to publish Jira Flow PR feedback");
+
+  const repositoryRoot = join(session.workspace_root, "repository");
+  await git(["-C", repositoryRoot, "add", "--", session.jira_key], settings.github_token);
+  if (await gitSucceeds(["-C", repositoryRoot, "diff", "--cached", "--quiet"], settings.github_token)) {
+    return { pushed: false };
+  }
+
+  await git([
+    "-C", repositoryRoot,
+    "-c", "user.name=AgentLattice Jira Flow",
+    "-c", "user.email=agentlattice-jira-flow@localhost",
+    "commit", "-m", `test(${session.jira_key}): apply PR feedback`,
+  ], settings.github_token);
+  await git(["-C", repositoryRoot, "push", "origin", `HEAD:refs/heads/${session.branch}`], settings.github_token);
+  return { pushed: true };
 }
 
 async function ensureGitHubPullRequest(

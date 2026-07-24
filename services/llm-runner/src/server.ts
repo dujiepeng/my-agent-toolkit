@@ -29,6 +29,7 @@ export function createLlmRunnerServer(
   config: RunnerConfig = loadRunnerConfig(),
 ): LlmRunnerServer {
   const sessionLocks = createSessionLocks();
+  const systemWorkspaceLocks = createSessionLocks();
   return {
     async fetch(request: Request): Promise<Response> {
       const url = new URL(request.url);
@@ -48,7 +49,7 @@ export function createLlmRunnerServer(
       }
 
       if (request.method === "POST" && url.pathname === "/v1/system-runs") {
-        return handleSystemRun(request, config);
+        return handleSystemRun(request, config, systemWorkspaceLocks);
       }
 
       if (request.method === "POST" && url.pathname === "/v1/chat/stream") {
@@ -64,7 +65,12 @@ export function createLlmRunnerServer(
   };
 }
 
-async function handleSystemRun(request: Request, config: RunnerConfig): Promise<Response> {
+async function handleSystemRun(
+  request: Request,
+  config: RunnerConfig,
+  systemWorkspaceLocks: RuntimeSessionLocks,
+): Promise<Response> {
+  let releaseWorkspaceLock: (() => void) | undefined;
   try {
     if (!hasSystemRunnerAuthorization(request, config.system_runner_token)) {
       return jsonResponse({ error: "unauthorized" }, 401);
@@ -79,6 +85,13 @@ async function handleSystemRun(request: Request, config: RunnerConfig): Promise<
         runner_session_id: `system:${systemRun.flow_id}:${systemRun.run_id}`,
         output: `mock: ${systemRun.prompt}`,
       });
+    }
+    // Jira Runner and PR Feedback Runner are separate callers, but they share
+    // the same persistent project workspace and provider session. Serialize at
+    // this common boundary so a second webhook waits instead of spawning a
+    // competing CLI process in the same repository.
+    if (systemRun.workspace_id) {
+      releaseWorkspaceLock = await systemWorkspaceLocks.acquire(`system-workspace:${systemRun.workspace_id}`);
     }
     const cliConfig = cliRuntimeConfig(config, systemRun.runtime);
     if (!cliConfig) throw new UnavailableRuntimeError("runtime is not available yet");
@@ -121,6 +134,8 @@ async function handleSystemRun(request: Request, config: RunnerConfig): Promise<
     if (error instanceof UnavailableRuntimeError) return jsonResponse({ error: error.message }, 501);
     if (error instanceof RuntimeExecutionError) return jsonResponse({ error: error.message, code: error.code, ...(error.details ? { details: error.details } : {}) }, error.status);
     return jsonResponse({ error: error instanceof Error ? error.message : "invalid system run" }, 400);
+  } finally {
+    releaseWorkspaceLock?.();
   }
 }
 

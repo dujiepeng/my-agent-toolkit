@@ -1,4 +1,5 @@
 import { createHash, createHmac, randomUUID } from "node:crypto";
+import { execFileSync } from "node:child_process";
 import { mkdir, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
@@ -7,6 +8,51 @@ import { createPrFeedbackRunner } from "./runner.js";
 import { createJsonFileProjectSessionStore } from "./store.js";
 
 describe("pr feedback runner", () => {
+  it("commits and pushes only the current Jira directory after a PR comment resumes successfully", async () => {
+    const root = join(tmpdir(), `pr-publish-${randomUUID()}`);
+    const bareRemote = join(root, "origin.git");
+    const workspace = join(root, "system-flows", "jira-automation", "projects", "jira-HIM-4");
+    const repository = join(workspace, "repository");
+    await mkdir(join(repository, "HIM-4", "reports"), { recursive: true });
+    execFileSync("git", ["init", "--bare", bareRemote]);
+    execFileSync("git", ["init", "-b", "bot/HIM-4", repository]);
+    execFileSync("git", ["-C", repository, "config", "user.name", "Test User"]);
+    execFileSync("git", ["-C", repository, "config", "user.email", "test@example.com"]);
+    await writeFile(join(repository, "README.md"), "base\n");
+    await writeFile(join(repository, "HIM-4", "reports", "initial.md"), "initial report\n");
+    execFileSync("git", ["-C", repository, "add", "."]);
+    execFileSync("git", ["-C", repository, "commit", "-m", "initial"]);
+    execFileSync("git", ["-C", repository, "remote", "add", "origin", bareRemote]);
+    execFileSync("git", ["-C", repository, "push", "-u", "origin", "bot/HIM-4"]);
+    await writeFile(join(root, "settings.json"), JSON.stringify({ github_token: "github-token", auto_publish: true }));
+    const fetch = vi.fn<typeof globalThis.fetch>()
+      .mockImplementationOnce(async () => {
+        await writeFile(join(repository, "HIM-4", "reports", "pr-feedback.md"), "updated report\n");
+        await writeFile(join(repository, "outside.txt"), "must stay uncommitted\n");
+        return Response.json({ output: "已修复并验证通过" });
+      })
+      .mockResolvedValueOnce(Response.json({ id: 1 }, { status: 201 }));
+    const app = createPrFeedbackRunner({
+      store: createJsonFileProjectSessionStore(join(root, "state.json")), internalToken: "internal", llmRunnerUrl: "http://runner", workspaceRoot: root,
+      settingsFile: join(root, "settings.json"), executionTimeoutMs: 1_000, fetch,
+    });
+    await app.fetch(new Request("http://localhost/internal/project-sessions", {
+      method: "POST", headers: { authorization: "Bearer internal", "content-type": "application/json" },
+      body: JSON.stringify({ project_id: "jira-HIM-4", jira_key: "HIM-4", flow_id: "jira-automation", workspace_id: "jira-HIM-4", workspace_root: workspace, repository: "https://github.com/example/private.git", branch: "bot/HIM-4", runtime: "kiro", head_sha: "abc" }),
+    }));
+    await app.fetch(new Request("http://localhost/internal/project-sessions/jira-HIM-4/bind-pr", {
+      method: "POST", headers: { authorization: "Bearer internal", "content-type": "application/json" }, body: JSON.stringify({ repository_id: "123", pr_number: 9 }),
+    }));
+    const body = JSON.stringify({ repository: { id: 123 }, issue: { number: 9, pull_request: { url: "x" } }, comment: { id: 102, body: "请修复后推送" }, sender: { type: "User" } });
+    await app.fetch(new Request("http://localhost/webhooks/github", { method: "POST", headers: { "x-github-event": "issue_comment", "x-github-delivery": createHash("sha256").update(body).digest("hex") }, body }));
+    await vi.waitFor(() => expect(fetch).toHaveBeenCalledTimes(2));
+    expect(execFileSync("git", ["--git-dir", bareRemote, "log", "-1", "--pretty=%s", "bot/HIM-4"], { encoding: "utf8" }).trim()).toBe("test(HIM-4): apply PR feedback");
+    expect(execFileSync("git", ["-C", repository, "status", "--short"], { encoding: "utf8" })).toContain("?? outside.txt");
+    const commentRequest = fetch.mock.calls[1][0] as Request;
+    expect(await commentRequest.json()).toEqual(expect.objectContaining({ body: expect.stringContaining("已提交并推送") }));
+    await rm(root, { recursive: true, force: true });
+  });
+
   it("binds a persistent project session then resumes it from a signed GitHub PR comment", async () => {
     const root = join(tmpdir(), `pr-feedback-${randomUUID()}`);
     const secret = "local-test-secret";

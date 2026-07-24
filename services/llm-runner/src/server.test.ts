@@ -134,6 +134,57 @@ describe("llm-runner server", () => {
     expect(fetch).not.toHaveBeenCalled();
   });
 
+  it("serializes concurrent system runs targeting the same persistent workspace", async () => {
+    const activePath = `/tmp/system-workspace-active-${crypto.randomUUID()}.lock`;
+    const invocationsPath = `/tmp/system-workspace-invocations-${crypto.randomUUID()}.log`;
+    const command = [
+      "const fs = require('node:fs');",
+      "let input = '';",
+      "process.stdin.on('data', chunk => input += chunk);",
+      "process.stdin.on('end', () => {",
+      "  const overlap = fs.existsSync(process.env.ACTIVE_PATH);",
+      "  fs.writeFileSync(process.env.ACTIVE_PATH, 'active');",
+      "  fs.appendFileSync(process.env.INVOCATIONS_PATH, JSON.stringify({ input, overlap }) + '\\n');",
+      "  setTimeout(() => {",
+      "    fs.rmSync(process.env.ACTIVE_PATH, { force: true });",
+      "    process.stdout.write('done');",
+      "  }, 40);",
+      "});",
+    ].join(" ");
+    const server = createLlmRunnerServer({
+      enabled_runtimes: ["kiro"],
+      system_runner_token: "system-token",
+      kiro: {
+        command: process.execPath,
+        args: ["-e", command],
+        timeout_ms: 1_000,
+        env: { ACTIVE_PATH: activePath, INVOCATIONS_PATH: invocationsPath },
+      },
+    });
+    const run = (runId: string) => server.fetch(new Request("http://localhost/v1/system-runs", {
+      method: "POST",
+      headers: { authorization: "Bearer system-token" },
+      body: JSON.stringify({
+        flow_id: "jira-automation",
+        run_id: runId,
+        workspace_id: "jira-HIM-22187",
+        runtime: "kiro",
+        prompt: runId,
+      }),
+    }));
+
+    const responses = await Promise.all([run("jira-HIM-22187-a"), run("jira-HIM-22187-b")]);
+    expect(responses.map((response) => response.status)).toEqual([200, 200]);
+    const invocations = (await fs.readFile(invocationsPath, "utf8"))
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line) as { input: string; overlap: boolean });
+    expect(invocations).toHaveLength(2);
+    expect(invocations.every(({ overlap }) => overlap === false)).toBe(true);
+    await fs.rm(activePath, { force: true });
+    await fs.rm(invocationsPath, { force: true });
+  });
+
   it("forwards a Kiro cancellation only for the matching runtime session", async () => {
     const requests: Request[] = [];
     const server = createLlmRunnerServer({

@@ -1,5 +1,10 @@
 # 更新日志
 
+## 2026-07-24
+
+- PR 评论恢复后可自动提交并推送当前 Jira 目录到原 PR 分支
+- LLM Runner 按 Jira 工作目录串行 System Flow，避免 Webhook 与 GitHub 反馈并发写入
+
 ## 2026-07-23
 
 - Jira 与 GitHub Feedback Flow 改为直连执行
