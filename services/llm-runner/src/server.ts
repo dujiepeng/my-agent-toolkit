@@ -1,4 +1,4 @@
-import { parseChatRequest, type ChatResponse } from "@my-agent-toolkit/contracts";
+import { parseChatRequest, parseSystemRunRequest, type ChatResponse } from "@my-agent-toolkit/contracts";
 import { loadRunnerConfig, type RunnerConfig } from "./config.js";
 import {
   callMcpTool,
@@ -29,6 +29,7 @@ export function createLlmRunnerServer(
   config: RunnerConfig = loadRunnerConfig(),
 ): LlmRunnerServer {
   const sessionLocks = createSessionLocks();
+  const systemWorkspaceLocks = createSessionLocks();
   return {
     async fetch(request: Request): Promise<Response> {
       const url = new URL(request.url);
@@ -47,6 +48,10 @@ export function createLlmRunnerServer(
         return handleChat(request, config, sessionLocks);
       }
 
+      if (request.method === "POST" && url.pathname === "/v1/system-runs") {
+        return handleSystemRun(request, config, systemWorkspaceLocks);
+      }
+
       if (request.method === "POST" && url.pathname === "/v1/chat/stream") {
         return handleChatStream(request, config, sessionLocks);
       }
@@ -58,6 +63,85 @@ export function createLlmRunnerServer(
       return jsonResponse({ error: "not found" }, 404);
     },
   };
+}
+
+async function handleSystemRun(
+  request: Request,
+  config: RunnerConfig,
+  systemWorkspaceLocks: RuntimeSessionLocks,
+): Promise<Response> {
+  let releaseWorkspaceLock: (() => void) | undefined;
+  try {
+    if (!hasSystemRunnerAuthorization(request, config.system_runner_token)) {
+      return jsonResponse({ error: "unauthorized" }, 401);
+    }
+    const systemRun = parseSystemRunRequest(await request.json());
+    if (!config.enabled_runtimes.includes(systemRun.runtime)) {
+      throw new UnavailableRuntimeError("runtime is not available yet");
+    }
+    if (systemRun.runtime === "mock") {
+      return jsonResponse({
+        run_id: `run_${crypto.randomUUID()}`,
+        runner_session_id: `system:${systemRun.flow_id}:${systemRun.run_id}`,
+        output: `mock: ${systemRun.prompt}`,
+      });
+    }
+    // Jira Runner and PR Feedback Runner are separate callers, but they share
+    // the same persistent project workspace and provider session. Serialize at
+    // this common boundary so a second webhook waits instead of spawning a
+    // competing CLI process in the same repository.
+    if (systemRun.workspace_id) {
+      releaseWorkspaceLock = await systemWorkspaceLocks.acquire(`system-workspace:${systemRun.workspace_id}`);
+    }
+    const cliConfig = cliRuntimeConfig(config, systemRun.runtime);
+    if (!cliConfig) throw new UnavailableRuntimeError("runtime is not available yet");
+    // Adapt only at the process boundary. No Bot lookup, Soul, rules, memory,
+    // user environment, MCP manifest, or chat session is involved in this route.
+    const runtimeRequest = {
+      bot_id: `flow-${systemRun.flow_id}`,
+      user_id: "system",
+      conversation_id: systemRun.run_id,
+      runtime: systemRun.runtime,
+      prompt: systemRun.prompt,
+      ...(systemRun.trace_id ? { trace_id: systemRun.trace_id } : {}),
+    } as const;
+    const result = await runCliRuntime({
+      ...cliConfig,
+      ...(systemRun.provider_session_id ? { provider_session_id: systemRun.provider_session_id } : {}),
+      env: {
+        ...(cliConfig.env ?? {}),
+        ...(systemRun.runtime_env ?? {}),
+        KIRO_RELAY_SYSTEM_FLOW: "true",
+        KIRO_RELAY_FLOW_ID: systemRun.flow_id,
+        KIRO_RELAY_RUN_ID: systemRun.run_id,
+        ...(systemRun.workspace_id ? { KIRO_RELAY_WORKSPACE_ID: systemRun.workspace_id } : {}),
+        KIRO_RELAY_RUNTIME: systemRun.runtime,
+        MY_AGENT_CLI_PROVIDER: systemRun.runtime,
+        ...(systemRun.auto_execute ? { MY_AGENT_SYSTEM_FLOW_AUTO_APPROVE_CASES: "1" } : {}),
+        ...(systemRun.runtime_env && Object.keys(systemRun.runtime_env).length > 0
+          ? { MY_AGENT_SYSTEM_RUNTIME_ENV_KEYS_B64: Buffer.from(JSON.stringify(Object.keys(systemRun.runtime_env)), "utf8").toString("base64") }
+          : {}),
+        ...(systemRun.trace_id ? { MY_AGENT_TRACE_ID: systemRun.trace_id } : {}),
+      },
+    }, runtimeRequest);
+    return jsonResponse({
+      run_id: `run_${crypto.randomUUID()}`,
+      runner_session_id: `system:${systemRun.flow_id}:${systemRun.run_id}`,
+      output: redactText(result.output),
+      ...(result.provider_session_id ? { provider_session_id: result.provider_session_id } : {}),
+    });
+  } catch (error) {
+    if (error instanceof UnavailableRuntimeError) return jsonResponse({ error: error.message }, 501);
+    if (error instanceof RuntimeExecutionError) return jsonResponse({ error: error.message, code: error.code, ...(error.details ? { details: error.details } : {}) }, error.status);
+    return jsonResponse({ error: error instanceof Error ? error.message : "invalid system run" }, 400);
+  } finally {
+    releaseWorkspaceLock?.();
+  }
+}
+
+function hasSystemRunnerAuthorization(request: Request, expected: string | undefined): boolean {
+  const provided = request.headers.get("authorization")?.replace(/^Bearer\s+/i, "");
+  return Boolean(expected && provided && provided === expected);
 }
 
 async function handleRuntimeCancellation(
@@ -292,7 +376,10 @@ async function continueAfterMcpToolCalls(
   }
   let currentResult = runtimeResult;
   const requiresProjectPublish = isExplicitProjectPublishRequest(chatRequest.prompt);
+  const requiresHandoff = isExplicitHandoffRequest(chatRequest.prompt);
   let publishRetryIssued = false;
+  let handoffRetryIssued = false;
+  let handoffToolExecuted = false;
   for (let round = 0; round < getMaxMcpToolRounds(config); round += 1) {
     const completedOutput = outputAfterMcpToolCall(currentResult.output);
     if (completedOutput) {
@@ -315,8 +402,22 @@ async function continueAfterMcpToolCalls(
         });
         continue;
       }
+      if (requiresHandoff && !handoffRetryIssued) {
+        handoffRetryIssued = true;
+        currentResult = await runRuntime(config, {
+          ...chatRequest,
+          prompt: handoffRequiredFeedback(),
+        });
+        continue;
+      }
+      if (requiresHandoff && handoffToolExecuted) {
+        return currentResult;
+      }
       if (requiresProjectPublish) {
         return { ...currentResult, output: projectPublishMissingOutcome() };
+      }
+      if (requiresHandoff) {
+        return { ...currentResult, output: handoffMissingOutcome() };
       }
       return currentResult;
     }
@@ -328,6 +429,7 @@ async function continueAfterMcpToolCalls(
         ),
       };
     }
+    if (toolRequest.status === "call" && isHandoffTool(toolRequest.call.tool)) handoffToolExecuted = true;
     currentResult = await runRuntime(config, {
       ...chatRequest,
       prompt: await resolveMcpToolResult(config, chatRequest, toolRequest),
@@ -335,6 +437,9 @@ async function continueAfterMcpToolCalls(
   }
   if (requiresProjectPublish) {
     return { ...currentResult, output: projectPublishMissingOutcome() };
+  }
+  if (requiresHandoff) {
+    return { ...currentResult, output: handoffMissingOutcome() };
   }
   const finalResult = await runRuntime(config, {
     ...chatRequest,
@@ -360,7 +465,10 @@ async function continueAfterMcpToolCallsStream(
   let currentResult = runtimeResult;
   let turnNumber = 1;
   const requiresProjectPublish = isExplicitProjectPublishRequest(chatRequest.prompt);
+  const requiresHandoff = isExplicitHandoffRequest(chatRequest.prompt);
   let publishRetryIssued = false;
+  let handoffRetryIssued = false;
+  let handoffToolExecuted = false;
   for (let round = 0; round < getMaxMcpToolRounds(config); round += 1) {
     const output = await collectRuntimeStream(currentResult.stream);
     await recordRunnerTraceSpan(config, chatRequest, {
@@ -389,8 +497,22 @@ async function continueAfterMcpToolCallsStream(
         });
         continue;
       }
+      if (requiresHandoff && !handoffRetryIssued) {
+        handoffRetryIssued = true;
+        currentResult = await runRuntimeStreamResolved(config, {
+          ...chatRequest,
+          prompt: handoffRequiredFeedback(),
+        });
+        continue;
+      }
+      if (requiresHandoff && handoffToolExecuted) {
+        return output;
+      }
       if (requiresProjectPublish) {
         return projectPublishMissingOutcome();
+      }
+      if (requiresHandoff) {
+        return handoffMissingOutcome();
       }
       return output;
     }
@@ -399,6 +521,7 @@ async function continueAfterMcpToolCallsStream(
         await executeMcpToolCallResult(config, chatRequest, toolRequest.call),
       );
     }
+    if (toolRequest.status === "call" && isHandoffTool(toolRequest.call.tool)) handoffToolExecuted = true;
     currentResult = await runRuntimeStreamResolved(config, {
       ...chatRequest,
       prompt: await resolveMcpToolResult(config, chatRequest, toolRequest),
@@ -406,6 +529,9 @@ async function continueAfterMcpToolCallsStream(
   }
   if (requiresProjectPublish) {
     return projectPublishMissingOutcome();
+  }
+  if (requiresHandoff) {
+    return handoffMissingOutcome();
   }
   const finalResult = await runRuntimeStreamResolved(config, {
     ...chatRequest,
@@ -493,13 +619,33 @@ function isExplicitProjectPublishRequest(message: string): boolean {
   return /^(?:(?:把|将).{0,160})?(?:给我\s*)?(?:提交|推送|发布(?:代码|改动|分支|到\s*(?:github|git))|commit|push|publish)/i.test(command);
 }
 
+function isExplicitHandoffRequest(message: string): boolean {
+  const text = lastUserMessage(message).trim();
+  if (!text || /(?:不要|别|暂不|先不|无需|不需要).{0,12}(?:转交|转发|分配|交给)/i.test(text)) {
+    return false;
+  }
+  if (/(?:怎么|如何|为何|为什么|是否|能否|可否|要不要|会不会|会怎样|吗|么|\?)/i.test(text)) {
+    return false;
+  }
+  return /(?:转交|转发|分配|交给).{0,80}(?:给|至|到).{1,40}/i.test(text)
+    || /(?:让|请).{1,40}(?:开始|负责|处理|测试|开发|评审)/i.test(text) && /(?:转交|转发|分配|交给)/i.test(text);
+}
+
 function isProjectPublishTool(tool: string): boolean {
   return tool === "project.publish" || tool === "jira.project.publish";
 }
 
+function isHandoffTool(tool: string): boolean {
+  return tool === "handoff.draft.create"
+    || tool === "handoff.draft.select_bot"
+    || tool === "handoff.draft.confirm_send";
+}
+
 function lastUserMessage(prompt: string): string {
   const messages = [...prompt.matchAll(/<user-message>\s*([\s\S]*?)\s*<\/user-message>/gi)];
-  return messages.length > 0 ? messages.at(-1)?.[1] ?? prompt : prompt;
+  if (messages.length > 0) return messages.at(-1)?.[1] ?? prompt;
+  const runtimeMessages = [...prompt.matchAll(/<message>\s*([\s\S]*?)\s*<\/message>/gi)];
+  return runtimeMessages.length > 0 ? runtimeMessages.at(-1)?.[1] ?? prompt : prompt;
 }
 
 function projectPublishRequiredFeedback(): string {
@@ -513,6 +659,20 @@ function projectPublishRequiredFeedback(): string {
 
 function projectPublishMissingOutcome(): string {
   return "提交未执行：机器人没有调用 project.publish，未创建或推送经验证的 Commit。请重试。";
+}
+
+function handoffRequiredFeedback(): string {
+  return [
+    "HANDOFF_GATE: the latest user message explicitly asks to transfer work to another person.",
+    "Your previous response did not create a handoff. Do not ask the user to manually forward anything.",
+    "Reply with exactly one handoff.draft.create MCP call and no prose.",
+    "Use the recipient's displayed Chinese name, a concise factual summary, and any Jira/Confluence links present in the user request.",
+    '<mcp_tool_call>{"tool":"handoff.draft.create","input":{"recipient_name":"...","summary":"...","jira_links":["..."]}}</mcp_tool_call>',
+  ].join("\n");
+}
+
+function handoffMissingOutcome(): string {
+  return "转交未执行：机器人没有调用 handoff.draft.create。请确认目标用户已认领至少一个 Bot 后重试。";
 }
 
 async function resolveMcpToolResult(

@@ -1,8 +1,13 @@
+import { createHash } from "node:crypto";
+import { mkdir, readFile, readdir, rename, rm, writeFile } from "node:fs/promises";
+import { dirname, join } from "node:path";
+
 export interface ControlApiConfig {
   dataServiceUrl: string;
   logServiceUrl: string;
   botHostUrl?: string;
   capabilityRunnerUrl?: string;
+  jiraAutomationSettingsFile?: string;
   fetch: typeof fetch;
 }
 
@@ -24,6 +29,100 @@ export function createControlApiServer(config: ControlApiConfig): ControlApiServ
 
       if (request.method === "GET" && url.pathname === "/") {
         return htmlResponse(renderChannelWorkbenchPage());
+      }
+
+      if (request.method === "GET" && url.pathname === "/agent-lattice") {
+        return handleAgentLatticeWorkbenchPage(config);
+      }
+
+      if (request.method === "GET" && url.pathname === "/automation/jira/settings") {
+        return handleJiraAutomationSettingsPage(config, url);
+      }
+      if (request.method === "GET" && url.pathname === "/automation/jira") {
+        return handleJiraAutomationRunsPage(config);
+      }
+      const jiraAutomationRunMatch = url.pathname.match(/^\/automation\/jira\/runs\/([^/]+)$/);
+      if (request.method === "GET" && jiraAutomationRunMatch) {
+        return handleJiraAutomationRunDetailPage(config, decodeURIComponent(jiraAutomationRunMatch[1]));
+      }
+      if (request.method === "POST" && url.pathname === "/automation/jira/settings") {
+        return handleJiraAutomationSettingsSave(request, config);
+      }
+      if (request.method === "POST" && url.pathname === "/automation/jira/settings/github-webhook") {
+        return handleJiraAutomationGitHubWebhookRegister(request, config);
+      }
+      if (request.method === "POST" && url.pathname === "/automation/jira/settings/skills/upload") {
+        return handleJiraAutomationSkillUpload(request, config);
+      }
+
+      const agentLatticeWorkPageMatch = url.pathname.match(/^\/agent-lattice\/works\/([^/]+)$/);
+      if (request.method === "GET" && agentLatticeWorkPageMatch) {
+        return handleAgentLatticeWorkPage(config, agentLatticeWorkPageMatch[1]);
+      }
+
+      if (request.method === "POST" && url.pathname === "/agent-lattice/users/create") {
+        return handleAgentLatticeUserCreate(request, config);
+      }
+
+      if (request.method === "POST" && url.pathname === "/agent-lattice/agents/create") {
+        return handleAgentLatticeAgentCreate(request, config);
+      }
+
+      if (request.method === "POST" && url.pathname === "/agent-lattice/bindings/user-agent") {
+        return handleAgentLatticeUserAgentBind(request, config);
+      }
+
+      if (request.method === "POST" && url.pathname === "/agent-lattice/bindings/agent-bot") {
+        return handleAgentLatticeAgentBotBind(request, config);
+      }
+
+      if (request.method === "POST" && url.pathname === "/agent-lattice/works/create") {
+        return handleAgentLatticeWorkCreate(request, config);
+      }
+
+      const agentLatticeStageCreateMatch = url.pathname.match(/^\/agent-lattice\/works\/([^/]+)\/stages\/create$/);
+      if (request.method === "POST" && agentLatticeStageCreateMatch) {
+        return handleAgentLatticeStageCreate(request, config, agentLatticeStageCreateMatch[1]);
+      }
+
+      const agentLatticeStageTransitionMatch = url.pathname.match(/^\/agent-lattice\/work-stages\/([^/]+)\/transition$/);
+      if (request.method === "POST" && agentLatticeStageTransitionMatch) {
+        return handleAgentLatticeStageTransition(request, config, agentLatticeStageTransitionMatch[1]);
+      }
+
+      const agentLatticeArtifactCreateMatch = url.pathname.match(/^\/agent-lattice\/work-stages\/([^/]+)\/artifacts\/create$/);
+      if (request.method === "POST" && agentLatticeArtifactCreateMatch) {
+        return handleAgentLatticeArtifactCreate(request, config, agentLatticeArtifactCreateMatch[1]);
+      }
+
+      const agentLatticeArtifactVersionCreateMatch = url.pathname.match(/^\/agent-lattice\/artifacts\/([^/]+)\/versions\/create$/);
+      if (request.method === "POST" && agentLatticeArtifactVersionCreateMatch) {
+        return handleAgentLatticeArtifactVersionCreate(request, config, agentLatticeArtifactVersionCreateMatch[1]);
+      }
+
+      const agentLatticeStageEnqueueMatch = url.pathname.match(/^\/agent-lattice\/work-stages\/([^/]+)\/enqueue$/);
+      if (request.method === "POST" && agentLatticeStageEnqueueMatch) {
+        return handleAgentLatticeStageEnqueue(request, config, agentLatticeStageEnqueueMatch[1]);
+      }
+
+      const agentLatticeStageCancelMatch = url.pathname.match(/^\/agent-lattice\/work-stages\/([^/]+)\/cancel$/);
+      if (request.method === "POST" && agentLatticeStageCancelMatch) {
+        return handleAgentLatticeStageCancel(request, config, agentLatticeStageCancelMatch[1]);
+      }
+
+      const agentLatticeGateCreateMatch = url.pathname.match(/^\/agent-lattice\/work-stages\/([^/]+)\/gates\/create$/);
+      if (request.method === "POST" && agentLatticeGateCreateMatch) {
+        return handleAgentLatticeGateCreate(request, config, agentLatticeGateCreateMatch[1]);
+      }
+
+      const agentLatticeGateResultMatch = url.pathname.match(/^\/agent-lattice\/gates\/([^/]+)\/results\/create$/);
+      if (request.method === "POST" && agentLatticeGateResultMatch) {
+        return handleAgentLatticeGateResultCreate(request, config, agentLatticeGateResultMatch[1]);
+      }
+
+      const agentLatticeHandoffMatch = url.pathname.match(/^\/agent-lattice\/works\/([^/]+)\/handoffs\/create$/);
+      if (request.method === "POST" && agentLatticeHandoffMatch) {
+        return handleAgentLatticeHandoffCreate(request, config, agentLatticeHandoffMatch[1]);
       }
 
       if (request.method === "GET" && url.pathname === "/bind/jira") {
@@ -119,6 +218,122 @@ export function createControlApiServer(config: ControlApiConfig): ControlApiServ
 
       if (request.method === "GET" && url.pathname === "/v1/global-documents") {
         return proxyGetRequest(`${config.dataServiceUrl}/v1/global-documents`, config);
+      }
+
+      if (request.method === "GET" && url.pathname === "/v1/users") {
+        return proxyGetRequest(`${config.dataServiceUrl}/v1/users${url.search}`, config);
+      }
+
+      if (request.method === "POST" && url.pathname === "/v1/users") {
+        return proxyAgentLatticeMutation(request, `${config.dataServiceUrl}/v1/users`, config, "platform_user.create", "platform_user", "user_id");
+      }
+
+      if (request.method === "GET" && url.pathname === "/v1/personal-agents") {
+        return proxyGetRequest(`${config.dataServiceUrl}/v1/personal-agents${url.search}`, config);
+      }
+
+      if (request.method === "POST" && url.pathname === "/v1/personal-agents") {
+        return proxyAgentLatticeMutation(request, `${config.dataServiceUrl}/v1/personal-agents`, config, "personal_agent.create", "personal_agent", "agent_id");
+      }
+
+      if (request.method === "GET" && url.pathname === "/v1/user-agent-bindings") {
+        return proxyGetRequest(`${config.dataServiceUrl}/v1/user-agent-bindings${url.search}`, config);
+      }
+
+      if (request.method === "POST" && url.pathname === "/v1/user-agent-bindings") {
+        return proxyAgentLatticeMutation(request, `${config.dataServiceUrl}/v1/user-agent-bindings`, config, "user_agent.bind", "user_agent_binding", "binding_id");
+      }
+
+      if (request.method === "GET" && url.pathname === "/v1/agent-bot-bindings") {
+        return proxyGetRequest(`${config.dataServiceUrl}/v1/agent-bot-bindings${url.search}`, config);
+      }
+
+      if (request.method === "POST" && url.pathname === "/v1/agent-bot-bindings") {
+        return proxyAgentLatticeMutation(request, `${config.dataServiceUrl}/v1/agent-bot-bindings`, config, "agent_bot.bind", "agent_bot_binding", "binding_id");
+      }
+
+      if (request.method === "GET" && url.pathname === "/v1/works") {
+        return proxyGetRequest(`${config.dataServiceUrl}/v1/works${url.search}`, config);
+      }
+
+      if (request.method === "POST" && url.pathname === "/v1/works") {
+        return proxyAgentLatticeMutation(request, `${config.dataServiceUrl}/v1/works`, config, "work.create", "work", "work_id");
+      }
+
+      const agentLatticeWorkApiMatch = url.pathname.match(/^\/v1\/works\/([^/]+)$/);
+      if (request.method === "GET" && agentLatticeWorkApiMatch) {
+        return proxyGetRequest(`${config.dataServiceUrl}/v1/works/${encodeURIComponent(agentLatticeWorkApiMatch[1])}`, config);
+      }
+
+      const agentLatticeWorkStagesApiMatch = url.pathname.match(/^\/v1\/works\/([^/]+)\/stages$/);
+      if (request.method === "GET" && agentLatticeWorkStagesApiMatch) {
+        return proxyGetRequest(`${config.dataServiceUrl}/v1/works/${encodeURIComponent(agentLatticeWorkStagesApiMatch[1])}/stages`, config);
+      }
+      if (request.method === "POST" && agentLatticeWorkStagesApiMatch) {
+        return proxyAgentLatticeMutation(request, `${config.dataServiceUrl}/v1/works/${encodeURIComponent(agentLatticeWorkStagesApiMatch[1])}/stages`, config, "work_stage.create", "work_stage", "stage_id");
+      }
+
+      const agentLatticeWorkEventsApiMatch = url.pathname.match(/^\/v1\/works\/([^/]+)\/events$/);
+      if (request.method === "GET" && agentLatticeWorkEventsApiMatch) {
+        return proxyGetRequest(`${config.dataServiceUrl}/v1/works/${encodeURIComponent(agentLatticeWorkEventsApiMatch[1])}/events`, config);
+      }
+
+      const agentLatticeWorkArtifactsApiMatch = url.pathname.match(/^\/v1\/works\/([^/]+)\/artifacts$/);
+      if (request.method === "GET" && agentLatticeWorkArtifactsApiMatch) {
+        return proxyGetRequest(`${config.dataServiceUrl}/v1/works/${encodeURIComponent(agentLatticeWorkArtifactsApiMatch[1])}/artifacts`, config);
+      }
+
+      const agentLatticeStageConversationApiMatch = url.pathname.match(/^\/v1\/work-stages\/([^/]+)\/conversation$/);
+      if (request.method === "GET" && agentLatticeStageConversationApiMatch) {
+        return proxyGetRequest(`${config.dataServiceUrl}/v1/work-stages/${encodeURIComponent(agentLatticeStageConversationApiMatch[1])}/conversation`, config);
+      }
+
+      const agentLatticeStageArtifactsApiMatch = url.pathname.match(/^\/v1\/work-stages\/([^/]+)\/artifacts$/);
+      if (request.method === "POST" && agentLatticeStageArtifactsApiMatch) {
+        return proxyAgentLatticeMutation(request, `${config.dataServiceUrl}/v1/work-stages/${encodeURIComponent(agentLatticeStageArtifactsApiMatch[1])}/artifacts`, config, "artifact.publish", "artifact", "artifact_id");
+      }
+
+      const agentLatticeArtifactVersionsApiMatch = url.pathname.match(/^\/v1\/artifacts\/([^/]+)\/versions$/);
+      if (request.method === "GET" && agentLatticeArtifactVersionsApiMatch) {
+        return proxyGetRequest(`${config.dataServiceUrl}/v1/artifacts/${encodeURIComponent(agentLatticeArtifactVersionsApiMatch[1])}/versions`, config);
+      }
+      if (request.method === "POST" && agentLatticeArtifactVersionsApiMatch) {
+        return proxyAgentLatticeMutation(request, `${config.dataServiceUrl}/v1/artifacts/${encodeURIComponent(agentLatticeArtifactVersionsApiMatch[1])}/versions`, config, "artifact.version.publish", "artifact", "artifact_id");
+      }
+
+      const agentLatticeArtifactApiMatch = url.pathname.match(/^\/v1\/artifacts\/([^/]+)$/);
+      if (request.method === "GET" && agentLatticeArtifactApiMatch) {
+        return proxyGetRequest(`${config.dataServiceUrl}/v1/artifacts/${encodeURIComponent(agentLatticeArtifactApiMatch[1])}`, config);
+      }
+
+      const agentLatticeStageTransitionApiMatch = url.pathname.match(/^\/v1\/work-stages\/([^/]+)\/transitions$/);
+      if (request.method === "POST" && agentLatticeStageTransitionApiMatch) {
+        return proxyAgentLatticeMutation(request, `${config.dataServiceUrl}/v1/work-stages/${encodeURIComponent(agentLatticeStageTransitionApiMatch[1])}/transitions`, config, "work_stage.transition", "work_stage", "stage_id");
+      }
+
+      const agentLatticeStageEnqueueApiMatch = url.pathname.match(/^\/v1\/work-stages\/([^/]+)\/enqueue$/);
+      if (request.method === "POST" && agentLatticeStageEnqueueApiMatch) {
+        return proxyAgentLatticeMutation(request, `${config.dataServiceUrl}/v1/work-stages/${encodeURIComponent(agentLatticeStageEnqueueApiMatch[1])}/enqueue`, config, "execution.enqueue", "work_stage", "stage_id");
+      }
+
+      const agentLatticeWorkExecutionsApiMatch = url.pathname.match(/^\/v1\/works\/([^/]+)\/executions$/);
+      if (request.method === "GET" && agentLatticeWorkExecutionsApiMatch) {
+        return proxyGetRequest(`${config.dataServiceUrl}/v1/works/${encodeURIComponent(agentLatticeWorkExecutionsApiMatch[1])}/executions`, config);
+      }
+
+      const agentLatticeStageGatesApiMatch = url.pathname.match(/^\/v1\/work-stages\/([^/]+)\/gates$/);
+      if (request.method === "POST" && agentLatticeStageGatesApiMatch) {
+        return proxyAgentLatticeMutation(request, `${config.dataServiceUrl}/v1/work-stages/${encodeURIComponent(agentLatticeStageGatesApiMatch[1])}/gates`, config, "gate.create", "gate", "gate_id");
+      }
+
+      const agentLatticeGateResultsApiMatch = url.pathname.match(/^\/v1\/gates\/([^/]+)\/results$/);
+      if (request.method === "POST" && agentLatticeGateResultsApiMatch) {
+        return proxyAgentLatticeMutation(request, `${config.dataServiceUrl}/v1/gates/${encodeURIComponent(agentLatticeGateResultsApiMatch[1])}/results`, config, "gate.result.create", "gate_result", "gate_result_id");
+      }
+
+      const agentLatticeWorkHandoffsApiMatch = url.pathname.match(/^\/v1\/works\/([^/]+)\/handoffs$/);
+      if (request.method === "POST" && agentLatticeWorkHandoffsApiMatch) {
+        return proxyAgentLatticeMutation(request, `${config.dataServiceUrl}/v1/works/${encodeURIComponent(agentLatticeWorkHandoffsApiMatch[1])}/handoffs`, config, "work.handoff", "handoff", "handoff_id");
       }
 
       if (request.method === "POST" && url.pathname === "/v1/global-documents") {
@@ -540,6 +755,570 @@ export function createControlApiServer(config: ControlApiConfig): ControlApiServ
       return jsonResponse({ error: "not found" }, 404);
     },
   };
+}
+
+async function handleAgentLatticeWorkbenchPage(config: ControlApiConfig): Promise<Response> {
+  const [users, agents, userAgentBindings, agentBotBindings, bots, works] = await Promise.all([
+    fetchDataServiceJsonArray(config, "/v1/users"),
+    fetchDataServiceJsonArray(config, "/v1/personal-agents"),
+    fetchDataServiceJsonArray(config, "/v1/user-agent-bindings"),
+    fetchDataServiceJsonArray(config, "/v1/agent-bot-bindings"),
+    fetchDataServiceJsonArray(config, "/v1/bots"),
+    fetchDataServiceJsonArray(config, "/v1/works"),
+  ]);
+  return htmlResponse(renderAgentLatticeWorkbenchPage({
+    users,
+    agents,
+    userAgentBindings,
+    agentBotBindings,
+    bots,
+    works,
+  }));
+}
+
+interface JiraAutomationSettings {
+  enabled: boolean;
+  repository_url: string;
+  repository_branch: string;
+  runtime: "claude-code" | "kiro";
+  notify_reporter: boolean;
+  auto_push: boolean;
+  auto_execute: boolean;
+  auto_publish: boolean;
+  skills: string[];
+  github_token: string;
+  github_webhook_secret: string;
+  github_webhook_url: string;
+  runtime_env: string;
+}
+
+interface JiraAutomationRunStep { stage: string; status: "running" | "succeeded" | "blocked" | "failed"; message: string; created_at: string; }
+interface JiraAutomationRun {
+  run_id: string; jira_key: string; title: string; runtime: string; status: "running" | "succeeded" | "blocked" | "failed";
+  current_stage: string; workspace_id: string; branch: string; started_at: string; finished_at?: string;
+  issue_url?: string; pull_request_url?: string; report_path?: string; steps: JiraAutomationRunStep[];
+}
+
+const DEFAULT_JIRA_AUTOMATION_SETTINGS: JiraAutomationSettings = {
+  enabled: false,
+  repository_url: "",
+  repository_branch: "main",
+  runtime: "claude-code",
+  notify_reporter: true,
+  auto_push: false,
+  auto_execute: false,
+  auto_publish: false,
+  skills: [],
+  github_token: "",
+  github_webhook_secret: "",
+  github_webhook_url: "",
+  runtime_env: "",
+};
+
+async function handleJiraAutomationSettingsPage(config: ControlApiConfig, url: URL): Promise<Response> {
+  const [settings, localSkills] = await Promise.all([readJiraAutomationSettings(config), listJiraAutomationSkills(config)]);
+  const saved = url.searchParams.get("saved") === "1";
+  const webhookRegistered = url.searchParams.get("hook") === "1";
+  return htmlResponse(renderJiraAutomationSettingsPage(settings, saved, undefined, localSkills, webhookRegistered ? "GitHub Webhook 已注册或更新。" : undefined));
+}
+
+async function handleJiraAutomationRunsPage(config: ControlApiConfig): Promise<Response> {
+  return htmlResponse(renderJiraAutomationRunsPage(await readJiraAutomationRuns(config)));
+}
+
+async function handleJiraAutomationRunDetailPage(config: ControlApiConfig, runId: string): Promise<Response> {
+  const run = (await readJiraAutomationRuns(config)).find((item) => item.run_id === runId);
+  return run ? htmlResponse(renderJiraAutomationRunDetailPage(run)) : htmlResponseWithStatus(pageShell("Jira 自动化任务", `<section class="card stack"><h1>任务不存在</h1><a class="btn" href="/automation/jira">返回任务中心</a></section>`), 404);
+}
+
+async function readJiraAutomationRuns(config: ControlApiConfig): Promise<JiraAutomationRun[]> {
+  const settingsFile = config.jiraAutomationSettingsFile;
+  if (!settingsFile) return [];
+  try {
+    const parsed = JSON.parse(await readFile(join(dirname(settingsFile), "runs.json"), "utf8")) as { runs?: unknown };
+    if (!Array.isArray(parsed.runs)) return [];
+    return parsed.runs.filter(isJiraAutomationRun).sort((left, right) => right.started_at.localeCompare(left.started_at));
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return [];
+    throw error;
+  }
+}
+
+function isJiraAutomationRun(value: unknown): value is JiraAutomationRun {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const run = value as Record<string, unknown>;
+  const text = (key: string) => typeof run[key] === "string" && run[key].length > 0;
+  return text("run_id") && text("jira_key") && text("title") && text("runtime") && text("status") && text("current_stage") && text("workspace_id") && text("branch") && text("started_at")
+    && ["running", "succeeded", "blocked", "failed"].includes(String(run.status))
+    && (!run.steps || Array.isArray(run.steps));
+}
+
+async function handleJiraAutomationSettingsSave(request: Request, config: ControlApiConfig): Promise<Response> {
+  const formData = await request.formData();
+  const form = Object.fromEntries([...formData.entries()].map(([key, value]) => [key, String(value)]));
+  const repositoryUrl = (form.repository_url ?? "").trim();
+  const repositoryBranch = (form.repository_branch ?? "main").trim();
+  if (repositoryUrl && !/^https:\/\/github\.com\/[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+(?:\.git)?$/.test(repositoryUrl)) {
+    return htmlResponseWithStatus(renderJiraAutomationSettingsPage(await readJiraAutomationSettings(config), false, "仓库地址必须是 HTTPS GitHub 地址。"), 400);
+  }
+  if (!/^[A-Za-z0-9][A-Za-z0-9._/-]{0,127}$/.test(repositoryBranch)) {
+    return htmlResponseWithStatus(renderJiraAutomationSettingsPage(await readJiraAutomationSettings(config), false, "分支名称不合法。"), 400);
+  }
+  const webhookUrl = (form.github_webhook_url ?? "").trim();
+  const webhookSecret = form.github_webhook_secret ?? "";
+  if (webhookUrl && !/^https:\/\/[^\s/]+(?:\/[^\s]*)?\/webhooks\/github$/.test(webhookUrl)) {
+    return htmlResponseWithStatus(renderJiraAutomationSettingsPage(await readJiraAutomationSettings(config), false, "GitHub Webhook 地址必须是 HTTPS 且以 /webhooks/github 结尾。"), 400);
+  }
+  if (webhookSecret && (webhookSecret.length < 16 || webhookSecret.length > 512)) {
+    return htmlResponseWithStatus(renderJiraAutomationSettingsPage(await readJiraAutomationSettings(config), false, "GitHub Webhook Secret 长度必须为 16 到 512 个字符。"), 400);
+  }
+  const settings: JiraAutomationSettings = {
+    enabled: form.enabled === "true",
+    repository_url: repositoryUrl,
+    repository_branch: repositoryBranch,
+    runtime: form.runtime === "kiro" ? "kiro" : "claude-code",
+    notify_reporter: form.notify_reporter === "true",
+    auto_push: false,
+    auto_execute: form.auto_execute === "true",
+    auto_publish: form.auto_publish === "true",
+    skills: formData.getAll("skills").map(String).filter((name) => /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(name)),
+    github_token: form.github_token ?? "",
+    github_webhook_secret: webhookSecret,
+    github_webhook_url: webhookUrl,
+    runtime_env: form.runtime_env ?? "",
+  };
+  await writeJiraAutomationSettings(config, settings);
+  return redirectResponse("/automation/jira/settings?saved=1");
+}
+
+async function readJiraAutomationSettings(config: ControlApiConfig): Promise<JiraAutomationSettings> {
+  const file = config.jiraAutomationSettingsFile;
+  if (!file) return { ...DEFAULT_JIRA_AUTOMATION_SETTINGS };
+  try {
+    const parsed = JSON.parse(await readFile(file, "utf8")) as Partial<JiraAutomationSettings>;
+    return {
+      enabled: parsed.enabled === true,
+      repository_url: typeof parsed.repository_url === "string" ? parsed.repository_url : "",
+      repository_branch: typeof parsed.repository_branch === "string" && parsed.repository_branch ? parsed.repository_branch : "main",
+      runtime: parsed.runtime === "kiro" ? "kiro" : "claude-code",
+      notify_reporter: parsed.notify_reporter !== false,
+      auto_push: false,
+      auto_execute: parsed.auto_execute === true,
+      auto_publish: parsed.auto_publish === true,
+      skills: Array.isArray(parsed.skills) ? parsed.skills.filter((name): name is string => typeof name === "string" && /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(name)) : [],
+      github_token: typeof parsed.github_token === "string" ? parsed.github_token : "",
+      github_webhook_secret: typeof parsed.github_webhook_secret === "string" ? parsed.github_webhook_secret : "",
+      github_webhook_url: typeof parsed.github_webhook_url === "string" ? parsed.github_webhook_url : "",
+      runtime_env: typeof parsed.runtime_env === "string" ? parsed.runtime_env : "",
+    };
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return { ...DEFAULT_JIRA_AUTOMATION_SETTINGS };
+    throw error;
+  }
+}
+
+async function handleJiraAutomationGitHubWebhookRegister(request: Request, config: ControlApiConfig): Promise<Response> {
+  const saved = await readJiraAutomationSettings(config);
+  const formData = await request.formData();
+  const form = Object.fromEntries([...formData.entries()].map(([key, value]) => [key, String(value)]));
+  const settings: JiraAutomationSettings = {
+    ...saved,
+    enabled: form.enabled === "true",
+    repository_url: (form.repository_url ?? saved.repository_url).trim(),
+    repository_branch: (form.repository_branch ?? saved.repository_branch).trim(),
+    runtime: form.runtime === "kiro" ? "kiro" : "claude-code",
+    notify_reporter: form.notify_reporter === "true",
+    auto_execute: form.auto_execute === "true",
+    auto_publish: form.auto_publish === "true",
+    skills: formData.getAll("skills").map(String).filter((name) => /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(name)),
+    github_token: form.github_token ?? saved.github_token,
+    github_webhook_secret: form.github_webhook_secret ?? saved.github_webhook_secret,
+    github_webhook_url: (form.github_webhook_url ?? saved.github_webhook_url).trim(),
+    runtime_env: form.runtime_env ?? saved.runtime_env,
+  };
+  if (settings.github_webhook_url && !/^https:\/\/[^\s/]+(?:\/[^\s]*)?\/webhooks\/github$/.test(settings.github_webhook_url)) {
+    return htmlResponseWithStatus(renderJiraAutomationSettingsPage(settings, false, "GitHub Webhook 地址必须是 HTTPS 且以 /webhooks/github 结尾。"), 400);
+  }
+  if (settings.github_webhook_secret && (settings.github_webhook_secret.length < 16 || settings.github_webhook_secret.length > 512)) {
+    return htmlResponseWithStatus(renderJiraAutomationSettingsPage(settings, false, "GitHub Webhook Secret 长度必须为 16 到 512 个字符。"), 400);
+  }
+  await writeJiraAutomationSettings(config, settings);
+  if (!settings.repository_url || !settings.github_token || !settings.github_webhook_url || !settings.github_webhook_secret) {
+    return htmlResponseWithStatus(renderJiraAutomationSettingsPage(settings, false, "请先保存仓库地址、GITHUB_TOKEN、Webhook 地址和 Webhook Secret。"), 400);
+  }
+  try {
+    const repository = parseGitHubRepositoryUrl(settings.repository_url);
+    const headers = {
+      accept: "application/vnd.github+json",
+      authorization: `Bearer ${settings.github_token}`,
+      "content-type": "application/json",
+      "user-agent": "AgentLattice-Jira-Flow",
+    };
+    const base = `https://api.github.com/repos/${repository.owner}/${repository.name}/hooks`;
+    const list = await config.fetch(new Request(base, { headers }));
+    if (!list.ok) throw new Error(`GitHub Hook 查询失败（${list.status}）：${await list.text()}`);
+    const hooks = await list.json() as Array<{ id?: unknown; config?: { url?: unknown } }>;
+    const existing = hooks.find((hook) => hook.config?.url === settings.github_webhook_url);
+    const payload = JSON.stringify({ name: "web", active: true, events: ["issue_comment"], config: { url: settings.github_webhook_url, content_type: "json", secret: settings.github_webhook_secret, insecure_ssl: "0" } });
+    const response = existing?.id
+      ? await config.fetch(new Request(`${base}/${encodeURIComponent(String(existing.id))}`, { method: "PATCH", headers, body: payload }))
+      : await config.fetch(new Request(base, { method: "POST", headers, body: payload }));
+    if (!response.ok) throw new Error(`GitHub Hook 注册失败（${response.status}）：${await response.text()}`);
+    return redirectResponse("/automation/jira/settings?saved=1&hook=1");
+  } catch (error) {
+    return htmlResponseWithStatus(renderJiraAutomationSettingsPage(settings, false, error instanceof Error ? error.message : "GitHub Hook 注册失败。"), 400);
+  }
+}
+
+function parseGitHubRepositoryUrl(url: string): { owner: string; name: string } {
+  const match = url.match(/^https:\/\/github\.com\/([^/]+)\/([^/]+?)(?:\.git)?$/);
+  if (!match) throw new Error("仓库地址必须是 HTTPS GitHub 地址。");
+  return { owner: match[1], name: match[2] };
+}
+
+async function listJiraAutomationSkills(config: ControlApiConfig): Promise<string[]> {
+  const file = config.jiraAutomationSettingsFile;
+  if (!file) return [];
+  try {
+    return (await readdir(join(dirname(file), "skills"), { withFileTypes: true }))
+      .filter((entry) => entry.isDirectory() && /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(entry.name))
+      .map((entry) => entry.name).sort();
+  } catch { return []; }
+}
+
+async function handleJiraAutomationSkillUpload(request: Request, config: ControlApiConfig): Promise<Response> {
+  if (!request.headers.get("content-type")?.toLowerCase().startsWith("multipart/form-data")) return jsonResponse({ error: "local skill upload requires multipart/form-data" }, 400);
+  const file = config.jiraAutomationSettingsFile;
+  if (!file) return jsonResponse({ error: "jira automation settings storage is not configured" }, 503);
+  const form = await request.formData();
+  const files = form.getAll("files");
+  const paths = form.getAll("paths");
+  if (files.length === 0 || files.length > MAX_LOCAL_SKILL_FILES || paths.length !== files.length) return jsonResponse({ error: "select one local skill directory" }, 400);
+  const name = localSkillNameFromPaths(paths);
+  const root = join(dirname(file), "skills");
+  const staging = join(root, `.${name}.upload`);
+  await rm(staging, { recursive: true, force: true });
+  await mkdir(staging, { recursive: true, mode: 0o700 });
+  let totalBytes = 0;
+  for (let index = 0; index < files.length; index += 1) {
+    const uploaded = files[index]; const rawPath = paths[index];
+    if (!isUploadedFile(uploaded) || typeof rawPath !== "string") return jsonResponse({ error: "invalid local skill file" }, 400);
+    const relativePath = normalizeLocalSkillPath(rawPath, name);
+    const bytes = Buffer.from(await uploaded.arrayBuffer()); totalBytes += bytes.length;
+    if (totalBytes > MAX_LOCAL_SKILL_BYTES) return jsonResponse({ error: "local skill package exceeds the allowed size" }, 400);
+    const destination = join(staging, relativePath);
+    await mkdir(dirname(destination), { recursive: true, mode: 0o700 });
+    await writeFile(destination, bytes, { mode: isSkillExecutable(relativePath) ? 0o700 : 0o600 });
+  }
+  try { await readFile(join(staging, "SKILL.md"), "utf8"); } catch { return jsonResponse({ error: "selected directory must contain SKILL.md" }, 400); }
+  const destination = join(root, name);
+  await rm(destination, { recursive: true, force: true });
+  await rename(staging, destination);
+  const settings = await readJiraAutomationSettings(config);
+  if (!settings.skills.includes(name)) { settings.skills.push(name); await writeJiraAutomationSettings(config, settings); }
+  return redirectResponse("/automation/jira/settings?saved=1");
+}
+
+function isSkillExecutable(relativePath: string): boolean {
+  return relativePath === "scripts/run.sh" || (relativePath.startsWith("scripts/") && relativePath.endsWith(".sh"));
+}
+
+function normalizeLocalSkillPath(rawPath: string, directoryName: string): string {
+  const normalized = rawPath.trim().replaceAll("\\", "/");
+  const parts = normalized.split("/");
+  if (parts.shift() !== directoryName || parts.length === 0 || parts.some((part) => !part || part === "." || part === "..")) throw new Error("invalid local skill path");
+  return parts.join("/");
+}
+
+async function writeJiraAutomationSettings(config: ControlApiConfig, settings: JiraAutomationSettings): Promise<void> {
+  const file = config.jiraAutomationSettingsFile;
+  if (!file) throw new Error("jira automation settings storage is not configured");
+  await mkdir(dirname(file), { recursive: true, mode: 0o700 });
+  const temporary = `${file}.tmp`;
+  await writeFile(temporary, `${JSON.stringify(settings, null, 2)}\n`, { mode: 0o600 });
+  await rename(temporary, file);
+}
+
+
+async function handleAgentLatticeWorkPage(
+  config: ControlApiConfig,
+  workId: string,
+): Promise<Response> {
+  const encodedWorkId = encodeURIComponent(workId);
+  const [detailResponse, users, agents] = await Promise.all([
+    config.fetch(new Request(`${config.dataServiceUrl}/v1/works/${encodedWorkId}`)),
+    fetchDataServiceJsonArray(config, "/v1/users"),
+    fetchDataServiceJsonArray(config, "/v1/personal-agents"),
+  ]);
+  if (!detailResponse.ok) return cloneJsonResponse(detailResponse);
+  const detail = await detailResponse.json() as Record<string, unknown>;
+  const artifacts = Array.isArray(detail.artifacts)
+    ? detail.artifacts as Array<Record<string, unknown>>
+    : [];
+  const artifactDetails = await Promise.all(artifacts.map(async (artifact) => {
+    const artifactId = String(artifact.artifact_id ?? "");
+    const response = await config.fetch(
+      new Request(`${config.dataServiceUrl}/v1/artifacts/${encodeURIComponent(artifactId)}`),
+    );
+    if (!response.ok) return { artifact, versions: [] };
+    return response.json() as Promise<Record<string, unknown>>;
+  }));
+  return htmlResponse(renderAgentLatticeWorkPage(
+    detail.work as Record<string, unknown>,
+    Array.isArray(detail.stages) ? detail.stages as Array<Record<string, unknown>> : [],
+    Array.isArray(detail.events) ? detail.events as Array<Record<string, unknown>> : [],
+    users,
+    agents,
+    artifactDetails,
+    Array.isArray(detail.queue) ? detail.queue as Array<Record<string, unknown>> : [],
+    Array.isArray(detail.executions) ? detail.executions as Array<Record<string, unknown>> : [],
+    Array.isArray(detail.gates) ? detail.gates as Array<Record<string, unknown>> : [],
+    Array.isArray(detail.gate_results) ? detail.gate_results as Array<Record<string, unknown>> : [],
+    Array.isArray(detail.handoffs) ? detail.handoffs as Array<Record<string, unknown>> : [],
+  ));
+}
+
+async function handleAgentLatticeUserCreate(request: Request, config: ControlApiConfig): Promise<Response> {
+  const form = await readUrlEncodedForm(request);
+  return mutateAgentLatticeFromForm(config, "/v1/users", {
+    actor_id: form.actor_id || "webui",
+    user_id: form.user_id || undefined,
+    wecom_user_id: form.wecom_user_id,
+    display_name: form.display_name,
+  }, "platform_user.create", "platform_user", "user_id", "/agent-lattice");
+}
+
+async function handleAgentLatticeAgentCreate(request: Request, config: ControlApiConfig): Promise<Response> {
+  const form = await readUrlEncodedForm(request);
+  return mutateAgentLatticeFromForm(config, "/v1/personal-agents", {
+    actor_id: form.actor_id || "webui",
+    agent_id: form.agent_id || undefined,
+    name: form.name,
+    runtime: form.runtime || "claude-code",
+  }, "personal_agent.create", "personal_agent", "agent_id", "/agent-lattice");
+}
+
+async function handleAgentLatticeUserAgentBind(request: Request, config: ControlApiConfig): Promise<Response> {
+  const form = await readUrlEncodedForm(request);
+  return mutateAgentLatticeFromForm(config, "/v1/user-agent-bindings", {
+    actor_id: form.actor_id || "webui",
+    user_id: form.user_id,
+    agent_id: form.agent_id,
+    binding_type: "personal",
+  }, "user_agent.bind", "user_agent_binding", "binding_id", "/agent-lattice");
+}
+
+async function handleAgentLatticeAgentBotBind(request: Request, config: ControlApiConfig): Promise<Response> {
+  const form = await readUrlEncodedForm(request);
+  return mutateAgentLatticeFromForm(config, "/v1/agent-bot-bindings", {
+    actor_id: form.actor_id || "webui",
+    agent_id: form.agent_id,
+    bot_id: form.bot_id,
+  }, "agent_bot.bind", "agent_bot_binding", "binding_id", "/agent-lattice");
+}
+
+async function handleAgentLatticeWorkCreate(request: Request, config: ControlApiConfig): Promise<Response> {
+  const form = await readUrlEncodedForm(request);
+  const response = await mutateAgentLattice(config, "/v1/works", {
+    actor_id: form.actor_id || form.created_by_user_id || "webui",
+    title: form.title,
+    description: form.description || undefined,
+    created_by_user_id: form.created_by_user_id,
+    assigned_user_id: form.assigned_user_id || undefined,
+    assigned_agent_id: form.assigned_agent_id || undefined,
+    priority: form.priority || "normal",
+  }, "work.create", "work", "work_id");
+  if (!response.ok) return response;
+  const payload = await response.json() as Record<string, unknown>;
+  return redirectResponse(`/agent-lattice/works/${encodeURIComponent(String(payload.work_id ?? ""))}`);
+}
+
+async function handleAgentLatticeStageCreate(
+  request: Request,
+  config: ControlApiConfig,
+  workId: string,
+): Promise<Response> {
+  const form = await readUrlEncodedForm(request);
+  const response = await mutateAgentLattice(config, `/v1/works/${encodeURIComponent(workId)}/stages`, {
+    actor_id: form.actor_id || "webui",
+    actor_type: "user",
+    name: form.name,
+    intent: form.intent,
+    assigned_user_id: form.assigned_user_id || undefined,
+    assigned_agent_id: form.assigned_agent_id || undefined,
+    status: "pending",
+  }, "work_stage.create", "work_stage", "stage_id");
+  if (!response.ok) return response;
+  const stage = await response.json() as Record<string, unknown>;
+  if (form.auto_start === "true") {
+    const enqueueResponse = await mutateAgentLattice(
+      config,
+      `/v1/work-stages/${encodeURIComponent(String(stage.stage_id ?? ""))}/enqueue`,
+      { actor_id: form.actor_id || "webui" },
+      "execution.enqueue",
+      "work_stage",
+      "stage_id",
+    );
+    if (!enqueueResponse.ok) return enqueueResponse;
+  }
+  return redirectResponse(`/agent-lattice/works/${encodeURIComponent(workId)}`);
+}
+
+async function handleAgentLatticeStageTransition(
+  request: Request,
+  config: ControlApiConfig,
+  stageId: string,
+): Promise<Response> {
+  const form = await readUrlEncodedForm(request);
+  const workId = form.work_id ?? "";
+  return mutateAgentLatticeFromForm(config, `/v1/work-stages/${encodeURIComponent(stageId)}/transitions`, {
+    actor_id: form.actor_id || "webui",
+    actor_type: "user",
+    status: form.status,
+    summary: form.summary || undefined,
+  }, "work_stage.transition", "work_stage", "stage_id", `/agent-lattice/works/${encodeURIComponent(workId)}`);
+}
+
+async function handleAgentLatticeGateCreate(request: Request, config: ControlApiConfig, stageId: string): Promise<Response> {
+  const form = await readUrlEncodedForm(request);
+  const workId = form.work_id ?? "";
+  return mutateAgentLatticeFromForm(config, `/v1/work-stages/${encodeURIComponent(stageId)}/gates`, {
+    actor_id: form.actor_id || "webui", name: form.name, kind: form.kind || "human_review",
+    criteria: form.criteria, reviewer_user_id: form.reviewer_user_id || undefined,
+    reviewer_agent_id: form.reviewer_agent_id || undefined,
+  }, "gate.create", "gate", "gate_id", `/agent-lattice/works/${encodeURIComponent(workId)}`);
+}
+
+async function handleAgentLatticeGateResultCreate(request: Request, config: ControlApiConfig, gateId: string): Promise<Response> {
+  const form = await readUrlEncodedForm(request);
+  const workId = form.work_id ?? "";
+  return mutateAgentLatticeFromForm(config, `/v1/gates/${encodeURIComponent(gateId)}/results`, {
+    artifact_version_id: form.artifact_version_id, outcome: form.outcome, evidence: form.evidence,
+    blocking_rule: form.blocking_rule || undefined, responsible_user_id: form.responsible_user_id || undefined,
+    minimum_changes: form.minimum_changes || undefined, actor_type: "user", actor_id: form.actor_id || "webui",
+  }, "gate.result.create", "gate_result", "gate_result_id", `/agent-lattice/works/${encodeURIComponent(workId)}`);
+}
+
+async function handleAgentLatticeHandoffCreate(request: Request, config: ControlApiConfig, workId: string): Promise<Response> {
+  const form = await readUrlEncodedForm(request);
+  return mutateAgentLatticeFromForm(config, `/v1/works/${encodeURIComponent(workId)}/handoffs`, {
+    source_stage_id: form.source_stage_id, gate_result_id: form.gate_result_id,
+    target_user_id: form.target_user_id, target_agent_id: form.target_agent_id,
+    target_stage_name: form.target_stage_name, target_stage_intent: form.target_stage_intent,
+    acceptance_criteria: form.acceptance_criteria, key_decisions: form.key_decisions || undefined,
+    constraints: form.constraints || undefined, known_risks: form.known_risks || undefined,
+    open_questions: form.open_questions || undefined, expected_output: form.expected_output,
+    created_by_user_id: form.created_by_user_id,
+  }, "work.handoff", "handoff", "handoff_id", `/agent-lattice/works/${encodeURIComponent(workId)}`);
+}
+
+async function handleAgentLatticeArtifactCreate(
+  request: Request,
+  config: ControlApiConfig,
+  stageId: string,
+): Promise<Response> {
+  const form = await readUrlEncodedForm(request);
+  const workId = form.work_id ?? "";
+  const content = form.content?.trim() || undefined;
+  return mutateAgentLatticeFromForm(config, `/v1/work-stages/${encodeURIComponent(stageId)}/artifacts`, {
+    actor_id: form.actor_id || "webui",
+    artifact_type: form.artifact_type,
+    title: form.title,
+    visibility: form.visibility || "work",
+    content_ref: form.content_ref,
+    ...(content ? { content } : {}),
+    mime_type: form.mime_type || "text/markdown",
+    integrity_sha256: content ? sha256(content) : form.integrity_sha256,
+    summary: form.summary,
+    created_by_type: "user",
+    created_by_id: form.actor_id || "webui",
+  }, "artifact.publish", "artifact", "artifact_id", `/agent-lattice/works/${encodeURIComponent(workId)}`);
+}
+
+async function handleAgentLatticeArtifactVersionCreate(
+  request: Request,
+  config: ControlApiConfig,
+  artifactId: string,
+): Promise<Response> {
+  const form = await readUrlEncodedForm(request);
+  const workId = form.work_id ?? "";
+  const content = form.content?.trim() || undefined;
+  return mutateAgentLatticeFromForm(config, `/v1/artifacts/${encodeURIComponent(artifactId)}/versions`, {
+    actor_id: form.actor_id || "webui",
+    content_ref: form.content_ref,
+    ...(content ? { content } : {}),
+    mime_type: form.mime_type || "text/markdown",
+    integrity_sha256: content ? sha256(content) : form.integrity_sha256,
+    summary: form.summary,
+    created_by_type: "user",
+    created_by_id: form.actor_id || "webui",
+  }, "artifact.version.publish", "artifact", "artifact_id", `/agent-lattice/works/${encodeURIComponent(workId)}`);
+}
+
+async function handleAgentLatticeStageEnqueue(
+  request: Request,
+  config: ControlApiConfig,
+  stageId: string,
+): Promise<Response> {
+  const form = await readUrlEncodedForm(request);
+  const workId = form.work_id ?? "";
+  return mutateAgentLatticeFromForm(config, `/v1/work-stages/${encodeURIComponent(stageId)}/enqueue`, {
+    actor_id: form.actor_id || "webui",
+  }, "execution.enqueue", "work_stage", "stage_id", `/agent-lattice/works/${encodeURIComponent(workId)}`);
+}
+
+async function handleAgentLatticeStageCancel(request: Request, config: ControlApiConfig, stageId: string): Promise<Response> {
+  const form = await readUrlEncodedForm(request);
+  const workId = form.work_id ?? "";
+  return mutateAgentLatticeFromForm(config, `/v1/work-stages/${encodeURIComponent(stageId)}/cancel`, {
+    actor_id: form.actor_id || "webui", reason: form.reason || "用户取消了任务",
+  }, "execution.cancel", "work_stage", "stage_id", `/agent-lattice/works/${encodeURIComponent(workId)}`);
+}
+
+async function fetchDataServiceJsonArray(
+  config: ControlApiConfig,
+  pathname: string,
+): Promise<Array<Record<string, unknown>>> {
+  const response = await config.fetch(new Request(`${config.dataServiceUrl}${pathname}`));
+  if (!response.ok) throw new Error(`data service request failed: ${pathname}`);
+  const payload = await response.json();
+  if (!Array.isArray(payload)) throw new Error(`data service returned invalid collection: ${pathname}`);
+  return payload as Array<Record<string, unknown>>;
+}
+
+async function mutateAgentLatticeFromForm(
+  config: ControlApiConfig,
+  pathname: string,
+  body: Record<string, unknown>,
+  action: string,
+  targetType: string,
+  targetIdField: string,
+  redirectTo: string,
+): Promise<Response> {
+  const response = await mutateAgentLattice(config, pathname, body, action, targetType, targetIdField);
+  return response.ok ? redirectResponse(redirectTo) : response;
+}
+
+async function mutateAgentLattice(
+  config: ControlApiConfig,
+  pathname: string,
+  body: Record<string, unknown>,
+  action: string,
+  targetType: string,
+  targetIdField: string,
+): Promise<Response> {
+  return proxyAgentLatticeMutation(
+    new Request(`http://localhost${pathname}`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(body),
+    }),
+    `${config.dataServiceUrl}${pathname}`,
+    config,
+    action,
+    targetType,
+    targetIdField,
+  );
 }
 
 async function handleGetMcpCapabilities(
@@ -1380,6 +2159,28 @@ async function proxyJsonRequest(
   });
 }
 
+async function proxyAgentLatticeMutation(
+  request: Request,
+  url: string,
+  config: ControlApiConfig,
+  action: string,
+  targetType: string,
+  targetIdField: string,
+): Promise<Response> {
+  return proxyJsonRequest(request, url, config, {
+    action,
+    targetType,
+    targetId: (_body, payload) => String(payload[targetIdField] ?? ""),
+    metadata: (body, payload) => ({
+      work_id: payload.work_id ?? body.work_id,
+      stage_id: payload.stage_id ?? body.stage_id,
+      user_id: payload.user_id ?? body.user_id,
+      agent_id: payload.agent_id ?? body.agent_id,
+      status: payload.status ?? body.status,
+    }),
+  });
+}
+
 async function proxyGetRequest(
   url: string,
   config: ControlApiConfig,
@@ -1469,8 +2270,12 @@ function readStringArrayPayload(
 }
 
 function htmlResponse(body: string): Response {
+  return htmlResponseWithStatus(body, 200);
+}
+
+function htmlResponseWithStatus(body: string, status: number): Response {
   return new Response(body, {
-    status: 200,
+    status,
     headers: {
       "content-type": "text/html; charset=utf-8",
       "cache-control": "no-store, max-age=0",
@@ -1743,6 +2548,10 @@ function parseJsonArrayField(raw: string | undefined): unknown[] {
   return Array.isArray(parsed) ? parsed : [];
 }
 
+function sha256(value: string): string {
+  return createHash("sha256").update(value, "utf8").digest("hex");
+}
+
 function escapeHtmlValue(value: unknown): string {
   return String(value ?? "")
     .replace(/&/g, "&amp;")
@@ -1785,7 +2594,7 @@ function pageShell(title: string, body: string): string {
     h1, h2, h3 { margin: 0; }
     .muted { color: #647184; font-size: 13px; }
     .stack { display: grid; gap: 10px; }
-    textarea, input { width: 100%; box-sizing: border-box; border: 1px solid #d9e1ea; border-radius: 8px; padding: 10px 12px; font: inherit; background: #fff; }
+    textarea, input, select { width: 100%; box-sizing: border-box; border: 1px solid #d9e1ea; border-radius: 8px; padding: 10px 12px; font: inherit; background: #fff; }
     textarea { min-height: 180px; resize: vertical; }
     table { width: 100%; border-collapse: collapse; font-size: 14px; }
     th, td { border-bottom: 1px solid #d9e1ea; padding: 10px 8px; text-align: left; vertical-align: top; }
@@ -1793,12 +2602,225 @@ function pageShell(title: string, body: string): string {
     pre { white-space: pre-wrap; word-break: break-word; background: #111827; color: #eef4ff; border-radius: 8px; padding: 12px; }
     .actions { display: flex; gap: 8px; flex-wrap: wrap; }
     .btn { display: inline-flex; align-items: center; min-height: 40px; padding: 0 14px; border-radius: 8px; text-decoration: none; border: 1px solid #d9e1ea; background: #fff; color: #17202e; font-weight: 600; }
+    button.btn { cursor: pointer; }
+    .btn.primary { background: #2257d6; border-color: #2257d6; color: #fff; }
+    .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 16px; }
+    .metric { font-size: 28px; font-weight: 700; }
+    .badge { display: inline-flex; padding: 3px 8px; border-radius: 999px; background: #edf2ff; color: #294ea3; font-size: 12px; font-weight: 700; }
+    .compact textarea { min-height: 92px; }
+    .timeline { border-left: 2px solid #d9e1ea; margin-left: 8px; padding-left: 16px; display: grid; gap: 14px; }
   </style>
 </head>
 <body>
   <main>${body}</main>
 </body>
 </html>`;
+}
+
+function renderJiraAutomationSettingsPage(
+  settings: JiraAutomationSettings,
+  saved: boolean,
+  error?: string,
+  localSkills: string[] = [],
+  successMessage?: string,
+): string {
+  const checked = (value: boolean) => value ? " checked" : "";
+  const selectedSkills = new Set(settings.skills);
+  const runtimeEnvGuide = renderJiraRuntimeEnvGuide(settings.runtime_env);
+  const skillChoices = localSkills.length > 0
+    ? localSkills.map((name) => `<label class="skill-choice"><input type="checkbox" name="skills" value="${escapeHtmlValue(name)}"${selectedSkills.has(name) ? " checked" : ""}><span><strong>${escapeHtmlValue(name)}</strong><small>本地上传到此 Jira Automation Flow 的 Skill</small></span></label>`).join("")
+    : `<div class="notice">尚未添加本地 Skill。请选择一个包含 SKILL.md 的目录上传。</div>`;
+  return `<!doctype html>
+<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Jira 自动化 Flow 设置</title>
+<style>
+:root{--ink:#17202e;--muted:#687588;--line:#dce3ea;--canvas:#f4f7f8;--panel:#fff;--accent:#176b5c;--accent-soft:#e9f6f1;--warn:#976000}*{box-sizing:border-box}body{margin:0;background:var(--canvas);color:var(--ink);font:15px/1.5 Inter,ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif;overflow-x:hidden}.shell{width:min(100% - 32px,1040px);margin:0 auto;padding:28px 0 42px}.top{display:flex;justify-content:space-between;gap:16px;align-items:flex-start;margin-bottom:18px}.crumb{color:var(--accent);text-decoration:none;font-weight:700}.eyebrow{margin:14px 0 4px;color:var(--accent);font-size:12px;font-weight:800;letter-spacing:.08em;text-transform:uppercase}h1{margin:0;font-size:30px;letter-spacing:-.04em}h2{margin:0;font-size:17px}.lead{max-width:690px;margin:9px 0 0;color:var(--muted)}.status{display:inline-flex;align-items:center;gap:7px;flex:none;padding:8px 11px;border:1px solid var(--line);border-radius:999px;background:#fff;font-size:13px;font-weight:750}.dot{width:8px;height:8px;border-radius:999px;background:${settings.enabled ? "#15936a" : "#9aa6b4"}}form{display:grid;gap:16px}.card{background:var(--panel);border:1px solid var(--line);border-radius:16px;padding:20px;box-shadow:0 8px 30px rgba(28,45,66,.045)}.section-head{display:flex;justify-content:space-between;gap:16px;align-items:flex-start;margin-bottom:16px}.section-head p,.hint{margin:5px 0 0;color:var(--muted);font-size:13px}.fields{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}.full{grid-column:1/-1}label{display:grid;gap:7px;color:#3e4a59;font-size:13px;font-weight:700}input,select,textarea{width:100%;min-width:0;border:1px solid #cfd9e2;border-radius:9px;background:#fff;color:var(--ink);font:inherit}input,select{height:42px;padding:0 11px}textarea{min-height:190px;padding:11px;resize:vertical;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:13px;line-height:1.55}input:focus,select:focus,textarea:focus{outline:3px solid rgba(23,107,92,.16);border-color:var(--accent)}.switch{display:flex;gap:10px;align-items:center;min-height:42px;border:1px solid var(--line);border-radius:10px;padding:10px 12px;background:#fbfcfd}.switch input{width:18px;height:18px;accent-color:var(--accent)}.switch strong{display:block}.switch small{display:block;color:var(--muted);font-weight:500}.skill-options{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px}.skill-choice{display:flex;gap:9px;align-items:flex-start;min-width:0;border:1px solid var(--line);border-radius:10px;padding:10px;background:#fbfcfd;color:var(--ink)}.skill-choice input{width:18px;height:18px;min-height:18px;flex:none;accent-color:var(--accent)}.skill-choice strong{display:block;overflow-wrap:anywhere}.skill-choice small{display:block;margin-top:2px;color:var(--muted);font-weight:500;overflow-wrap:anywhere}.upload-row{display:flex;flex-wrap:wrap;gap:10px;align-items:center;margin-top:12px}.upload-row input{min-width:0;max-width:100%;height:auto;padding:7px;background:#fff}.env-guide{margin:12px 0;border:1px solid var(--line);border-radius:10px;overflow:hidden}.env-guide table{width:100%;border-collapse:collapse;font-size:13px}.env-guide th,.env-guide td{padding:8px 10px;border-bottom:1px solid var(--line);text-align:left}.env-guide tr:last-child td{border-bottom:0}.env-guide th{background:#f7faf9;color:var(--muted);font-weight:750}.env-ok{color:#0a7353;font-weight:750}.env-map{color:#976000;font-weight:750}.env-missing{color:#a3382e;font-weight:750}.notice{padding:12px 14px;border-radius:10px;background:#fff8e9;color:#74521a;font-size:13px}.saved{padding:12px 14px;border-radius:10px;background:var(--accent-soft);color:#145846;font-weight:700}.error{padding:12px 14px;border-radius:10px;background:#fff0ed;color:#a3382e;font-weight:700}.actions{display:flex;justify-content:flex-end;gap:10px;align-items:center}.button{min-height:42px;border:0;border-radius:9px;padding:0 16px;background:var(--accent);color:#fff;font:inherit;font-weight:800;cursor:pointer}.button:hover{background:#105247}.secondary{color:var(--ink);background:#fff;border:1px solid var(--line);text-decoration:none;display:inline-flex;align-items:center;padding:0 14px;border-radius:9px;min-height:42px;font-weight:700}@media(max-width:640px){.shell{width:min(100% - 20px,1040px);padding-top:18px}.top{flex-direction:column}h1{font-size:26px}.fields,.skill-options{grid-template-columns:1fr}.card{padding:16px}.section-head{flex-direction:column}.upload-row{align-items:stretch}.upload-row>*{width:100%}.actions{justify-content:stretch}.actions>*{flex:1;text-align:center;justify-content:center}.env-guide{overflow-x:auto}}
+</style></head><body><main class="shell"><div class="top"><div><a class="crumb" href="/">← Bot 控制台</a><p class="eyebrow">Automation Flow</p><h1>Jira 自动化测试</h1><p class="lead">Webhook 触发系统 QA 执行器。它不使用任何用户 Bot、对话上下文或用户环境变量。</p></div><div class="actions"><a class="secondary" href="/automation/jira">任务中心</a><span class="status"><i class="dot"></i>${settings.enabled ? "已启用" : "未启用"}</span></div></div>
+${saved ? `<div class="saved">${escapeHtmlValue(successMessage ?? "设置已保存；新 Jira 事件会使用这份配置。")}</div>` : ""}${error ? `<div class="error">${escapeHtmlValue(error)}</div>` : ""}
+<form method="post" action="/automation/jira/settings"><section class="card"><div class="section-head"><div><h2>执行开关与仓库</h2><p>一次 Jira Run 只允许修改仓库内同名的 Jira 目录。</p></div></div><div class="fields"><label class="full"><span class="switch"><input name="enabled" value="true" type="checkbox"${checked(settings.enabled)}><span><strong>启用 Jira 自动化 Flow</strong><small>关闭时仍接收 Webhook，但不会启动 CLI。</small></span></span></label><label class="full">GitHub 仓库 HTTPS 地址<input name="repository_url" type="url" value="${escapeHtmlValue(settings.repository_url)}" placeholder="https://github.com/org/qa-auto-test.git"></label><label>基线分支<input name="repository_branch" value="${escapeHtmlValue(settings.repository_branch)}" maxlength="128" required></label><label>系统 Runtime<select name="runtime"><option value="claude-code"${settings.runtime === "claude-code" ? " selected" : ""}>Claude Code</option><option value="kiro"${settings.runtime === "kiro" ? " selected" : ""}>Kiro CLI</option></select></label></div></section>
+<section class="card"><div class="section-head"><div><h2>执行 Skills</h2><p>从本机选择 Skill 文件夹上传；上传后勾选本 Flow 本次要注入的项。</p></div></div><div class="skill-options">${skillChoices}</div><div class="upload-row"><input id="jira-flow-skill-files" type="file" webkitdirectory directory multiple><button class="secondary" id="jira-flow-skill-upload" type="button">添加本地 Skill 文件夹</button></div></section>
+<section class="card"><div class="section-head"><div><h2>执行策略</h2><p>自动执行和发布都是管理员对当前 Flow 的预授权；普通 Bot 的人工确认与 GitHub 绑定不受影响。</p></div></div><div class="fields"><label class="full"><span class="switch"><input name="auto_execute" value="true" type="checkbox"${checked(settings.auto_execute)}><span><strong>准入通过后自动创建并执行自动化项目</strong><small>关闭：只生成用例草稿。开启：通过后生成代码、校验环境并运行真实测试。</small></span></span></label><label class="full"><span class="switch"><input name="auto_publish" value="true" type="checkbox"${checked(settings.auto_publish)}><span><strong>完成后提交并 Push 当前 Jira 项目</strong><small>仅提交 <code>${"<JIRA-KEY>"}/</code> 和其中报告；固定推送到 <code>bot/&lt;JIRA-KEY&gt;</code>。</small></span></span></label><label class="full"><span class="switch"><input name="notify_reporter" value="true" type="checkbox"${checked(settings.notify_reporter)}><span><strong>完成后通知 Jira 报告人</strong><small>通知通道会在 Runner 结果落库后执行。</small></span></span></label></div><div class="notice">CLI 无权自行提交或 Push；发布由 Runner 在真实报告存在后执行。Jira 评论、PR 创建仍固定关闭。</div></section>
+<section class="card"><div class="section-head"><div><h2>运行环境（.env）</h2><p>填写一次，Flow 会注入 CLI 进程，并写入每个 Jira 项目的私有 <code>repository/&lt;JIRA-KEY&gt;/.env</code>。</p></div></div>${runtimeEnvGuide}<label>环境变量<textarea name="runtime_env" spellcheck="false" placeholder="EASEMOB_JIRA_USERNAME=your_jira_username&#10;EASEMOB_JIRA_PASSWORD=your_jira_password&#10;NGI_BASE_URL=https://ngi-a1.easemob.com&#10;NGI_APPKEY=easemob-demo#test&#10;NGI_CLIENT_ID=...&#10;NGI_CLIENT_SECRET=...&#10;NGI_FUSION_WS_URL=wss://...">${escapeHtmlValue(settings.runtime_env)}</textarea></label><p class="hint">保留你现有的 <code>NGI_*</code> 命名即可；平台会自动映射为生成测试项目使用的 <code>EASEMOB_*</code> 名称。值不会出现在引导、日志或 Git 提交中。</p></section>
+<section class="card"><div class="section-head"><div><h2>GitHub 凭证与 Webhook</h2><p>Token 用于 GitHub API；Webhook Secret 只校验 GitHub 回调签名，均不注入 LLM。</p></div></div><div class="fields"><label class="full">GITHUB_TOKEN<input name="github_token" value="${escapeHtmlValue(settings.github_token)}" autocomplete="off" spellcheck="false"></label><label class="full">GitHub Webhook 公网地址<input name="github_webhook_url" type="url" value="${escapeHtmlValue(settings.github_webhook_url)}" placeholder="https://agent.example.com/webhooks/github" autocomplete="off" spellcheck="false"></label><label class="full">GITHUB_WEBHOOK_SECRET<input name="github_webhook_secret" type="password" value="${escapeHtmlValue(settings.github_webhook_secret)}" autocomplete="new-password" spellcheck="false"></label></div><p class="hint">先保存设置，再点击“注册/更新 GitHub Webhook”。Token 需有 Webhooks: Read and write 权限。</p></section>
+<div class="actions"><a class="secondary" href="/">取消</a><button class="secondary" type="submit" formaction="/automation/jira/settings/github-webhook" formmethod="post">注册/更新 GitHub Webhook</button><button class="button" type="submit">保存 Flow 设置</button></div></form><script>document.getElementById("jira-flow-skill-upload")?.addEventListener("click",async()=>{const input=document.getElementById("jira-flow-skill-files");if(!(input instanceof HTMLInputElement)||input.files.length===0){alert("请选择包含 SKILL.md 的 Skill 文件夹。");return}const data=new FormData;for(const file of input.files){data.append("files",file,file.name);data.append("paths",file.webkitRelativePath||file.name)}const response=await fetch("/automation/jira/settings/skills/upload",{method:"POST",body:data});if(response.redirected){location.assign(response.url);return}alert(await response.text())});</script></main></body></html>`;
+}
+
+function renderJiraAutomationRunsPage(runs: JiraAutomationRun[]): string {
+  const active = runs.filter((run) => run.status === "running");
+  const recent = runs.slice(0, 20);
+  const cards = active.length > 0 ? active.map(renderJiraAutomationRunCard).join("") : `<div class="empty">当前没有正在执行的 Jira 自动化任务。</div>`;
+  const rows = recent.length > 0 ? recent.map((run) => `<tr><td><a href="/automation/jira/runs/${encodeURIComponent(run.run_id)}"><strong>${escapeHtmlValue(run.jira_key)}</strong></a><small>${escapeHtmlValue(run.title)}</small></td><td>${renderRunBadge(run.status)}</td><td>${escapeHtmlValue(stageLabel(run.current_stage))}</td><td>${formatBeijingTime(run.started_at)}</td><td>${renderRunArtifacts(run)}</td></tr>`).join("") : `<tr><td colspan="5" class="empty">尚未收到 Jira Webhook。</td></tr>`;
+  return jiraAutomationShell("Jira 自动化任务", `<header class="topbar"><div><a class="crumb" href="/">← Bot 控制台</a><h1>Jira 自动化任务</h1><p>查看当前执行、最近结果和自动化产物。</p></div><div class="actions"><a class="button secondary" href="/automation/jira/settings">Flow 设置</a><button class="button" type="button" onclick="location.reload()">刷新</button></div></header><section><div class="section-title"><h2>正在运行</h2><span>${active.length} 个任务</span></div><div class="cards">${cards}</div></section><section class="panel"><div class="section-title"><h2>最近任务</h2><span>保留最近 ${Math.min(runs.length, 100)} 次执行记录</span></div><div class="table-wrap"><table><thead><tr><th>Jira</th><th>状态</th><th>当前/最终阶段</th><th>开始时间</th><th>产物</th></tr></thead><tbody>${rows}</tbody></table></div></section><script>if(${active.length}>0)setTimeout(()=>location.reload(),2000)</script>`);
+}
+
+function renderJiraAutomationRunDetailPage(run: JiraAutomationRun): string {
+  const steps = run.steps.map((step) => `<li><span class="step-dot ${escapeHtmlValue(step.status)}"></span><div><strong>${escapeHtmlValue(stageLabel(step.stage))}</strong><p>${escapeHtmlValue(step.message)}</p><small>${formatBeijingTime(step.created_at)}</small></div></li>`).join("");
+  return jiraAutomationShell(`${run.jira_key} - Jira 自动化任务`, `<header class="topbar"><div><a class="crumb" href="/automation/jira">← Jira 自动化任务</a><h1>${escapeHtmlValue(run.jira_key)}</h1><p>${escapeHtmlValue(run.title)}</p></div>${renderRunBadge(run.status)}</header><section class="panel facts"><div><small>工作目录</small><code>${escapeHtmlValue(run.workspace_id)}</code></div><div><small>分支</small><code>${escapeHtmlValue(run.branch)}</code></div><div><small>Runtime</small><strong>${escapeHtmlValue(run.runtime)}</strong></div><div><small>开始时间</small><strong>${formatBeijingTime(run.started_at)}</strong></div></section><section class="panel"><div class="section-title"><h2>执行时间线</h2><span>${escapeHtmlValue(stageLabel(run.current_stage))}</span></div><ol class="timeline">${steps}</ol></section><section class="panel"><div class="section-title"><h2>产物</h2></div><div class="artifacts">${renderRunArtifacts(run) || `<span class="empty">尚无可访问产物。</span>`}${run.report_path ? `<code>${escapeHtmlValue(run.report_path)}</code>` : ""}</div></section>`);
+}
+
+function renderJiraAutomationRunCard(run: JiraAutomationRun): string {
+  const latest = run.steps.at(-1);
+  return `<article class="run-card"><div class="run-head"><div><a href="/automation/jira/runs/${encodeURIComponent(run.run_id)}"><h3>${escapeHtmlValue(run.jira_key)}</h3></a><p>${escapeHtmlValue(run.title)}</p></div>${renderRunBadge(run.status)}</div><p class="stage">${escapeHtmlValue(stageLabel(run.current_stage))}${latest ? ` · ${escapeHtmlValue(latest.message)}` : ""}</p><div class="run-foot"><span>已运行 ${formatDuration(run.started_at)}</span><a href="/automation/jira/runs/${encodeURIComponent(run.run_id)}">查看详情 →</a></div></article>`;
+}
+
+function renderRunBadge(status: JiraAutomationRun["status"]): string { return `<span class="badge ${status}">${({ running: "执行中", succeeded: "已完成", blocked: "等待补充", failed: "执行失败" } as Record<string, string>)[status]}</span>`; }
+function renderRunArtifacts(run: JiraAutomationRun): string {
+  const links = [run.issue_url ? `<a href="${escapeHtmlValue(run.issue_url)}" target="_blank" rel="noreferrer">GitHub Issue</a>` : "", run.pull_request_url ? `<a href="${escapeHtmlValue(run.pull_request_url)}" target="_blank" rel="noreferrer">Pull Request</a>` : ""].filter(Boolean);
+  return links.join(" · ");
+}
+function stageLabel(stage: string): string { return ({ received: "已接收 Jira 事件", workspace: "准备项目工作目录", cli: "CLI 分析与执行", publish: "提交与发布", waiting_feedback: "等待 GitHub 补充", completed: "已完成", failed: "执行失败" } as Record<string, string>)[stage] ?? stage; }
+function formatDuration(startedAt: string): string { const milliseconds = Date.now() - Date.parse(startedAt); if (!Number.isFinite(milliseconds) || milliseconds < 0) return "刚刚开始"; const minutes = Math.floor(milliseconds / 60_000); return minutes < 1 ? "不足 1 分钟" : `${minutes} 分钟`; }
+function jiraAutomationShell(title: string, content: string): string { return `<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${escapeHtmlValue(title)}</title><style>:root{--ink:#17202e;--muted:#687588;--line:#dce3ea;--canvas:#f4f7f8;--panel:#fff;--accent:#176b5c}*{box-sizing:border-box}body{margin:0;background:var(--canvas);color:var(--ink);font:15px/1.5 Inter,ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif}.shell{width:min(100% - 32px,1040px);margin:auto;padding:28px 0 42px;display:grid;gap:18px}.topbar,.run-head,.section-title,.run-foot{display:flex;justify-content:space-between;gap:16px;align-items:flex-start}.crumb{color:var(--accent);font-weight:750;text-decoration:none}h1{margin:10px 0 3px;font-size:30px;letter-spacing:-.04em}h2,h3{margin:0}h2{font-size:18px}.topbar p,.run-head p,.stage{margin:4px 0 0;color:var(--muted)}.actions{display:flex;gap:8px;flex-wrap:wrap}.button{border:0;border-radius:9px;min-height:40px;padding:0 14px;background:var(--accent);color:#fff;text-decoration:none;font:inherit;font-weight:750;cursor:pointer}.button.secondary{border:1px solid var(--line);background:#fff;color:var(--ink)}.cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(290px,1fr));gap:12px}.run-card,.panel{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:18px}.run-card h3{font-size:18px}.run-card a{color:inherit}.run-foot{margin-top:16px;align-items:center;color:var(--muted);font-size:13px}.run-foot a{color:var(--accent);font-weight:750;text-decoration:none}.badge{display:inline-flex;white-space:nowrap;border-radius:999px;padding:4px 9px;font-size:12px;font-weight:750}.badge.running{background:#e8f0ff;color:#2450a4}.badge.succeeded{background:#e8f7ef;color:#14734b}.badge.blocked{background:#fff5dc;color:#8b5b00}.badge.failed{background:#ffede9;color:#a1372b}.section-title{margin-bottom:12px;align-items:center}.section-title span,small{color:var(--muted);font-size:13px}table{width:100%;border-collapse:collapse}th,td{padding:11px 8px;border-bottom:1px solid var(--line);text-align:left;vertical-align:top}th{color:var(--muted);font-size:12px}td small{display:block;margin-top:2px}.empty{color:var(--muted);padding:16px 0}.facts{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:16px}.facts div{display:grid;gap:4px}.facts code,.artifacts code{overflow-wrap:anywhere}.timeline{display:grid;gap:16px;margin:0;padding:0 0 0 8px;list-style:none;border-left:2px solid var(--line)}.timeline li{display:flex;gap:10px;margin-left:-7px}.timeline p{margin:2px 0;color:var(--muted)}.step-dot{width:12px;height:12px;flex:none;margin-top:5px;border-radius:50%;background:#a2acb9;border:2px solid #fff;box-shadow:0 0 0 1px var(--line)}.step-dot.running{background:#3867df}.step-dot.succeeded{background:#179667}.step-dot.blocked{background:#ce8b11}.step-dot.failed{background:#c7473b}.artifacts{display:flex;gap:12px;flex-wrap:wrap;align-items:center}.artifacts a{color:var(--accent);font-weight:750}@media(max-width:640px){.shell{width:min(100% - 20px,1040px);padding-top:18px}.topbar{flex-direction:column}h1{font-size:26px}.table-wrap table,.table-wrap thead,.table-wrap tbody,.table-wrap tr,.table-wrap th,.table-wrap td{display:block;width:100%}.table-wrap thead{display:none}.table-wrap tr{padding:10px 0;border-bottom:1px solid var(--line)}.table-wrap td{padding:4px 0;border:0}.table-wrap td:nth-child(2)::before{content:"状态：";color:var(--muted)}.table-wrap td:nth-child(3)::before{content:"阶段：";color:var(--muted)}.table-wrap td:nth-child(4)::before{content:"开始：";color:var(--muted)}.table-wrap td:nth-child(5)::before{content:"产物：";color:var(--muted)}.run-head{gap:10px}}</style></head><body><main class="shell">${content}</main></body></html>`; }
+
+function renderJiraRuntimeEnvGuide(runtimeEnv: string): string {
+  const keys = new Set(
+    runtimeEnv.split(/\r?\n/)
+      .map((line) => line.trim().match(/^(?:export\s+)?([A-Z][A-Z0-9_]{0,127})=/)?.[1])
+      .filter((key): key is string => Boolean(key)),
+  );
+  const requirements = [
+    ["EASEMOB_BASE_URL", "NGI_BASE_URL"],
+    ["EASEMOB_APPKEY", "NGI_APPKEY"],
+    ["EASEMOB_CLIENT_ID", "NGI_CLIENT_ID"],
+    ["EASEMOB_CLIENT_SECRET", "NGI_CLIENT_SECRET"],
+    ["EASEMOB_FUSION_WS_URL", "NGI_FUSION_WS_URL"],
+  ] as const;
+  const rows = requirements.map(([target, alias]) => {
+    if (keys.has(target)) return `<tr><td><code>${target}</code></td><td class="env-ok">已配置</td></tr>`;
+    if (keys.has(alias)) return `<tr><td><code>${target}</code></td><td class="env-map">将由 <code>${alias}</code> 自动映射</td></tr>`;
+    return `<tr><td><code>${target}</code></td><td class="env-missing">待配置（可填写 <code>${target}</code> 或 <code>${alias}</code>）</td></tr>`;
+  }).join("");
+  return `<div class="env-guide"><table><thead><tr><th>测试项目需要的变量</th><th>当前 Flow 状态（仅键名）</th></tr></thead><tbody>${rows}</tbody></table></div>`;
+}
+
+interface AgentLatticeWorkbenchView {
+  users: Array<Record<string, unknown>>;
+  agents: Array<Record<string, unknown>>;
+  userAgentBindings: Array<Record<string, unknown>>;
+  agentBotBindings: Array<Record<string, unknown>>;
+  bots: Array<Record<string, unknown>>;
+  works: Array<Record<string, unknown>>;
+}
+
+function renderAgentLatticeWorkbenchPage(view: AgentLatticeWorkbenchView): string {
+  const usersById = new Map(view.users.map((item) => [String(item.user_id), item]));
+  const agentsById = new Map(view.agents.map((item) => [String(item.agent_id), item]));
+  const botsById = new Map(view.bots.map((item) => [String(item.bot_id), item]));
+  const userBindingsByUser = new Map(view.userAgentBindings.map((item) => [String(item.user_id), item]));
+  const botBindingsByAgent = new Map(view.agentBotBindings.map((item) => [String(item.agent_id), item]));
+  const activeWorks = view.works.filter((item) => !["completed", "cancelled"].includes(String(item.status))).length;
+  const userOptions = renderRecordOptions(view.users, "user_id", "display_name", "选择用户");
+  const agentOptions = renderRecordOptions(view.agents, "agent_id", "name", "选择 Personal Agent");
+  const botOptions = renderRecordOptions(view.bots, "bot_id", "name", "选择已有 Bot");
+
+  const relationRows = view.users.map((user) => {
+    const binding = userBindingsByUser.get(String(user.user_id));
+    const agent = binding ? agentsById.get(String(binding.agent_id)) : undefined;
+    const botBinding = agent ? botBindingsByAgent.get(String(agent.agent_id)) : undefined;
+    const bot = botBinding ? botsById.get(String(botBinding.bot_id)) : undefined;
+    return `<tr><td>${escapeHtmlValue(user.display_name)}</td><td><code>${escapeHtmlValue(user.wecom_user_id)}</code></td><td>${escapeHtmlValue(agent?.name ?? "未绑定")}</td><td>${escapeHtmlValue(bot?.name ?? "未绑定")}</td><td><span class="badge">${escapeHtmlValue(user.status)}</span></td></tr>`;
+  }).join("");
+
+  const workRows = view.works.map((work) => {
+    const assignee = usersById.get(String(work.assigned_user_id ?? ""));
+    const agent = agentsById.get(String(work.assigned_agent_id ?? ""));
+    return `<tr><td><a href="/agent-lattice/works/${encodeURIComponent(String(work.work_id))}">${escapeHtmlValue(work.title)}</a></td><td><span class="badge">${escapeHtmlValue(work.status)}</span></td><td>${escapeHtmlValue(work.priority)}</td><td>${escapeHtmlValue(assignee?.display_name ?? "未分配")}</td><td>${escapeHtmlValue(agent?.name ?? "-")}</td><td>${escapeHtmlValue(formatBeijingTime(work.updated_at))}</td></tr>`;
+  }).join("");
+
+  return pageShell("AgentLattice", [
+    `<section class="card stack"><div class="actions"><a class="btn" href="/">Channel 管理</a><a class="btn" href="/automation/jira/settings">Jira 自动化 Flow</a></div><h1>AgentLattice</h1><p class="muted">每位用户拥有一个 Personal Agent；任务按 Work 与 Stage 隔离执行。当前为管理员导入用户的 MVP。</p></section>`,
+    `<section class="grid"><div class="card stack"><span class="muted">用户</span><span class="metric">${view.users.length}</span></div><div class="card stack"><span class="muted">Personal Agents</span><span class="metric">${view.agents.length}</span></div><div class="card stack"><span class="muted">进行中的 Work</span><span class="metric">${activeWorks}</span></div></section>`,
+    `<section class="card stack"><h2>人员与 Agent</h2><div class="muted">按步骤创建并绑定，MVP 强制一位用户对应一个 Personal Agent。</div><div class="grid">`,
+    `<form class="stack" method="post" action="/agent-lattice/users/create"><h3>1. 添加用户</h3><input type="hidden" name="actor_id" value="webui"><label class="stack"><span class="muted">姓名</span><input name="display_name" required maxlength="200"></label><label class="stack"><span class="muted">企业微信 User ID</span><input name="wecom_user_id" required maxlength="128"></label><label class="stack"><span class="muted">平台 User ID（可选）</span><input name="user_id" maxlength="128"></label><button class="btn primary" type="submit">添加用户</button></form>`,
+    `<form class="stack" method="post" action="/agent-lattice/agents/create"><h3>2. 创建 Personal Agent</h3><input type="hidden" name="actor_id" value="webui"><label class="stack"><span class="muted">Agent 名称</span><input name="name" required maxlength="200"></label><label class="stack"><span class="muted">Runtime</span><select name="runtime"><option value="claude-code">Claude Code</option><option value="kiro">Kiro CLI</option></select></label><label class="stack"><span class="muted">Agent ID（可选）</span><input name="agent_id" maxlength="128"></label><button class="btn primary" type="submit">创建 Agent</button></form>`,
+    `<form class="stack" method="post" action="/agent-lattice/bindings/user-agent"><h3>3. 绑定用户与 Agent</h3><input type="hidden" name="actor_id" value="webui"><label class="stack"><span class="muted">用户</span><select name="user_id" required>${userOptions}</select></label><label class="stack"><span class="muted">Personal Agent</span><select name="agent_id" required>${agentOptions}</select></label><button class="btn primary" type="submit">建立一对一绑定</button></form>`,
+    `<form class="stack" method="post" action="/agent-lattice/bindings/agent-bot"><h3>4. 绑定企业微信 Bot</h3><input type="hidden" name="actor_id" value="webui"><label class="stack"><span class="muted">Personal Agent</span><select name="agent_id" required>${agentOptions}</select></label><label class="stack"><span class="muted">已有 Bot</span><select name="bot_id" required>${botOptions}</select></label><button class="btn primary" type="submit">绑定消息入口</button></form>`,
+    `</div></section>`,
+    `<section class="card stack"><h2>关系总览</h2><table><thead><tr><th>用户</th><th>企微 ID</th><th>Personal Agent</th><th>消息 Bot</th><th>状态</th></tr></thead><tbody>${relationRows || `<tr><td colspan="5" class="muted">尚无用户</td></tr>`}</tbody></table></section>`,
+    `<section class="card stack compact"><h2>创建 Work</h2><p class="muted">先创建通用任务，再在详情页拆分独立 Stage。任务不绑定 Jira 类型。</p><form class="stack" method="post" action="/agent-lattice/works/create"><input type="hidden" name="actor_id" value="webui"><div class="grid"><label class="stack"><span class="muted">标题</span><input name="title" required maxlength="500"></label><label class="stack"><span class="muted">创建人</span><select name="created_by_user_id" required>${userOptions}</select></label><label class="stack"><span class="muted">执行用户</span><select name="assigned_user_id">${userOptions}</select></label><label class="stack"><span class="muted">执行 Agent</span><select name="assigned_agent_id">${agentOptions}</select></label><label class="stack"><span class="muted">优先级</span><select name="priority"><option value="normal">普通</option><option value="high">高</option><option value="urgent">紧急</option><option value="low">低</option></select></label></div><label class="stack"><span class="muted">目标与上下文</span><textarea name="description" maxlength="4000"></textarea></label><button class="btn primary" type="submit">创建 Work</button></form></section>`,
+    `<section class="card stack"><h2>我的工作</h2><table><thead><tr><th>Work</th><th>状态</th><th>优先级</th><th>执行人</th><th>Agent</th><th>更新时间</th></tr></thead><tbody>${workRows || `<tr><td colspan="6" class="muted">尚无 Work</td></tr>`}</tbody></table></section>`,
+  ].join(""));
+}
+
+function renderAgentLatticeWorkPage(
+  work: Record<string, unknown>,
+  stages: Array<Record<string, unknown>>,
+  events: Array<Record<string, unknown>>,
+  users: Array<Record<string, unknown>>,
+  agents: Array<Record<string, unknown>>,
+  artifactDetails: Array<Record<string, unknown>>,
+  queueItems: Array<Record<string, unknown>>,
+  executions: Array<Record<string, unknown>>,
+  gates: Array<Record<string, unknown>>,
+  gateResults: Array<Record<string, unknown>>,
+  handoffs: Array<Record<string, unknown>>,
+): string {
+  const workId = String(work.work_id ?? "");
+  const userOptions = renderRecordOptions(users, "user_id", "display_name", "沿用 Work 分配");
+  const agentOptions = renderRecordOptions(agents, "agent_id", "name", "沿用 Work 分配");
+  const stageCards = stages.map((stage) => {
+    const transitionForm = "";
+    const canEnqueue = ["pending", "waiting_user", "revision_required", "failed"].includes(String(stage.status));
+    const enqueueForm = canEnqueue
+      ? `<form method="post" action="/agent-lattice/work-stages/${encodeURIComponent(String(stage.stage_id))}/enqueue"><input type="hidden" name="work_id" value="${escapeHtmlValue(workId)}"><input type="hidden" name="actor_id" value="webui"><button class="btn primary" type="submit">交给 Personal Agent 执行</button></form>`
+      : "";
+    const cancelForm = ["pending", "queued", "running", "waiting_user", "revision_required", "failed"].includes(String(stage.status))
+      ? `<form method="post" action="/agent-lattice/work-stages/${encodeURIComponent(String(stage.stage_id))}/cancel"><input type="hidden" name="work_id" value="${escapeHtmlValue(workId)}"><input type="hidden" name="actor_id" value="webui"><button class="btn" type="submit">取消任务</button></form>` : "";
+    const gateForm = String(stage.status) === "succeeded"
+      ? `<details><summary>创建质量门禁</summary><form class="stack compact" method="post" action="/agent-lattice/work-stages/${encodeURIComponent(String(stage.stage_id))}/gates/create"><input type="hidden" name="work_id" value="${escapeHtmlValue(workId)}"><input type="hidden" name="actor_id" value="webui"><label class="stack"><span class="muted">门禁名称</span><input name="name" required maxlength="200"></label><label class="stack"><span class="muted">门禁类型</span><select name="kind"><option value="human_review">人工评审</option><option value="rule">确定性规则</option></select></label><label class="stack"><span class="muted">通过标准</span><textarea name="criteria" required maxlength="4000"></textarea></label><div class="grid"><label class="stack"><span class="muted">Reviewer 用户（可选）</span><select name="reviewer_user_id">${userOptions}</select></label><label class="stack"><span class="muted">Reviewer Agent（需同时选择对应用户）</span><select name="reviewer_agent_id">${agentOptions}</select></label></div><button class="btn" type="submit">创建 Gate</button></form></details>`
+      : "";
+    const artifactForm = `<details><summary>发布本阶段产物</summary><form class="stack compact" method="post" action="/agent-lattice/work-stages/${encodeURIComponent(String(stage.stage_id))}/artifacts/create"><input type="hidden" name="work_id" value="${escapeHtmlValue(workId)}"><input type="hidden" name="actor_id" value="webui"><div class="grid"><label class="stack"><span class="muted">产物类型</span><input name="artifact_type" placeholder="architecture.hld" required maxlength="128"></label><label class="stack"><span class="muted">标题</span><input name="title" required maxlength="300"></label><label class="stack"><span class="muted">Stage 内相对路径</span><input name="content_ref" placeholder="docs/HLD.md" required maxlength="1000"></label><label class="stack"><span class="muted">MIME</span><input name="mime_type" value="text/markdown" required maxlength="200"></label><label class="stack"><span class="muted">可见范围</span><select name="visibility"><option value="work">整个 Work</option><option value="stage">当前 Stage</option><option value="private">仅创建者</option></select></label><label class="stack"><span class="muted">SHA-256</span><input name="integrity_sha256" pattern="[A-Fa-f0-9]{64}" minlength="64" maxlength="64" required></label></div><label class="stack"><span class="muted">版本摘要</span><textarea name="summary" required maxlength="2000"></textarea></label><button class="btn" type="submit">发布 Artifact v1</button></form></details>`;
+    return `<article class="card stack"><div class="actions"><span class="badge">${escapeHtmlValue(stage.status)}</span><span class="muted">#${escapeHtmlValue(stage.position)}</span></div><h3>${escapeHtmlValue(stage.name)}</h3><p>${escapeHtmlValue(stage.intent)}</p><div class="muted">conversation: <code>${escapeHtmlValue(stage.conversation_id ?? "待创建")}</code></div><div class="muted">workspace: <code>${escapeHtmlValue(stage.workspace_ref ?? "待创建")}</code></div>${enqueueForm}${cancelForm}${transitionForm}${artifactForm}${gateForm}</article>`;
+  }).join("");
+  const artifactCards = artifactDetails.map((detail) => {
+    const artifact = detail.artifact as Record<string, unknown> | undefined;
+    if (!artifact) return "";
+    const versions = Array.isArray(detail.versions)
+      ? detail.versions as Array<Record<string, unknown>>
+      : [];
+    const versionRows = versions.map((version) => `<tr><td>v${escapeHtmlValue(version.version)}</td><td><code>${escapeHtmlValue(version.content_ref)}</code></td><td><code>${escapeHtmlValue(String(version.integrity_sha256 ?? "").slice(0, 12))}…</code></td><td>${escapeHtmlValue(version.summary)}</td><td>${escapeHtmlValue(formatBeijingTime(version.created_at))}</td></tr>`).join("");
+    return `<article class="card stack"><div class="actions"><span class="badge">${escapeHtmlValue(artifact.artifact_type)}</span><span class="badge">${escapeHtmlValue(artifact.visibility)}</span></div><h3>${escapeHtmlValue(artifact.title)}</h3><div class="muted"><code>${escapeHtmlValue(artifact.artifact_id)}</code> · latest v${escapeHtmlValue(artifact.latest_version)}</div><table><thead><tr><th>版本</th><th>内容引用</th><th>SHA-256</th><th>摘要</th><th>时间</th></tr></thead><tbody>${versionRows}</tbody></table><details><summary>发布新版本</summary><form class="stack compact" method="post" action="/agent-lattice/artifacts/${encodeURIComponent(String(artifact.artifact_id))}/versions/create"><input type="hidden" name="work_id" value="${escapeHtmlValue(workId)}"><input type="hidden" name="actor_id" value="webui"><label class="stack"><span class="muted">Stage 内相对路径</span><input name="content_ref" required maxlength="1000"></label><label class="stack"><span class="muted">MIME</span><input name="mime_type" value="text/markdown" required maxlength="200"></label><label class="stack"><span class="muted">SHA-256</span><input name="integrity_sha256" pattern="[A-Fa-f0-9]{64}" minlength="64" maxlength="64" required></label><label class="stack"><span class="muted">版本摘要</span><textarea name="summary" required maxlength="2000"></textarea></label><button class="btn" type="submit">发布下一版本</button></form></details></article>`;
+  }).join("");
+  const eventItems = events.map((event) => `<div><strong>${escapeHtmlValue(event.event_type)}</strong> <span class="muted">${escapeHtmlValue(formatBeijingTime(event.created_at))}</span><div>${escapeHtmlValue(event.summary)}</div><div class="muted">${escapeHtmlValue(event.actor_type)} · ${escapeHtmlValue(event.actor_id ?? "system")}</div></div>`).join("");
+  const queueRows = queueItems.map((item) => `<tr><td><code>${escapeHtmlValue(item.stage_id)}</code></td><td><span class="badge">${escapeHtmlValue(item.status)}</span></td><td>${escapeHtmlValue(item.attempt)}</td><td>${escapeHtmlValue(item.leased_by ?? "-")}</td><td>${escapeHtmlValue(formatBeijingTime(item.updated_at))}</td></tr>`).join("");
+  const executionRows = executions.map((execution) => `<tr><td><code>${escapeHtmlValue(execution.execution_id)}</code></td><td><code>${escapeHtmlValue(execution.stage_id)}</code></td><td><span class="badge">${escapeHtmlValue(execution.status)}</span></td><td>${escapeHtmlValue(execution.attempt)}</td><td>${escapeHtmlValue(execution.output ?? execution.error_message ?? "-")}</td><td>${escapeHtmlValue(formatBeijingTime(execution.updated_at))}</td></tr>`).join("");
+  const gateCards = gates.map((gate) => {
+    const versionOptions = artifactDetails.flatMap((detail) => {
+      const artifact = detail.artifact as Record<string, unknown> | undefined;
+      if (!artifact || String(artifact.stage_id) !== String(gate.stage_id) || artifact.visibility === "private") return [];
+      const versions = Array.isArray(detail.versions) ? detail.versions as Array<Record<string, unknown>> : [];
+      return versions.map((version) => `<option value="${escapeHtmlValue(version.artifact_version_id)}">${escapeHtmlValue(artifact.title)} v${escapeHtmlValue(version.version)} — ${escapeHtmlValue(version.summary)}</option>`);
+    }).join("");
+    const results = gateResults.filter((result) => String(result.gate_id) === String(gate.gate_id));
+    const resultRows = results.map((result) => `<tr><td><span class="badge">${escapeHtmlValue(result.outcome)}</span></td><td>${escapeHtmlValue(result.evidence)}</td><td>${escapeHtmlValue(result.minimum_changes ?? "-")}</td><td>${escapeHtmlValue(formatBeijingTime(result.created_at))}</td></tr>`).join("");
+    return `<article class="card stack"><div class="actions"><span class="badge">${escapeHtmlValue(gate.kind)}</span><code>${escapeHtmlValue(gate.gate_id)}</code></div><h3>${escapeHtmlValue(gate.name)}</h3><p>${escapeHtmlValue(gate.criteria)}</p><table><thead><tr><th>结论</th><th>证据</th><th>最小修改</th><th>时间</th></tr></thead><tbody>${resultRows || `<tr><td colspan="4" class="muted">尚未评审</td></tr>`}</tbody></table><details><summary>提交 Gate Result</summary><form class="stack compact" method="post" action="/agent-lattice/gates/${encodeURIComponent(String(gate.gate_id))}/results/create"><input type="hidden" name="work_id" value="${escapeHtmlValue(workId)}"><input type="hidden" name="actor_id" value="webui"><label class="stack"><span class="muted">评审的确定版本</span><select name="artifact_version_id" required>${versionOptions}</select></label><label class="stack"><span class="muted">结论</span><select name="outcome"><option value="passed">通过</option><option value="revision_required">退回修改</option><option value="human_required">升级人工</option><option value="failed">失败</option></select></label><label class="stack"><span class="muted">证据</span><textarea name="evidence" required maxlength="4000"></textarea></label><div class="grid"><label class="stack"><span class="muted">阻断规则（退回必填）</span><input name="blocking_rule" maxlength="2000"></label><label class="stack"><span class="muted">修改责任人（退回必填）</span><select name="responsible_user_id">${userOptions}</select></label></div><label class="stack"><span class="muted">最小修改要求（退回必填）</span><textarea name="minimum_changes" maxlength="4000"></textarea></label><button class="btn" type="submit">记录门禁结论</button></form></details></article>`;
+  }).join("");
+  const handoffCards = gateResults.filter((result) => result.outcome === "passed" && !handoffs.some((item) => item.gate_result_id === result.gate_result_id)).map((result) => {
+    const source = stages.find((stage) => stage.stage_id === result.stage_id);
+    return `<article class="card stack"><h3>转交：${escapeHtmlValue(source?.name ?? result.stage_id)}</h3><p class="muted">Gate 已通过。明确选择下一负责人后，系统直接创建隔离 Stage 并自动排队，不需要接收方 Accept。</p><form class="stack compact" method="post" action="/agent-lattice/works/${encodeURIComponent(workId)}/handoffs/create"><input type="hidden" name="source_stage_id" value="${escapeHtmlValue(result.stage_id)}"><input type="hidden" name="gate_result_id" value="${escapeHtmlValue(result.gate_result_id)}"><div class="grid"><label class="stack"><span class="muted">下一负责人</span><select name="target_user_id" required>${userOptions}</select></label><label class="stack"><span class="muted">对应 Personal Agent</span><select name="target_agent_id" required>${agentOptions}</select></label><label class="stack"><span class="muted">转交发起人</span><select name="created_by_user_id" required>${userOptions}</select></label><label class="stack"><span class="muted">下一 Stage</span><input name="target_stage_name" required maxlength="200"></label></div><label class="stack"><span class="muted">Stage 目标</span><textarea name="target_stage_intent" required maxlength="4000"></textarea></label><label class="stack"><span class="muted">验收标准</span><textarea name="acceptance_criteria" required maxlength="4000"></textarea></label><div class="grid"><label class="stack"><span class="muted">关键决策</span><textarea name="key_decisions" maxlength="4000"></textarea></label><label class="stack"><span class="muted">必须遵守的约束</span><textarea name="constraints" maxlength="4000"></textarea></label><label class="stack"><span class="muted">已知风险</span><textarea name="known_risks" maxlength="4000"></textarea></label><label class="stack"><span class="muted">未解决问题</span><textarea name="open_questions" maxlength="4000"></textarea></label></div><label class="stack"><span class="muted">预期输出</span><textarea name="expected_output" required maxlength="4000"></textarea></label><button class="btn primary" type="submit">转交并自动执行</button></form></article>`;
+  }).join("");
+  const completedHandoffRows = handoffs.map((item) => `<tr><td><code>${escapeHtmlValue(item.source_stage_id)}</code></td><td><code>${escapeHtmlValue(item.target_stage_id)}</code></td><td>${escapeHtmlValue(item.target_user_id)}</td><td><span class="badge">${escapeHtmlValue(item.status)}</span></td><td>${escapeHtmlValue(formatBeijingTime(item.created_at))}</td></tr>`).join("");
+
+  return pageShell(String(work.title ?? "Work"), [
+    `<section class="card stack"><div class="actions"><a class="btn" href="/agent-lattice">返回我的工作</a></div><div class="actions"><span class="badge">${escapeHtmlValue(work.status)}</span><span class="badge">${escapeHtmlValue(work.priority)}</span></div><h1>${escapeHtmlValue(work.title)}</h1><p>${escapeHtmlValue(work.description ?? "无补充说明")}</p><div class="muted"><code>${escapeHtmlValue(workId)}</code> · 更新于 ${escapeHtmlValue(formatBeijingTime(work.updated_at))}</div></section>`,
+    `<section class="card stack compact"><h2>新增执行 Stage</h2><p class="muted">每个 Stage 自动获得独立 conversation 与 workspace；默认创建后立即进入对应 Personal Agent 的队列。</p><form class="stack" method="post" action="/agent-lattice/works/${encodeURIComponent(workId)}/stages/create"><input type="hidden" name="actor_id" value="webui"><div class="grid"><label class="stack"><span class="muted">阶段名称</span><input name="name" required maxlength="500"></label><label class="stack"><span class="muted">执行用户</span><select name="assigned_user_id">${userOptions}</select></label><label class="stack"><span class="muted">执行 Agent</span><select name="assigned_agent_id">${agentOptions}</select></label></div><label class="stack"><span class="muted">本阶段意图</span><textarea name="intent" required maxlength="4000"></textarea></label><label class="actions"><input type="checkbox" name="auto_start" value="true" checked style="width:auto"><span>创建后自动开始执行</span></label><button class="btn primary" type="submit">创建 Stage</button></form></section>`,
+    `<section class="stack"><h2>Stages</h2>${stageCards || `<div class="card muted">尚未拆分 Stage</div>`}</section>`,
+    `<section class="stack"><h2>Artifacts</h2>${artifactCards || `<div class="card muted">尚未发布 Artifact</div>`}</section>`,
+    `<section class="stack"><h2>Quality Gates</h2>${gateCards || `<div class="card muted">Stage 成功并发布 Artifact 后可创建 Gate</div>`}</section>`,
+    `<section class="stack"><h2>待转交</h2>${handoffCards || `<div class="card muted">没有等待转交的已通过 Gate</div>`}</section>`,
+    `<section class="card stack"><h2>Handoffs</h2><table><thead><tr><th>来源 Stage</th><th>目标 Stage</th><th>接收用户</th><th>状态</th><th>时间</th></tr></thead><tbody>${completedHandoffRows || `<tr><td colspan="5" class="muted">尚无跨阶段转交</td></tr>`}</tbody></table></section>`,
+    `<section class="card stack"><h2>执行队列</h2><p class="muted">同一 Personal Agent 同时最多执行一个 Stage；其他 Work 按入队时间等待。</p><table><thead><tr><th>Stage</th><th>队列状态</th><th>尝试</th><th>Worker</th><th>更新时间</th></tr></thead><tbody>${queueRows || `<tr><td colspan="5" class="muted">尚未入队</td></tr>`}</tbody></table></section>`,
+    `<section class="card stack"><h2>执行结果</h2><table><thead><tr><th>Execution</th><th>Stage</th><th>状态</th><th>尝试</th><th>结果/错误</th><th>更新时间</th></tr></thead><tbody>${executionRows || `<tr><td colspan="6" class="muted">尚无执行记录</td></tr>`}</tbody></table></section>`,
+    `<section class="card stack"><h2>事件时间线</h2><div class="timeline">${eventItems || `<div class="muted">暂无事件</div>`}</div></section>`,
+  ].join(""));
+}
+
+function renderRecordOptions(
+  records: Array<Record<string, unknown>>,
+  valueField: string,
+  labelField: string,
+  emptyLabel: string,
+): string {
+  return [`<option value="">${escapeHtmlValue(emptyLabel)}</option>`, ...records.map((record) => `<option value="${escapeHtmlValue(record[valueField])}">${escapeHtmlValue(record[labelField])} (${escapeHtmlValue(record[valueField])})</option>`)].join("");
 }
 
 function renderRoleDetailPage(
@@ -2426,6 +3448,9 @@ function renderChannelWorkbenchPage(): string {
         <p>企业微信机器人、运行能力与环境配置。</p>
       </div>
       <div class="tools">
+        <a href="/agent-lattice">AgentLattice</a>
+        <a href="/automation/jira">Jira 任务</a>
+        <a href="/automation/jira/settings">Jira 自动化</a>
         <a href="/admin/global-documents">全局配置</a>
         <a href="/admin/roles">角色管理</a>
         <span class="toast" id="toast">等待操作。</span>
@@ -2515,6 +3540,9 @@ function renderChannelWorkbenchPage(): string {
       "search.query",
       "project.publish",
       "jira.project.publish",
+      "handoff.draft.create",
+      "handoff.draft.select_bot",
+      "handoff.draft.confirm_send",
     ];
 
     function setToast(message, isError = false) {

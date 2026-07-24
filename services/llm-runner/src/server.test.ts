@@ -100,6 +100,91 @@ describe("llm-runner server", () => {
     expect(body.run_id).toMatch(/^run_/);
   });
 
+  it("runs a system Flow without looking up or requiring a normal Bot", async () => {
+    const fetch = vi.fn<typeof globalThis.fetch>();
+    const server = createLlmRunnerServer({
+      enabled_runtimes: ["kiro"],
+      kiro: {
+        command: process.execPath,
+        args: ["-e", "process.stdout.write(process.env.EASEMOB_JIRA_USERNAME || 'missing')"],
+        timeout_ms: 1_000,
+      },
+      system_runner_token: "system-token",
+      fetch,
+    });
+
+    const response = await server.fetch(new Request("http://localhost/v1/system-runs", {
+      method: "POST",
+      headers: { authorization: "Bearer system-token" },
+      body: JSON.stringify({
+        flow_id: "jira-automation",
+        run_id: "jira-HIM-22187-abc123",
+        runtime: "kiro",
+        prompt: "create the isolated Jira project",
+        runtime_env: { EASEMOB_JIRA_USERNAME: "jira-service" },
+        auto_execute: true,
+      }),
+    }));
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toMatchObject({
+      runner_session_id: "system:jira-automation:jira-HIM-22187-abc123",
+      output: "jira-service",
+    });
+    expect(fetch).not.toHaveBeenCalled();
+  });
+
+  it("serializes concurrent system runs targeting the same persistent workspace", async () => {
+    const activePath = `/tmp/system-workspace-active-${crypto.randomUUID()}.lock`;
+    const invocationsPath = `/tmp/system-workspace-invocations-${crypto.randomUUID()}.log`;
+    const command = [
+      "const fs = require('node:fs');",
+      "let input = '';",
+      "process.stdin.on('data', chunk => input += chunk);",
+      "process.stdin.on('end', () => {",
+      "  const overlap = fs.existsSync(process.env.ACTIVE_PATH);",
+      "  fs.writeFileSync(process.env.ACTIVE_PATH, 'active');",
+      "  fs.appendFileSync(process.env.INVOCATIONS_PATH, JSON.stringify({ input, overlap }) + '\\n');",
+      "  setTimeout(() => {",
+      "    fs.rmSync(process.env.ACTIVE_PATH, { force: true });",
+      "    process.stdout.write('done');",
+      "  }, 40);",
+      "});",
+    ].join(" ");
+    const server = createLlmRunnerServer({
+      enabled_runtimes: ["kiro"],
+      system_runner_token: "system-token",
+      kiro: {
+        command: process.execPath,
+        args: ["-e", command],
+        timeout_ms: 1_000,
+        env: { ACTIVE_PATH: activePath, INVOCATIONS_PATH: invocationsPath },
+      },
+    });
+    const run = (runId: string) => server.fetch(new Request("http://localhost/v1/system-runs", {
+      method: "POST",
+      headers: { authorization: "Bearer system-token" },
+      body: JSON.stringify({
+        flow_id: "jira-automation",
+        run_id: runId,
+        workspace_id: "jira-HIM-22187",
+        runtime: "kiro",
+        prompt: runId,
+      }),
+    }));
+
+    const responses = await Promise.all([run("jira-HIM-22187-a"), run("jira-HIM-22187-b")]);
+    expect(responses.map((response) => response.status)).toEqual([200, 200]);
+    const invocations = (await fs.readFile(invocationsPath, "utf8"))
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line) as { input: string; overlap: boolean });
+    expect(invocations).toHaveLength(2);
+    expect(invocations.every(({ overlap }) => overlap === false)).toBe(true);
+    await fs.rm(activePath, { force: true });
+    await fs.rm(invocationsPath, { force: true });
+  });
+
   it("forwards a Kiro cancellation only for the matching runtime session", async () => {
     const requests: Request[] = [];
     const server = createLlmRunnerServer({
@@ -1049,6 +1134,73 @@ describe("llm-runner server", () => {
       "/mcp/bots/prd-bot/sessions/conv-completed-report/tools",
     ]);
     expect(JSON.stringify(lines)).not.toContain("mcp_tool_call");
+  });
+
+  it("retries an explicit handoff when the runtime initially declines to use the handoff MCP", async () => {
+    const mcpRequests: Request[] = [];
+    const command = [
+      "let input = '';",
+      "process.stdin.on('data', chunk => input += chunk);",
+      "process.stdin.on('end', () => {",
+      "  if (input.includes('<mcp_tool_result>')) { process.stdout.write('请选择接收 Bot：1. QA Bot'); return; }",
+      "  if (input.includes('HANDOFF_GATE')) {",
+      "    process.stdout.write('<mcp_tool_call>{\\\"tool\\\":\\\"handoff.draft.create\\\",\\\"input\\\":{\\\"recipient_name\\\":\\\"王安琦\\\",\\\"summary\\\":\\\"开始测试 HIM-22187\\\",\\\"jira_links\\\":[\\\"https://j1.private.easemob.com/browse/HIM-22187\\\"]}}</mcp_tool_call>');",
+      "    return;",
+      "  }",
+      "  process.stdout.write('我无法直接给王安琦发消息。');",
+      "});",
+    ].join(" ");
+    const server = createLlmRunnerServer({
+      enabled_runtimes: ["kiro"],
+      kiro: { command: process.execPath, args: ["-e", command], timeout_ms: 1000 },
+      mcp: { service_url: "http://mcp-service:8700", runner_secret: "runner-secret" },
+      fetch: async (input) => {
+        const request = input instanceof Request ? input : new Request(input);
+        mcpRequests.push(request);
+        if (request.url.endsWith("/tools")) {
+          return Response.json({
+            version: 1,
+            directory_refs: [],
+            tools: [{
+              name: "handoff.draft.create",
+              category: "handoff",
+              description: "Create an unsent handoff draft.",
+              input_schema: { type: "object", required: ["recipient_name", "summary"], properties: {} },
+              permissions: { reads: [], writes: [] },
+            }],
+          });
+        }
+        expect(await request.json()).toEqual({
+          tool: "handoff.draft.create",
+          input: {
+            recipient_name: "王安琦",
+            summary: "开始测试 HIM-22187",
+            jira_links: ["https://j1.private.easemob.com/browse/HIM-22187"],
+          },
+        });
+        return Response.json({
+          ok: true,
+          result: { draft_id: "handoff-1", target_bots: [{ bot_id: "qa-bot", name: "QA Bot" }] },
+        });
+      },
+    });
+
+    const response = await server.fetch(new Request("http://localhost/v1/chat", {
+      method: "POST",
+      body: JSON.stringify({
+        bot_id: "prd-bot",
+        user_id: "user-a",
+        conversation_id: "conv-handoff",
+        runtime: "kiro",
+        prompt: "转交给王安琦，让他开始测试 HIM-22187",
+      }),
+    }));
+
+    expect(mcpRequests.map((request) => new URL(request.url).pathname)).toEqual([
+      "/mcp/bots/prd-bot/sessions/conv-handoff/tools",
+      "/mcp/bots/prd-bot/sessions/conv-handoff/tools/call",
+    ]);
+    expect((await response.json() as { output: string }).output).toBe("请选择接收 Bot：1. QA Bot");
   });
 
   it("returns a verified project.publish result directly with its GitHub URL", async () => {
